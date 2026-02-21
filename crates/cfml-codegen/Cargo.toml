@@ -1,0 +1,15 @@
+[package]
+name = "cfml-codegen"
+description = "CFML bytecode code generator"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+cfml-common = { workspace = true }
+cfml-compiler = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }

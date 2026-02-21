@@ -1,0 +1,22 @@
+[package]
+name = "cfml-vm"
+description = "CFML virtual machine"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+cfml-common = { workspace = true }
+cfml-compiler = { workspace = true }
+cfml-codegen = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+parking_lot = { workspace = true }
+
+[features]
+default = ["std"]
+std = []

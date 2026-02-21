@@ -1,0 +1,17 @@
+[package]
+name = "cfml-common"
+description = "Common utilities for RustCFML"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+indexmap = { workspace = true }
+rustc-hash = { workspace = true }
+num-traits = { workspace = true }
+log = { workspace = true }

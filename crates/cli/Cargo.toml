@@ -1,0 +1,25 @@
+[package]
+name = "rustcfml-cli"
+description = "CFML interpreter CLI"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rustcfml"
+path = "src/main.rs"
+
+[dependencies]
+cfml-common = { workspace = true }
+cfml-compiler = { workspace = true }
+cfml-codegen = { workspace = true }
+cfml-vm = { workspace = true }
+cfml-stdlib = { workspace = true, features = ["all-databases"] }
+log = { workspace = true }
+env_logger = "0.11"
+clap = { version = "4.0", features = ["derive"] }
+anyhow = { workspace = true }
+tiny_http = "0.12"

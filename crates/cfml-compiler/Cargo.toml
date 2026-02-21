@@ -1,0 +1,14 @@
+[package]
+name = "cfml-compiler"
+description = "CFML compiler - Parser and AST"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+cfml-common = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }

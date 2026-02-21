@@ -1,0 +1,31 @@
+[package]
+name = "cfml-stdlib"
+description = "CFML standard library"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[features]
+default = ["http", "database"]
+http = ["ureq"]
+database = ["sqlite"]
+sqlite = ["rusqlite"]
+mysql_db = ["dep:mysql"]
+postgres_db = ["dep:postgres"]
+all-databases = ["sqlite", "mysql_db", "postgres_db"]
+
+[dependencies]
+cfml-common = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+chrono = "0.4"
+regex = "1"
+sha2 = "0.10"
+md-5 = "0.10"
+ureq = { version = "2", optional = true }
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+mysql = { version = "25", optional = true }
+postgres = { version = "0.19", optional = true }

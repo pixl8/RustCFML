@@ -1,0 +1,26 @@
+[package]
+name = "rustcfml-wasm"
+description = "CFML interpreter for WebAssembly"
+version = "0.1.0"
+edition = "2021"
+authors = ["RustCFML Team"]
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+cfml-compiler = { path = "../cfml-compiler" }
+cfml-codegen = { path = "../cfml-codegen" }
+cfml-vm = { path = "../cfml-vm" }
+cfml-stdlib = { path = "../cfml-stdlib", default-features = false }
+js-sys = "0.3"
+
+[dependencies.web-sys]
+version = "0.3"
+features = ["console"]
+
+[profile.release]
+opt-level = "s"
+lto = true

@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cfml-common",
+    "crates/cfml-compiler",
+    "crates/cfml-codegen",
+    "crates/cfml-vm",
+    "crates/cfml-stdlib",
+    "crates/cli",
+    "crates/wasm",
+]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["RustCFML Team"]
+edition = "2021"
+rust-version = "1.75.0"
+repository = "https://github.com/pixl8/RustCFML"
+license = "MIT"
+
+[workspace.dependencies]
+cfml-common = { path = "crates/cfml-common", version = "0.1.0" }
+cfml-compiler = { path = "crates/cfml-compiler", version = "0.1.0" }
+cfml-codegen = { path = "crates/cfml-codegen", version = "0.1.0" }
+cfml-vm = { path = "crates/cfml-vm", version = "0.1.0" }
+cfml-stdlib = { path = "crates/cfml-stdlib", version = "0.1.0" }
+
+log = "0.4"
+thiserror = "1.0"
+anyhow = "1.0"
+parking_lot = "0.12"
+indexmap = "2.0"
+num-traits = "0.2"
+rustc-hash = "1.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3

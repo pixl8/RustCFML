@@ -1,0 +1,738 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RustCFML - Interactive Demo</title>
+    <style>
+        :root {
+            --bg: #1a1a2e;
+            --surface: #16213e;
+            --surface2: #0f3460;
+            --accent: #e94560;
+            --accent-hover: #ff6b81;
+            --text: #eee;
+            --text-dim: #8892b0;
+            --border: #233554;
+            --success: #64ffda;
+            --error: #ff5370;
+            --editor-bg: #0d1117;
+            --output-bg: #0d1117;
+            --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        .header {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .header img {
+            width: 48px;
+            height: 48px;
+        }
+
+        .header h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+
+        .header h1 span {
+            color: var(--accent);
+        }
+
+        .header .subtitle {
+            color: var(--text-dim);
+            font-size: 0.85rem;
+            margin-top: 2px;
+        }
+
+        .header .links {
+            margin-left: auto;
+            display: flex;
+            gap: 16px;
+        }
+
+        .header .links a {
+            color: var(--text-dim);
+            text-decoration: none;
+            font-size: 0.85rem;
+            transition: color 0.2s;
+        }
+
+        .header .links a:hover {
+            color: var(--accent);
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        .examples-bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 16px;
+            align-items: center;
+        }
+
+        .examples-bar .label {
+            color: var(--text-dim);
+            font-size: 0.85rem;
+            margin-right: 4px;
+        }
+
+        .example-btn {
+            background: var(--surface);
+            color: var(--text-dim);
+            border: 1px solid var(--border);
+            padding: 6px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            font-family: var(--font-mono);
+            transition: all 0.2s;
+        }
+
+        .example-btn:hover {
+            background: var(--surface2);
+            color: var(--text);
+            border-color: var(--accent);
+        }
+
+        .example-btn.active {
+            background: var(--surface2);
+            color: var(--accent);
+            border-color: var(--accent);
+        }
+
+        .editor-area {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        @media (max-width: 768px) {
+            .editor-area {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .panel {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .panel-header {
+            background: var(--surface2);
+            padding: 8px 16px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--border);
+        }
+
+        #editor {
+            width: 100%;
+            min-height: 400px;
+            background: var(--editor-bg);
+            color: var(--text);
+            border: none;
+            padding: 16px;
+            font-family: var(--font-mono);
+            font-size: 14px;
+            line-height: 1.6;
+            resize: vertical;
+            outline: none;
+            tab-size: 4;
+        }
+
+        #output {
+            min-height: 400px;
+            background: var(--output-bg);
+            padding: 16px;
+            font-family: var(--font-mono);
+            font-size: 14px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            overflow-y: auto;
+            color: var(--success);
+        }
+
+        #output.has-error {
+            color: var(--error);
+        }
+
+        .controls {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .run-btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 10px 28px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.95rem;
+            font-weight: 600;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .run-btn:hover {
+            background: var(--accent-hover);
+            transform: translateY(-1px);
+        }
+
+        .run-btn:active {
+            transform: translateY(0);
+        }
+
+        .run-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .run-btn .key-hint {
+            font-size: 0.75rem;
+            opacity: 0.7;
+            font-weight: 400;
+        }
+
+        .clear-btn {
+            background: transparent;
+            color: var(--text-dim);
+            border: 1px solid var(--border);
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: all 0.2s;
+        }
+
+        .clear-btn:hover {
+            color: var(--text);
+            border-color: var(--text-dim);
+        }
+
+        .status {
+            color: var(--text-dim);
+            font-size: 0.8rem;
+            margin-left: auto;
+        }
+
+        .status.ready { color: var(--success); }
+        .status.loading { color: #ffd93d; }
+        .status.error { color: var(--error); }
+
+        .loading-overlay {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 400px;
+            color: var(--text-dim);
+            font-size: 0.95rem;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--border);
+            border-top: 2px solid var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .footer {
+            text-align: center;
+            padding: 24px;
+            color: var(--text-dim);
+            font-size: 0.8rem;
+        }
+
+        .footer a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .footer a:hover {
+            text-decoration: underline;
+        }
+
+        .timing {
+            font-size: 0.75rem;
+            color: var(--text-dim);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <img src="crab.svg" alt="RustCFML" onerror="this.src='../../crab.svg'; this.onerror=function(){this.style.display='none'}">
+        <div>
+            <h1>Rust<span>CFML</span></h1>
+            <div class="subtitle">A CFML interpreter written in Rust, compiled to WebAssembly</div>
+        </div>
+        <div class="links">
+            <a href="https://github.com/pixl8/RustCFML">GitHub</a>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="examples-bar">
+            <span class="label">Examples:</span>
+            <button class="example-btn active" data-example="hello">hello</button>
+            <button class="example-btn" data-example="variables">variables</button>
+            <button class="example-btn" data-example="arrays">arrays</button>
+            <button class="example-btn" data-example="structs">structs</button>
+            <button class="example-btn" data-example="closures">closures</button>
+            <button class="example-btn" data-example="fibonacci">fibonacci</button>
+            <button class="example-btn" data-example="strings">strings</button>
+            <button class="example-btn" data-example="tags">tags</button>
+            <button class="example-btn" data-example="component">component</button>
+            <button class="example-btn" data-example="fizzbuzz">fizzbuzz</button>
+        </div>
+
+        <div class="editor-area">
+            <div class="panel">
+                <div class="panel-header">
+                    <span>CFML Code</span>
+                    <span class="timing" id="timing"></span>
+                </div>
+                <textarea id="editor" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+            </div>
+            <div class="panel">
+                <div class="panel-header">
+                    <span>Output</span>
+                </div>
+                <div id="output-container">
+                    <div class="loading-overlay" id="loading">
+                        <span><span class="spinner"></span>Loading WASM module...</span>
+                    </div>
+                    <pre id="output" style="display:none"></pre>
+                </div>
+            </div>
+        </div>
+
+        <div class="controls">
+            <button class="run-btn" id="run-btn" disabled>
+                Run <span class="key-hint">(Ctrl+Enter)</span>
+            </button>
+            <button class="clear-btn" id="clear-btn">Clear Output</button>
+            <span class="status loading" id="status">Loading...</span>
+        </div>
+    </div>
+
+    <div class="footer">
+        RustCFML &mdash; A CFML interpreter written in Rust.
+        <a href="https://github.com/pixl8/RustCFML">Source on GitHub</a>
+    </div>
+
+    <script type="module">
+        // --- Examples ---
+        const examples = {
+            hello: `// Hello World in CFML
+writeOutput("Hello, World!");`,
+
+            variables: `// Variables and types
+var name = "RustCFML";
+var version = 1.0;
+var isAwesome = true;
+var items = [10, 20, 30, 40, 50];
+
+writeOutput("Name: " & name & chr(10));
+writeOutput("Version: " & version & chr(10));
+writeOutput("Awesome: " & isAwesome & chr(10));
+writeOutput("Items: " & arrayToList(items) & chr(10));
+writeOutput("Count: " & arrayLen(items));`,
+
+            arrays: `// Array operations with higher-order functions
+var numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+// Map: double each number
+var doubled = numbers.map(function(n) {
+    return n * 2;
+});
+writeOutput("Doubled: " & doubled.toList() & chr(10));
+
+// Filter: keep only evens
+var evens = numbers.filter(function(n) {
+    return n % 2 == 0;
+});
+writeOutput("Evens: " & evens.toList() & chr(10));
+
+// Reduce: sum all numbers
+var total = numbers.reduce(function(acc, n) {
+    return acc + n;
+}, 0);
+writeOutput("Sum: " & total & chr(10));
+
+// Method chaining
+var result = [5, 3, 1, 4, 2]
+    .sort("numeric")
+    .reverse()
+    .toList(" > ");
+writeOutput("Sorted desc: " & result);`,
+
+            structs: `// Structs (case-insensitive key access)
+var person = {
+    name: "Alex",
+    age: 30,
+    city: "Portland"
+};
+
+writeOutput("Name: " & person.name & chr(10));
+writeOutput("Age: " & person.age & chr(10));
+writeOutput("Keys: " & structKeyList(person) & chr(10));
+writeOutput("Count: " & structCount(person) & chr(10));
+writeOutput("Has name? " & structKeyExists(person, "name") & chr(10));
+
+// Iterate struct keys
+for (var key in person) {
+    writeOutput("  " & key & " = " & person[key] & chr(10));
+}
+
+// Struct member functions
+writeOutput("JSON: " & person.toJSON());`,
+
+            closures: `// Closures and arrow functions
+var multiplier = function(factor) {
+    return function(n) {
+        return n * factor;
+    };
+};
+
+var double = multiplier(2);
+var triple = multiplier(3);
+
+writeOutput("double(5) = " & double(5) & chr(10));
+writeOutput("triple(5) = " & triple(5) & chr(10));
+
+// Arrow functions
+var nums = [1, 2, 3, 4, 5];
+var squared = nums.map((n) => n * n);
+writeOutput("Squared: " & squared.toList() & chr(10));
+
+// Array each with closure
+nums.each(function(n, i) {
+    writeOutput("  [" & i & "] = " & n & chr(10));
+});`,
+
+            fibonacci: `// Fibonacci sequence (recursive)
+function fibonacci(n) {
+    if (n <= 1) return n;
+    return fibonacci(n - 1) + fibonacci(n - 2);
+}
+
+writeOutput("Fibonacci sequence:" & chr(10));
+for (var i = 0; i <= 15; i++) {
+    writeOutput("  fib(" & i & ") = " & fibonacci(i) & chr(10));
+}
+
+// Iterative version for comparison
+function fibIterative(n) {
+    if (n <= 1) return n;
+    var a = 0;
+    var b = 1;
+    for (var i = 2; i <= n; i++) {
+        var temp = a + b;
+        a = b;
+        b = temp;
+    }
+    return b;
+}
+
+writeOutput(chr(10) & "fib(20) = " & fibIterative(20));`,
+
+            strings: `// String functions and member methods
+var text = "Hello, World!";
+
+writeOutput("Original: " & text & chr(10));
+writeOutput("Upper: " & text.ucase() & chr(10));
+writeOutput("Lower: " & text.lcase() & chr(10));
+writeOutput("Length: " & text.len() & chr(10));
+writeOutput("Reverse: " & text.reverse() & chr(10));
+writeOutput("Left 5: " & text.left(5) & chr(10));
+writeOutput("Right 6: " & text.right(6) & chr(10));
+writeOutput("Find 'World': pos " & find("World", text) & chr(10));
+writeOutput("Replace: " & replace(text, "World", "CFML") & chr(10));
+
+// String interpolation (double-quoted)
+var name = "RustCFML";
+writeOutput("Interpolated: Hello #name#!" & chr(10));
+writeOutput("Expression: 2 + 2 = #2 + 2#" & chr(10));
+
+// Method chaining
+var result = "  hello world  ".trim().ucase().reverse();
+writeOutput("Chained: " & result & chr(10));
+
+// Regex
+var matches = reMatch("[0-9]+", "abc123def456");
+writeOutput("Regex matches: " & arrayToList(matches, ", "));`,
+
+            tags: `// CFML Tag Syntax (auto-converted to script)
+<cfset greeting = "Hello from CFML Tags!">
+<cfoutput>#greeting#</cfoutput>
+
+<cfset score = 92>
+<cfif score GTE 90>
+    <cfoutput>Grade: A (score: #score#)</cfoutput>
+<cfelseif score GTE 80>
+    <cfoutput>Grade: B</cfoutput>
+<cfelse>
+    <cfoutput>Grade: C or below</cfoutput>
+</cfif>
+
+<cfset fruits = ["Apple", "Banana", "Cherry", "Date"]>
+<cfoutput>Fruits:</cfoutput>
+<cfloop array="#fruits#" index="fruit">
+    <cfoutput>  - #fruit#</cfoutput>
+</cfloop>
+
+<cffunction name="greet" access="public">
+    <cfargument name="who" default="World">
+    <cfreturn "Hello, " & arguments.who & "!">
+</cffunction>
+<cfoutput>#greet("CFML")#</cfoutput>`,
+
+            component: `// Components with constructors
+component Dog {
+    function init(name, breed) {
+        this.name = name;
+        this.breed = breed;
+        this.tricks = [];
+        return this;
+    }
+
+    function learn(trick) {
+        this.tricks.append(trick);
+        return this;
+    }
+
+    function perform() {
+        if (arrayLen(this.tricks) == 0) {
+            return this.name & " doesn't know any tricks yet.";
+        }
+        return this.name & " can: " & arrayToList(this.tricks, ", ");
+    }
+
+    function describe() {
+        return this.name & " is a " & this.breed;
+    }
+}
+
+var rex = new Dog("Rex", "German Shepherd");
+rex.learn("sit").learn("shake").learn("roll over");
+
+writeOutput(rex.describe() & chr(10));
+writeOutput(rex.perform() & chr(10));
+
+var buddy = new Dog("Buddy", "Golden Retriever");
+buddy.learn("fetch");
+writeOutput(buddy.describe() & chr(10));
+writeOutput(buddy.perform());`,
+
+            fizzbuzz: `// FizzBuzz
+function fizzbuzz(n) {
+    var result = "";
+    for (var i = 1; i <= n; i++) {
+        if (i % 15 == 0) {
+            result &= "FizzBuzz";
+        } else if (i % 3 == 0) {
+            result &= "Fizz";
+        } else if (i % 5 == 0) {
+            result &= "Buzz";
+        } else {
+            result &= i;
+        }
+        if (i < n) result &= ", ";
+    }
+    return result;
+}
+
+writeOutput("FizzBuzz 1-30:" & chr(10));
+writeOutput(fizzbuzz(30) & chr(10));
+
+// Count each type
+var fizzCount = 0;
+var buzzCount = 0;
+var fizzbuzzCount = 0;
+var numberCount = 0;
+
+for (var i = 1; i <= 100; i++) {
+    if (i % 15 == 0) fizzbuzzCount++;
+    else if (i % 3 == 0) fizzCount++;
+    else if (i % 5 == 0) buzzCount++;
+    else numberCount++;
+}
+
+writeOutput(chr(10) & "Stats for 1-100:" & chr(10));
+writeOutput("  FizzBuzz: " & fizzbuzzCount & chr(10));
+writeOutput("  Fizz: " & fizzCount & chr(10));
+writeOutput("  Buzz: " & buzzCount & chr(10));
+writeOutput("  Numbers: " & numberCount);`
+        };
+
+        // --- State ---
+        let engine = null;
+        const editor = document.getElementById('editor');
+        const output = document.getElementById('output');
+        const outputContainer = document.getElementById('output-container');
+        const loading = document.getElementById('loading');
+        const runBtn = document.getElementById('run-btn');
+        const clearBtn = document.getElementById('clear-btn');
+        const status = document.getElementById('status');
+        const timing = document.getElementById('timing');
+
+        // --- Load example ---
+        function loadExample(name) {
+            editor.value = examples[name] || '';
+            document.querySelectorAll('.example-btn').forEach(b => b.classList.remove('active'));
+            document.querySelector(`[data-example="${name}"]`)?.classList.add('active');
+        }
+
+        // --- Run code ---
+        function runCode() {
+            if (!engine) return;
+
+            const code = editor.value;
+            if (!code.trim()) {
+                output.textContent = '';
+                output.className = '';
+                return;
+            }
+
+            try {
+                const start = performance.now();
+                const result = engine.execute(code);
+                const elapsed = (performance.now() - start).toFixed(1);
+
+                output.textContent = result || '(no output)';
+                output.className = '';
+                timing.textContent = `${elapsed}ms`;
+            } catch (err) {
+                output.textContent = String(err);
+                output.className = 'has-error';
+                timing.textContent = '';
+            }
+        }
+
+        // --- Event listeners ---
+        document.querySelectorAll('.example-btn').forEach(btn => {
+            btn.addEventListener('click', () => loadExample(btn.dataset.example));
+        });
+
+        runBtn.addEventListener('click', runCode);
+        clearBtn.addEventListener('click', () => {
+            output.textContent = '';
+            output.className = '';
+            timing.textContent = '';
+        });
+
+        editor.addEventListener('keydown', (e) => {
+            // Ctrl+Enter or Cmd+Enter to run
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                runCode();
+            }
+
+            // Tab inserts spaces instead of changing focus
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                const start = editor.selectionStart;
+                const end = editor.selectionEnd;
+                editor.value = editor.value.substring(0, start) + '    ' + editor.value.substring(end);
+                editor.selectionStart = editor.selectionEnd = start + 4;
+            }
+        });
+
+        // --- Load WASM ---
+        async function initWasm() {
+            try {
+                // Try same-directory first (GitHub Pages), then local dev path
+                let module;
+                try {
+                    module = await import('./rustcfml_wasm.js');
+                } catch {
+                    module = await import('../../crates/wasm/pkg/rustcfml_wasm.js');
+                }
+                await module.default();
+                engine = new module.CfmlEngine();
+
+                // Ready
+                loading.style.display = 'none';
+                output.style.display = 'block';
+                runBtn.disabled = false;
+                status.textContent = 'Ready';
+                status.className = 'status ready';
+
+                // Load default example
+                loadExample('hello');
+            } catch (err) {
+                loading.innerHTML = `
+                    <div style="text-align:center; padding: 24px;">
+                        <div style="color: var(--error); margin-bottom: 12px; font-weight: 600;">
+                            Could not load WASM module
+                        </div>
+                        <div style="color: var(--text-dim); font-size: 0.85rem; line-height: 1.8;">
+                            Build the WASM package first:<br>
+                            <code style="background: var(--surface2); padding: 4px 10px; border-radius: 4px;">
+                                wasm-pack build crates/wasm --target web
+                            </code><br><br>
+                            Then serve this directory:<br>
+                            <code style="background: var(--surface2); padding: 4px 10px; border-radius: 4px;">
+                                python3 -m http.server 8080
+                            </code><br><br>
+                            Open: <code style="background: var(--surface2); padding: 4px 10px; border-radius: 4px;">
+                                http://localhost:8080/examples/interactivejs/
+                            </code>
+                        </div>
+                    </div>`;
+                status.textContent = 'WASM not loaded';
+                status.className = 'status error';
+                console.error('WASM load error:', err);
+            }
+        }
+
+        // Load default example text even before WASM loads
+        loadExample('hello');
+        initWasm();
+    </script>
+</body>
+</html>
