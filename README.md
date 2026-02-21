@@ -1,38 +1,34 @@
-# RustCFML
+## RustCFML
 
-<p align="center">
-  <img src="crab.svg" alt="RustCFML Mascot" width="200">
-</p>
+![RustCFML Mascot](crab.svg)
 
 A CFML (ColdFusion Markup Language) Interpreter written in Rust.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)  
+![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)
 
 ## Usage
 
-**[Try RustCFML in your browser](https://pixl8.github.io/RustCFML/demo/)** — interactive demo running on WebAssembly.
-
-RustCFML requires Rust stable (>= 1.75.0). If you don't currently have Rust
-installed you can do so by following the instructions at
+RustCFML requires Rust stable (>= 1.75.0). If you don't currently have Rust  
+installed you can do so by following the instructions at  
 [rustup.rs](https://rustup.rs/).
 
-To check your Rust version, run `rustc --version`. To update,
+To check your Rust version, run `rustc --version`. To update,  
 run `rustup update stable`.
 
 ### Building from Source
 
 Clone the repository and build:
 
-```bash
-git clone https://github.com/pixl8/RustCFML.git
-cd RustCFML
+```plaintext
+git clone https://github.com/rustcfml/rustcfml
+cd rustcfml/RustCFML
 cargo build --release
 ```
 
 ### Running CFML Files
 
-```bash
+```plaintext
 # Run a .cfm file
 cargo run --release -- myapp.cfm
 
@@ -42,34 +38,34 @@ cargo run --release -- MyComponent.cfc
 
 ### Running Inline Code
 
-```bash
+```plaintext
 cargo run -- -c 'writeOutput("Hello, World!");'
 ```
 
-```
+```plaintext
 Hello, World!
 ```
 
 ### Interactive Shell (REPL)
 
-```bash
+```plaintext
 $ cargo run -- -r
 RustCFML REPL v0.1.0
 Type 'exit' or 'quit' to exit
 
-cfml> writeOutput("Hello")
+cfml&gt; writeOutput("Hello")
 Hello
-cfml> var x = 2 + 2
-cfml> writeOutput(x)
+cfml&gt; var x = 2 + 2
+cfml&gt; writeOutput(x)
 4
-cfml> exit
+cfml&gt; exit
 ```
 
 ### Web Server Mode
 
 Serve `.cfm` files over HTTP with built-in CGI, URL, and Form scopes:
 
-```bash
+```plaintext
 # Serve the current directory on port 8500 (default)
 cargo run --release -- --serve
 
@@ -77,7 +73,7 @@ cargo run --release -- --serve
 cargo run --release -- --serve examples/miniapp --port 3000
 ```
 
-```
+```plaintext
 RustCFML server running on http://127.0.0.1:3000
 Document root: /path/to/examples/miniapp
 Press Ctrl+C to stop
@@ -100,7 +96,7 @@ writeOutput(form.username);
 
 ### Installing Globally
 
-```bash
+```plaintext
 cargo install --path crates/cli
 rustcfml examples/01_hello.cfm
 ```
@@ -145,7 +141,7 @@ writeOutput(person.count());                  // 2
 
 // User-defined functions
 function fibonacci(n) {
-    if (n <= 1) return n;
+    if (n &lt;= 1) return n;
     return fibonacci(n - 1) + fibonacci(n - 2);
 }
 writeOutput(fibonacci(10));                   // 55
@@ -154,7 +150,7 @@ writeOutput(fibonacci(10));                   // 55
 var greeting = "Hello #name#!";               // Hello RustCFML!
 writeOutput("2 + 2 = #2 + 2#");              // 2 + 2 = 4
 
-// Elvis operator & null-safe navigation
+// Elvis operator &amp; null-safe navigation
 var config = settings?.database?.host ?: "localhost";
 var fallback = nullValue ?: "default";
 
@@ -185,7 +181,7 @@ component Dog {
         return this;
     }
     function speak() {
-        return this.name & " says Woof!";
+        return this.name &amp; " says Woof!";
     }
 }
 var dog = new Dog("Rex");
@@ -195,24 +191,24 @@ writeOutput(dog.speak());                     // Rex says Woof!
 try {
     throw("Something went wrong");
 } catch (any e) {
-    writeOutput("Caught: " & e);
+    writeOutput("Caught: " &amp; e);
 }
 ```
 
 ### CFML Tags
 
 ```html
-<cfset name = "World">
+<cfset name="World">
 <cfoutput>Hello, #name#!</cfoutput>
 
-<cfset score = 85>
-<cfif score GTE 90>
+<cfset score="85">
+<cfif score="" gte="" 90="">
     <cfoutput>Grade: A</cfoutput>
-<cfelseif score GTE 80>
+<cfelseif score="" gte="" 80="">
     <cfoutput>Grade: B</cfoutput>
 <cfelse>
     <cfoutput>Grade: F</cfoutput>
-</cfif>
+</cfelse></cfelseif></cfif>
 
 <cfloop from="1" to="5" index="i">
     <cfoutput>#i# </cfoutput>
@@ -220,8 +216,8 @@ try {
 
 <cffunction name="greet" access="public">
     <cfargument name="who" default="World">
-    <cfreturn "Hello, " & arguments.who>
-</cffunction>
+    <cfreturn "hello,="" "="" &="" arguments.who="">
+</cfreturn></cfargument></cffunction>
 
 <cfoutput>#greet("CFML")#</cfoutput>
 
@@ -235,7 +231,7 @@ try {
 
 See the [`examples/`](examples/) directory:
 
-```bash
+```plaintext
 cargo run -- examples/01_hello.cfm           # Hello World
 cargo run -- examples/02_variables.cfm        # Variables and arithmetic
 cargo run -- examples/03_conditionals.cfm     # If/else
@@ -250,70 +246,71 @@ cargo run -- examples/08_builtins.cfm         # Built-in functions
 
 ### Implemented
 
-- **Full CFScript parser** with proper operator precedence
-- **CFML Tag preprocessor** — automatic tag-to-script conversion
-- **Stack-based bytecode VM** for execution
-- **200+ built-in functions** across strings, arrays, structs, math, dates, lists, JSON, queries, and type checking
-- **Member functions** — `"hello".ucase()`, `[1,2,3].len()`, `{a:1}.keyList()`
-- **Higher-order functions** — `arrayMap`, `arrayFilter`, `arrayReduce`, `structEach`, etc. with closure support
-- **Method chaining** — `"hello world".ucase().reverse()`
-- **CFML keyword operators** — `GT`, `LT`, `EQ`, `NEQ`, `CONTAINS`, `AND`, `OR`, `NOT`, `MOD`, `EQV`, `IMP`
-- **Control flow** — `for`, `for-in`, `while`, `do/while`, `switch/case`, `break`, `continue`
-- **For-in with structs** — `for (var key in myStruct)` iterates over struct keys
-- **Functions** — user-defined, closures, arrow functions, recursion
-- **Scopes** — `local`, `variables`, `arguments`
-- **Error handling** — `try/catch/finally`, `throw`
-- **Data types** — null, boolean, integer, double, string, array (1-based), struct (case-insensitive), function, query
-- **String interpolation** — `"Hello #name#!"` with expression support in double-quoted strings
-- **Elvis operator** — `value ?: "default"` null coalescing
-- **Null-safe navigation** — `obj?.prop?.nested` returns null instead of erroring
-- **Regex support** — `reFind()`, `reReplace()`, `reMatch()` + case-insensitive variants via `regex` crate
-- **File I/O** — `fileRead()`, `fileWrite()`, `fileExists()`, `directoryList()`, `getFileInfo()`, and more
-- **Hashing** — `hash()` with MD5, SHA-256, SHA-384, SHA-512 support
-- **Include** — `include "file.cfm"` executes in current scope
-- **Components** — `component Name { }` with `init()` constructor, `this` scope, and method calls
-- **CFML tags** — `<cfset>`, `<cfoutput>`, `<cfif>`, `<cfloop>`, `<cffunction>`, `<cfscript>`, `<cftry>`, `<cfthrow>`, `<cfinclude>`, `<cfdump>`, `<cfparam>`, `<cfabort>`, and more
-- **HTTP client** — `cfhttp` tag and function for GET/POST/PUT/DELETE/PATCH requests
-- **Database connectivity** — `queryExecute()` with SQLite, MySQL, and PostgreSQL support
-- **Web server** — `--serve` mode with CGI, URL, and Form scope injection
-- **WASM target** — compile to WebAssembly via `wasm-bindgen`
-- **Debug mode** — inspect tokens, AST, and bytecode with `-d`
+*   **Full CFScript parser** with proper operator precedence
+*   **CFML Tag preprocessor** — automatic tag-to-script conversion
+*   **Stack-based bytecode VM** for execution
+*   **200+ built-in functions** across strings, arrays, structs, math, dates, lists, JSON, queries, and type checking
+*   **Member functions** — `"hello".ucase()`, `[1,2,3].len()`, `{a:1}.keyList()`
+*   **Higher-order functions** — `arrayMap`, `arrayFilter`, `arrayReduce`, `structEach`, etc. with closure support
+*   **Method chaining** — `"hello world".ucase().reverse()`
+*   **CFML keyword operators** — `GT`, `LT`, `EQ`, `NEQ`, `CONTAINS`, `AND`, `OR`, `NOT`, `MOD`, `EQV`, `IMP`
+*   **Control flow** — `for`, `for-in`, `while`, `do/while`, `switch/case`, `break`, `continue`
+*   **For-in with structs** — `for (var key in myStruct)` iterates over struct keys
+*   **Functions** — user-defined, closures, arrow functions, recursion
+*   **Scopes** — `local`, `variables`, `arguments`
+*   **Error handling** — `try/catch/finally`, `throw`
+*   **Data types** — null, boolean, integer, double, string, array (1-based), struct (case-insensitive), function, query
+*   **String interpolation** — `"Hello #name#!"` with expression support in double-quoted strings
+*   **Elvis operator** — `value ?: "default"` null coalescing
+*   **Null-safe navigation** — `obj?.prop?.nested` returns null instead of erroring
+*   **Regex support** — `reFind()`, `reReplace()`, `reMatch()` + case-insensitive variants via `regex` crate
+*   **File I/O** — `fileRead()`, `fileWrite()`, `fileExists()`, `directoryList()`, `getFileInfo()`, and more
+*   **Hashing** — `hash()` with MD5, SHA-256, SHA-384, SHA-512 support
+*   **Include** — `include "file.cfm"` executes in current scope
+*   **Components** — `component Name { }` with `init()` constructor, `this` scope, and method calls
+*   **CFML tags** — `<cfset>`, `<cfoutput>`, `<cfif>`, `<cfloop>`, `<cffunction>`, `<cfscript>`, `<cftry>`, `<cfthrow>`, `<cfinclude>`, `<cfdump>`, `<cfparam>`, `<cfabort>`, and more
+*   **HTTP client** — `cfhttp` tag and function for GET/POST/PUT/DELETE/PATCH requests
+*   **Database connectivity** — `queryExecute()` with SQLite, MySQL, and PostgreSQL support
+*   **Web server** — `--serve` mode with CGI, URL, and Form scope injection
+*   **WASM target** — compile to WebAssembly via `wasm-bindgen`
+*   **Debug mode** — inspect tokens, AST, and bytecode with `-d`
 
 ### Planned / In Progress
 
-- **Component inheritance** — `extends`, `implements`
-- **Proper call stack** — stack frames, stack traces on error
-- **Closure mutation** — closures currently read but cannot write to parent scope
-- **Session/application scopes** — shared state management
-- **Threading** — `cfthread` equivalent
-- **JIT compilation** — compile hot functions to native code
-- **Package manager integration** — install CFML packages
+*   **Online WASM demo** — interactive browser-based playground (WASM crate exists, needs web frontend)
+*   **Component inheritance** — `extends`, `implements`
+*   **Proper call stack** — stack frames, stack traces on error
+*   **Closure mutation** — closures currently read but cannot write to parent scope
+*   **Session/application scopes** — shared state management
+*   **Threading** — `cfthread` equivalent
+*   **JIT compilation** — compile hot functions to native code
+*   **Package manager integration** — install CFML packages
 
 ## Architecture
 
-```
+```plaintext
 CFML Source (.cfm / .cfc)
     |
     v
-Tag Preprocessor ──> CFScript      (tag_parser.rs)
+Tag Preprocessor ──&gt; CFScript      (tag_parser.rs)
     |
     v
-Lexer ──> Tokens                    (lexer.rs)
+Lexer ──&gt; Tokens                    (lexer.rs)
     |
     v
-Parser ──> AST                      (parser.rs, ast.rs)
+Parser ──&gt; AST                      (parser.rs, ast.rs)
     |
     v
-Compiler ──> Bytecode               (compiler.rs)
+Compiler ──&gt; Bytecode               (compiler.rs)
     |
     v
-Virtual Machine ──> Output          (vm/lib.rs)
+Virtual Machine ──&gt; Output          (vm/lib.rs)
     + Built-in Functions            (builtins.rs)
 ```
 
 ### Crate Structure
 
-```
+```plaintext
 RustCFML/
 ├── crates/
 │   ├── cfml-common/     # Shared types: CfmlValue, CfmlError, Position
@@ -333,7 +330,7 @@ RustCFML/
 
 You can use RustCFML as a library to execute CFML from within Rust:
 
-```rust
+```plaintext
 use cfml_codegen::compiler::CfmlCompiler;
 use cfml_compiler::parser::Parser;
 use cfml_stdlib::builtins::{get_builtin_functions, get_builtins};
@@ -342,7 +339,7 @@ use cfml_vm::CfmlVirtualMachine;
 fn main() {
     let source = r#"
         var name = "Rust";
-        writeOutput("Hello from " & name);
+        writeOutput("Hello from " &amp; name);
     "#;
 
     let mut parser = Parser::new(source.to_string());
@@ -369,7 +366,7 @@ fn main() {
 
 RustCFML includes a WASM crate that exposes a `CfmlEngine` to JavaScript via `wasm-bindgen`:
 
-```bash
+```plaintext
 # Install wasm-pack if you haven't
 cargo install wasm-pack
 
@@ -388,59 +385,57 @@ const output = engine.execute('writeOutput("Hello from WASM!");');
 console.log(output); // "Hello from WASM!"
 ```
 
-> **[Try the interactive demo](https://pixl8.github.io/RustCFML/demo/)** — runs entirely
-> in your browser via WebAssembly. The demo is automatically built and deployed
-> via GitHub Actions on every push to `main`.
+\> **Note:** A full interactive web demo is planned but not yet built. The WASM  
+\> bindings are functional and ready to be integrated into a frontend.
 
 ## Testing
 
 Run the built-in CFML test suite (64 assertions across 13 categories):
 
-```bash
+```plaintext
 cargo run -- test_all.cfm
 ```
 
 Run Rust unit tests:
 
-```bash
+```plaintext
 cargo test
 ```
 
 Run with debug output to inspect the full pipeline:
 
-```bash
+```plaintext
 cargo run -- -d -c 'var x = [1,2,3]; writeOutput(x.len());'
 ```
 
-See [TESTING.md](TESTING.md) for the full testing guide, including how to add
+See [TESTING.md](TESTING.md) for the full testing guide, including how to add  
 unit tests, integration tests, and test individual features.
 
 ## Disclaimer
 
-RustCFML is in active development. The interpreter covers a substantial portion
-of the CFML language and can run real CFScript and tag-based CFML code, but it
-is not yet production-ready. Notable gaps include full component inheritance,
+RustCFML is in active development. The interpreter covers a substantial portion  
+of the CFML language and can run real CFScript and tag-based CFML code, but it  
+is not yet production-ready. Notable gaps include full component inheritance,  
 closure mutation, and session/application scopes.
 
 Contributions are welcome!
 
 ## Goals
 
-- Full CFML environment entirely in Rust (not a Java/JVM binding)
-- Support both CFScript and CFML tag syntax
-- Clean, modular architecture following the RustPython model
-- WebAssembly support for running CFML in the browser
-- Embeddable as a library in Rust applications
+*   Full CFML environment entirely in Rust (not a Java/JVM binding)
+*   Support both CFScript and CFML tag syntax
+*   Clean, modular architecture following the RustPython model
+*   WebAssembly support for running CFML in the browser
+*   Embeddable as a library in Rust applications
 
 ## Related Projects
 
-These are the CFML engines and reference implementations that informed this
+These are the CFML engines and reference implementations that informed this  
 project:
 
-- [Lucee](https://github.com/lucee/Lucee) — open-source CFML engine (Java)
-- [BoxLang](https://github.com/ortus-boxlang/BoxLang) — modern CFML+ runtime (Java)
-- [RustPython](https://github.com/RustPython/RustPython) — Python interpreter in Rust (architectural reference)
-- [Adobe ColdFusion](https://www.adobe.com/products/coldfusion-family.html) — the original CFML runtime
+*   [Lucee](https://github.com/lucee/Lucee) — open-source CFML engine (Java)
+*   [BoxLang](https://github.com/ortus-boxlang/BoxLang) — modern CFML+ runtime (Java)
+*   [RustPython](https://github.com/RustPython/RustPython) — Python interpreter in Rust (architectural reference)
 
 ## License
 
