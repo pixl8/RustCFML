@@ -1,7 +1,7 @@
 //! Encoding support
 
 pub mod utf8 {
-    pub fn validate(s: &str) -> bool {
+    pub fn validate(_s: &str) -> bool {
         true
     }
 

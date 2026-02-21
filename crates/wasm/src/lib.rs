@@ -68,10 +68,5 @@ impl CfmlEngine {
 
 #[wasm_bindgen(start)]
 pub fn main() {
-    console_error_panic_hook_set();
-}
-
-fn console_error_panic_hook_set() {
-    #[cfg(feature = "console_error_panic_hook")]
-    console_error_panic_hook::set_once();
+    // Future: add console_error_panic_hook for better wasm error messages
 }

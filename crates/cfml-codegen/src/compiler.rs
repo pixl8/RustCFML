@@ -396,7 +396,7 @@ impl CfmlCompiler {
             // Else-if chains
             let mut end_jumps = vec![jump_end_idx];
 
-            for (i, else_if) in if_stmt.else_if.iter().enumerate() {
+            for (_i, else_if) in if_stmt.else_if.iter().enumerate() {
                 self.compile_expression(&else_if.condition, instructions);
                 let jf_idx = instructions.len();
                 instructions.push(BytecodeOp::JumpIfFalse(0));

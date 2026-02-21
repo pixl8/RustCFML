@@ -91,9 +91,15 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 - [x] `arrayFilter()` / `.filter()` - filter array elements
 - [x] `arrayReduce()` / `.reduce()` - reduce array to value
 - [x] `arrayEach()` / `.each()` - iterate array elements
+- [x] `arraySome()` / `.some()` - true if any element matches
+- [x] `arrayEvery()` / `.every()` - true if all elements match
 - [x] `structMap()` / `.map()` - transform struct values
 - [x] `structFilter()` / `.filter()` - filter struct entries
 - [x] `structEach()` / `.each()` - iterate struct entries
+- [x] `structReduce()` / `.reduce()` - reduce struct to value
+- [x] `structSome()` / `.some()` - true if any entry matches
+- [x] `structEvery()` / `.every()` - true if all entries match
+- [x] `listMap()`, `listFilter()`, `listEach()`, `listReduce()` - list higher-order functions
 
 ### Scopes
 - [x] Local scope (`var x`, `local.x`)
@@ -122,77 +128,89 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 - [x] Hash expression evaluation (`#expr#`) in text regions
 - [x] Automatic tag-to-script conversion
 
-### Standard Library (200+ Built-in Functions)
+### Standard Library (250+ Built-in Functions)
 
-**String Functions (35+)**
+**String Functions (45+)**
 - [x] `len()`, `ucase()`, `lcase()`, `trim()`, `ltrim()`, `rtrim()`
-- [x] `find()`, `findNoCase()`, `findOneOf()`, `mid()`, `left()`, `right()`
-- [x] `replace()`, `replaceNoCase()`, `reverse()`, `repeatString()`
+- [x] `find()`, `findNoCase()`, `findOneOf()` (with start param), `mid()`, `left()`, `right()`
+- [x] `replace()`, `replaceNoCase()` (both support scope="all"), `reverse()`, `repeatString()`
+- [x] `replaceList()`, `replaceListNoCase()` — list-based find/replace
 - [x] `insert()`, `removeChars()`, `spanIncluding()`, `spanExcluding()`
 - [x] `compare()`, `compareNoCase()`, `asc()`, `chr()`
 - [x] `reFind()`, `reFindNoCase()`, `reReplace()`, `reReplaceNoCase()`, `reMatch()`, `reMatchNoCase()` (via `regex` crate)
-- [x] `wrap()`, `stripCr()`, `toBase64()`, `toBinary()`
-- [x] `urlEncodedFormat()`, `urlDecode()`
-- [x] `htmlEditFormat()`, `htmlCodeFormat()`
-- [x] `lJustify()`, `rJustify()`
-- [x] `numberFormat()`, `decimalFormat()`
-- [x] `formatBaseN()`, `inputBaseN()`
+- [x] `wrap()` (with strip param), `stripCr()`, `toBase64()`, `toBinary()` (base64 decode)
+- [x] `urlEncodedFormat()` (%20 for spaces), `urlDecode()` (UTF-8 aware)
+- [x] `htmlEditFormat()`, `htmlCodeFormat()`, `encodeForHTML()` (separate, encodes `'` and `/`)
+- [x] `xmlFormat()`, `paragraphFormat()`
+- [x] `lJustify()`, `rJustify()`, `cJustify()`
+- [x] `numberFormat()` (mask engine: `9`, `0`, `,`, `$`, `()`, `+/-`), `decimalFormat()` (thousands separator)
+- [x] `formatBaseN()` (radix 2-36), `inputBaseN()`
 
-**Array Functions (25+)**
+**Array Functions (35+)**
 - [x] `arrayNew()`, `arrayLen()`, `arrayAppend()`, `arrayPrepend()`
 - [x] `arrayDeleteAt()`, `arrayInsertAt()`, `arraySet()`, `arraySwap()`
 - [x] `arrayContains()`, `arrayContainsNoCase()`
-- [x] `arrayFind()`, `arrayFindNoCase()`
-- [x] `arraySort()`, `arrayReverse()`, `arraySlice()`
-- [x] `arrayToList()`, `arrayMerge()`, `arrayClear()`
+- [x] `arrayFind()`, `arrayFindNoCase()`, `arrayFindAll()`, `arrayFindAllNoCase()`
+- [x] `arraySort()` (sortOrder, textnocase), `arrayReverse()`, `arraySlice()` (negative offset)
+- [x] `arrayToList()`, `arrayMerge()` (leaveIndex param), `arrayClear()`
 - [x] `arrayIsDefined()`, `arrayMin()`, `arrayMax()`, `arrayAvg()`, `arraySum()`
-- [x] `arrayMap()`, `arrayFilter()`, `arrayReduce()`, `arrayEach()`
+- [x] `arrayFirst()`, `arrayLast()`, `arrayIsEmpty()`, `arrayDelete()` (by value)
+- [x] `arrayPop()`, `arrayShift()`
+- [x] `arrayMap()`, `arrayFilter()`, `arrayReduce()`, `arrayEach()`, `arraySome()`, `arrayEvery()`
 
-**Struct Functions (20+)**
-- [x] `structNew()`, `structCount()`, `structKeyExists()`, `structKeyList()`
-- [x] `structKeyArray()`, `structDelete()`, `structInsert()`, `structUpdate()`
-- [x] `structFind()`, `structClear()`, `structCopy()`, `structAppend()`
-- [x] `structIsEmpty()`, `structSort()`
-- [x] `structEach()`, `structMap()`, `structFilter()`
+**Struct Functions (25+)**
+- [x] `structNew()`, `structCount()`, `structKeyExists()` (CI), `structKeyList()`
+- [x] `structKeyArray()`, `structDelete()` (CI), `structInsert()` (allowoverwrite), `structUpdate()`
+- [x] `structFind()` (CI), `structFindKey()` (recursive), `structFindValue()` (recursive)
+- [x] `structClear()`, `structCopy()`, `structAppend()` (overwriteFlag)
+- [x] `structIsEmpty()`, `structSort()` (sortType, sortOrder)
+- [x] `structGet()`, `structValueArray()`, `structEquals()`, `isEmpty()`
+- [x] `structEach()`, `structMap()`, `structFilter()`, `structReduce()`, `structSome()`, `structEvery()`
 
 **Math Functions (25+)**
-- [x] `abs()`, `ceiling()`, `floor()`, `round()`, `int()`, `fix()`
+- [x] `abs()`, `ceiling()`, `floor()`, `round()`, `int()` (uses floor), `fix()`
 - [x] `max()`, `min()`, `sgn()`, `sqr()`
 - [x] `exp()`, `log()`, `log10()`
 - [x] `sin()`, `cos()`, `tan()`, `asin()`, `acos()`, `atan()`
-- [x] `pi()`, `rand()`, `randRange()`, `randomize()`
-- [x] `bitAnd()`, `bitOr()`, `bitXor()`, `bitNot()`, `bitSHLN()`, `bitSHRN()`
+- [x] `pi()`, `rand()`, `randRange()` (returns Int), `randomize()`
+- [x] `bitAnd()`, `bitOr()`, `bitXor()`, `bitNot()` (32-bit), `bitSHLN()`, `bitSHRN()`
 
-**Date/Time Functions (25+)**
-- [x] `now()`, `createDate()`, `createDateTime()`, `createODBCDate()`, `createODBCDateTime()`
+**Date/Time Functions (34)** — fully implemented with chrono, `parse_cfml_date()` central parser
+- [x] `now()`, `createDate()`, `createDateTime()`, `createTime()`
+- [x] `createODBCDate()`, `createODBCDateTime()`, `createODBCTime()`
 - [x] `year()`, `month()`, `day()`, `hour()`, `minute()`, `second()`
 - [x] `dayOfWeek()`, `dayOfYear()`, `daysInMonth()`, `daysInYear()`
-- [x] `quarter()`, `firstDayOfMonth()`, `monthAsString()`, `dayOfWeekAsString()`
-- [x] `dateAdd()`, `dateDiff()`, `dateFormat()`, `timeFormat()`
+- [x] `quarter()`, `firstDayOfMonth()`, `week()`, `isLeapYear()`
+- [x] `monthAsString()`, `monthShortAsString()`, `dayOfWeekAsString()`, `dayOfWeekShortAsString()`
+- [x] `dateAdd()`, `dateDiff()`, `dateFormat()`, `timeFormat()`, `dateTimeFormat()`
+- [x] `parseDateTime()`, `datePart()`, `dateCompare()`
 - [x] `getTickCount()`
 
-**List Functions (23)**
+**List Functions (27+)** — all use `cfml_list_split()` (multi-char delimiters, empty element filtering)
 - [x] `listLen()`, `listFirst()`, `listLast()`, `listRest()`
 - [x] `listGetAt()`, `listSetAt()`, `listDeleteAt()`, `listInsertAt()`
 - [x] `listFind()`, `listFindNoCase()`, `listContains()`, `listContainsNoCase()`
-- [x] `listAppend()`, `listPrepend()`, `listSort()`, `listRemoveDuplicates()`
-- [x] `listToArray()`, `listValueCount()`, `listValueCountNoCase()`
-- [x] `listQualify()`, `listChangeDelims()`, `listEach()`
+- [x] `listAppend()`, `listPrepend()`, `listSort()` (sortType, sortOrder, delimiter), `listRemoveDuplicates()` (ignoreCase)
+- [x] `listToArray()` (includeEmptyValues), `listValueCount()`, `listValueCountNoCase()`
+- [x] `listQualify()`, `listChangeDelims()`, `listCompact()`
+- [x] `listEach()`, `listMap()`, `listFilter()`, `listReduce()` — higher-order (VM-level closure dispatch)
 
 **Type Checking Functions (12)**
-- [x] `isNull()`, `isDefined()`, `isNumeric()`, `isBoolean()`
+- [x] `isNull()`, `isDefined()` (stub — needs VM bytecode), `isNumeric()`, `isBoolean()` (accepts numeric strings)
 - [x] `isDate()`, `isArray()`, `isStruct()`, `isQuery()`
-- [x] `isSimpleValue()`, `isBinary()`, `isValid()`, `isCustomFunction()`
+- [x] `isSimpleValue()` (excludes Null), `isBinary()`, `isValid()` (see Hashing & Validation), `isCustomFunction()`
 
 **Conversion Functions (6)**
-- [x] `toString()`, `toNumeric()`, `toBoolean()`, `val()`
+- [x] `toString()` (handles Binary→String), `toNumeric()` (errors on invalid), `toBoolean()`, `val()` (handles leading `+`)
 - [x] `javacast()`, `parseNumber()`
 
-**JSON Functions (3)**
-- [x] `serializeJSON()`, `deserializeJSON()`, `isJSON()`
+**JSON Functions (3)** — powered by `serde_json`
+- [x] `serializeJSON()` (handles Query as array-of-structs), `deserializeJSON()` (full recursive), `isJSON()`
 
-**Query Functions (4)**
-- [x] `queryNew()`, `queryAddRow()`, `querySetCell()`, `queryAddColumn()`
+**Query Functions (11)**
+- [x] `queryNew()`, `queryAddRow()` (struct/array data), `querySetCell()`, `queryAddColumn()` (array values)
+- [x] `queryGetRow()`, `queryGetCell()`, `queryRecordCount()`, `queryColumnCount()`, `queryColumnList()`
+- [x] `queryDeleteRow()`, `queryDeleteColumn()`
 
 **Utility Functions (7+)**
 - [x] `writeOutput()`, `writeDump()`, `dump()`
@@ -224,11 +242,11 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 - [x] `expandPath()`
 
 ### Hashing & Validation
-- [x] `hash(input, algorithm)` — MD5, SHA-256, SHA-384, SHA-512 (via `md-5` and `sha2` crates)
-- [x] `createUUID()` — UUID v4 generation
-- [x] `isValid(type, value)` — email, url, integer, numeric, date, uuid, regex, creditcard, boolean
+- [x] `hash(input, algorithm)` — MD5, SHA-1, SHA-256, SHA-384, SHA-512 (via `md-5`, `sha1`, and `sha2` crates)
+- [x] `createUUID()` — CFML format (8-4-4-16)
+- [x] `createGUID()` — standard format (8-4-4-4-12)
+- [x] `isValid(type, value)` — email, url, integer, numeric, date, uuid (CFML format), guid, range, regex, creditcard, boolean, zipcode, phone, ssn
 - [x] `encodeForHTML()`, `encodeForURL()`, `encodeForCSS()`, `encodeForJavaScript()`
-- [x] `arrayPop()`, `arrayShift()`
 
 ### Infrastructure
 - [x] CLI with file execution support

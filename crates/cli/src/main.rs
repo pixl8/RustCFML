@@ -131,6 +131,13 @@ fn compile_and_run(
     source_file: Option<String>,
     extra_globals: HashMap<String, CfmlValue>,
 ) -> Result<String, String> {
+    // Strip shebang line if present (e.g. #!/usr/bin/env rustcfml)
+    let source = if source.starts_with("#!") {
+        source.split_once('\n').map_or("", |(_shebang, rest)| rest)
+    } else {
+        source
+    };
+
     // Pre-process: convert CFML tags to script if needed
     let source = if tag_parser::has_cfml_tags(source) {
         let converted = tag_parser::tags_to_script(source);
@@ -323,11 +330,6 @@ fn resolve_file(doc_root: &Path, url_path: &str) -> Option<PathBuf> {
         let candidate = doc_root.join(relative);
         if candidate.is_file() {
             return Some(candidate);
-        }
-        // Try with .cfm extension
-        let with_ext = doc_root.join(format!("{}.cfm", relative));
-        if with_ext.is_file() {
-            return Some(with_ext);
         }
         // Try as directory with index.cfm
         let dir_index = doc_root.join(relative).join("index.cfm");

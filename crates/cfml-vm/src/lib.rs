@@ -17,10 +17,12 @@ pub struct CfmlVirtualMachine {
     /// Source file path (for include resolution)
     pub source_file: Option<String>,
     /// Call stack for tracking execution
+    #[allow(dead_code)]
     call_stack: Vec<CallFrame>,
     /// Try-catch handler stack
     try_stack: Vec<TryHandler>,
     /// Current exception (if any)
+    #[allow(dead_code)]
     current_exception: Option<CfmlValue>,
     /// After a component method executes, holds the modified `this` for write-back
     /// to the caller's object variable. Set by execute_function_with_args.
@@ -28,6 +30,7 @@ pub struct CfmlVirtualMachine {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct CallFrame {
     function_name: String,
     return_ip: usize,
@@ -600,8 +603,8 @@ impl CfmlVirtualMachine {
                                             if func.name != "__main__" {
                                                 self.program.functions.push(func.clone());
                                                 // Update user_functions to point to new index
-                                                if let Some(old_idx) = self.user_functions.get(&func.name).cloned() {
-                                                    let new_idx = base_idx + old_idx;
+                                                if let Some(_old_idx) = self.user_functions.get(&func.name).cloned() {
+                                                    let _new_idx = base_idx + _old_idx;
                                                     // Only update if the old index was in the sub-program range
                                                     self.user_functions.insert(func.name.clone(), self.program.functions.len() - 1);
                                                 }
@@ -926,7 +929,10 @@ impl CfmlVirtualMachine {
             // because they need VM access to invoke closures
             match name_lower.as_str() {
                 "arraymap" | "arrayfilter" | "arrayreduce" | "arrayeach"
-                | "structeach" | "structmap" | "structfilter" => {
+                | "arraysome" | "arrayevery"
+                | "structeach" | "structmap" | "structfilter"
+                | "structreduce" | "structsome" | "structevery"
+                | "listeach" | "listmap" | "listfilter" | "listreduce" => {
                     // Will be handled at the end of this function
                 }
                 _ => {
@@ -1069,6 +1075,148 @@ impl CfmlVirtualMachine {
                         }
                     }
                     return Ok(CfmlValue::Struct(HashMap::new()));
+                }
+                "arraysome" => {
+                    if let (Some(arr_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        if let CfmlValue::Array(arr) = arr_val {
+                            let callback = callback.clone();
+                            for (i, item) in arr.iter().enumerate() {
+                                let cb_args = vec![item.clone(), CfmlValue::Int((i + 1) as i64), arr_val.clone()];
+                                let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                if result.is_true() {
+                                    return Ok(CfmlValue::Bool(true));
+                                }
+                            }
+                            return Ok(CfmlValue::Bool(false));
+                        }
+                    }
+                    return Ok(CfmlValue::Bool(false));
+                }
+                "arrayevery" => {
+                    if let (Some(arr_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        if let CfmlValue::Array(arr) = arr_val {
+                            let callback = callback.clone();
+                            for (i, item) in arr.iter().enumerate() {
+                                let cb_args = vec![item.clone(), CfmlValue::Int((i + 1) as i64), arr_val.clone()];
+                                let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                if !result.is_true() {
+                                    return Ok(CfmlValue::Bool(false));
+                                }
+                            }
+                            return Ok(CfmlValue::Bool(true));
+                        }
+                    }
+                    return Ok(CfmlValue::Bool(true));
+                }
+                "structreduce" => {
+                    if let (Some(struct_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        if let CfmlValue::Struct(s) = struct_val {
+                            let mut acc = args.get(2).cloned().unwrap_or(CfmlValue::Null);
+                            let callback = callback.clone();
+                            for (k, v) in s {
+                                let cb_args = vec![acc.clone(), CfmlValue::String(k.clone()), v.clone(), struct_val.clone()];
+                                acc = self.call_function(&callback, cb_args, parent_locals)?;
+                            }
+                            return Ok(acc);
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "structsome" => {
+                    if let (Some(struct_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        if let CfmlValue::Struct(s) = struct_val {
+                            let callback = callback.clone();
+                            for (k, v) in s {
+                                let cb_args = vec![CfmlValue::String(k.clone()), v.clone(), struct_val.clone()];
+                                let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                if result.is_true() {
+                                    return Ok(CfmlValue::Bool(true));
+                                }
+                            }
+                            return Ok(CfmlValue::Bool(false));
+                        }
+                    }
+                    return Ok(CfmlValue::Bool(false));
+                }
+                "structevery" => {
+                    if let (Some(struct_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        if let CfmlValue::Struct(s) = struct_val {
+                            let callback = callback.clone();
+                            for (k, v) in s {
+                                let cb_args = vec![CfmlValue::String(k.clone()), v.clone(), struct_val.clone()];
+                                let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                if !result.is_true() {
+                                    return Ok(CfmlValue::Bool(false));
+                                }
+                            }
+                            return Ok(CfmlValue::Bool(true));
+                        }
+                    }
+                    return Ok(CfmlValue::Bool(true));
+                }
+                "listeach" => {
+                    if let (Some(list_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        let list = list_val.as_string();
+                        let delimiter = args.get(2).map(|v| v.as_string()).unwrap_or_else(|| ",".to_string());
+                        let callback = callback.clone();
+                        let items: Vec<&str> = list.split(|c: char| delimiter.contains(c)).filter(|s| !s.is_empty()).collect();
+                        for (i, item) in items.iter().enumerate() {
+                            let cb_args = vec![CfmlValue::String(item.to_string()), CfmlValue::Int((i + 1) as i64), list_val.clone()];
+                            self.call_function(&callback, cb_args, parent_locals)?;
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "listmap" => {
+                    if let (Some(list_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        let list = list_val.as_string();
+                        let delimiter = args.get(2).map(|v| v.as_string()).unwrap_or_else(|| ",".to_string());
+                        let first_delim = delimiter.chars().next().unwrap_or(',').to_string();
+                        let callback = callback.clone();
+                        let items: Vec<&str> = list.split(|c: char| delimiter.contains(c)).filter(|s| !s.is_empty()).collect();
+                        let mut result = Vec::new();
+                        for (i, item) in items.iter().enumerate() {
+                            let cb_args = vec![CfmlValue::String(item.to_string()), CfmlValue::Int((i + 1) as i64), list_val.clone()];
+                            let mapped = self.call_function(&callback, cb_args, parent_locals)?;
+                            result.push(mapped.as_string());
+                        }
+                        return Ok(CfmlValue::String(result.join(&first_delim)));
+                    }
+                    return Ok(CfmlValue::String(String::new()));
+                }
+                "listfilter" => {
+                    if let (Some(list_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        let list = list_val.as_string();
+                        let delimiter = args.get(2).map(|v| v.as_string()).unwrap_or_else(|| ",".to_string());
+                        let first_delim = delimiter.chars().next().unwrap_or(',').to_string();
+                        let callback = callback.clone();
+                        let items: Vec<&str> = list.split(|c: char| delimiter.contains(c)).filter(|s| !s.is_empty()).collect();
+                        let mut result = Vec::new();
+                        for (i, item) in items.iter().enumerate() {
+                            let cb_args = vec![CfmlValue::String(item.to_string()), CfmlValue::Int((i + 1) as i64), list_val.clone()];
+                            let keep = self.call_function(&callback, cb_args, parent_locals)?;
+                            if keep.is_true() {
+                                result.push(item.to_string());
+                            }
+                        }
+                        return Ok(CfmlValue::String(result.join(&first_delim)));
+                    }
+                    return Ok(CfmlValue::String(String::new()));
+                }
+                "listreduce" => {
+                    if let (Some(list_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        let list = list_val.as_string();
+                        let mut acc = args.get(2).cloned().unwrap_or(CfmlValue::Null);
+                        let delimiter = args.get(3).map(|v| v.as_string()).unwrap_or_else(|| ",".to_string());
+                        let callback = callback.clone();
+                        let items: Vec<&str> = list.split(|c: char| delimiter.contains(c)).filter(|s| !s.is_empty()).collect();
+                        for (i, item) in items.iter().enumerate() {
+                            let cb_args = vec![acc.clone(), CfmlValue::String(item.to_string()), CfmlValue::Int((i + 1) as i64), list_val.clone()];
+                            acc = self.call_function(&callback, cb_args, parent_locals)?;
+                        }
+                        return Ok(acc);
+                    }
+                    return Ok(CfmlValue::Null);
                 }
                 _ => {}
             }
@@ -1240,6 +1388,28 @@ impl CfmlVirtualMachine {
                     }
                     return Ok(CfmlValue::Null);
                 }
+                "some" => {
+                    if let Some(callback) = extra_args.first().cloned() {
+                        for (i, item) in arr.iter().enumerate() {
+                            let cb_args = vec![item.clone(), CfmlValue::Int((i + 1) as i64), object.clone()];
+                            let result = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if result.is_true() { return Ok(CfmlValue::Bool(true)); }
+                        }
+                        return Ok(CfmlValue::Bool(false));
+                    }
+                    return Ok(CfmlValue::Bool(false));
+                }
+                "every" => {
+                    if let Some(callback) = extra_args.first().cloned() {
+                        for (i, item) in arr.iter().enumerate() {
+                            let cb_args = vec![item.clone(), CfmlValue::Int((i + 1) as i64), object.clone()];
+                            let result = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if !result.is_true() { return Ok(CfmlValue::Bool(false)); }
+                        }
+                        return Ok(CfmlValue::Bool(true));
+                    }
+                    return Ok(CfmlValue::Bool(true));
+                }
                 "first" => {
                     return Ok(arr.first().cloned().unwrap_or(CfmlValue::Null));
                 }
@@ -1317,6 +1487,40 @@ impl CfmlVirtualMachine {
                         return Ok(CfmlValue::Struct(result));
                     }
                     return Ok(object.clone());
+                }
+                "some" => {
+                    if let Some(callback) = extra_args.first().cloned() {
+                        for (k, v) in s {
+                            let cb_args = vec![CfmlValue::String(k.clone()), v.clone(), object.clone()];
+                            let result = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if result.is_true() { return Ok(CfmlValue::Bool(true)); }
+                        }
+                        return Ok(CfmlValue::Bool(false));
+                    }
+                    return Ok(CfmlValue::Bool(false));
+                }
+                "every" => {
+                    if let Some(callback) = extra_args.first().cloned() {
+                        for (k, v) in s {
+                            let cb_args = vec![CfmlValue::String(k.clone()), v.clone(), object.clone()];
+                            let result = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if !result.is_true() { return Ok(CfmlValue::Bool(false)); }
+                        }
+                        return Ok(CfmlValue::Bool(true));
+                    }
+                    return Ok(CfmlValue::Bool(true));
+                }
+                "reduce" => {
+                    if extra_args.len() >= 1 {
+                        let callback = extra_args[0].clone();
+                        let mut acc = if extra_args.len() >= 2 { extra_args[1].clone() } else { CfmlValue::Null };
+                        for (k, v) in s {
+                            let cb_args = vec![acc.clone(), CfmlValue::String(k.clone()), v.clone(), object.clone()];
+                            acc = self.call_function(&callback, cb_args, &HashMap::new())?;
+                        }
+                        return Ok(acc);
+                    }
+                    return Ok(CfmlValue::Null);
                 }
                 "tojson" | "serializejson" => Some("serializeJSON"),
                 _ => None,

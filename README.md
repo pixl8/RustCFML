@@ -9,6 +9,8 @@ A CFML (ColdFusion Markup Language) Interpreter written in Rust.
 
 ## Usage
 
+**[Try RustCFML in your browser](https://pixl8.github.io/RustCFML/demo/)** — interactive demo running on WebAssembly.
+
 RustCFML requires Rust stable (>= 1.75.0). If you don't currently have Rust  
 installed you can do so by following the instructions at  
 [rustup.rs](https://rustup.rs/).
@@ -79,7 +81,7 @@ Document root: /path/to/examples/miniapp
 Press Ctrl+C to stop
 ```
 
-The server maps URL paths to `.cfm` files in the document root (`/` → `index.cfm`, `/about` → `about.cfm`), serves static assets (CSS, JS, images), and injects CFML web scopes so pages can read request data:
+The server serves `.cfm` files and static assets from the document root. URLs must include the full file path (e.g. `/about.cfm`, not `/about`). Directory requests serve `index.cfm` if present (`/` → `index.cfm`, `/admin/` → `admin/index.cfm`). CFML web scopes are injected so pages can read request data:
 
 ```javascript
 // URL params: /?name=World
@@ -99,6 +101,22 @@ writeOutput(form.username);
 ```plaintext
 cargo install --path crates/cli
 rustcfml examples/01_hello.cfm
+```
+
+### Shell Scripts (Shebang Support)
+
+RustCFML scripts can be executed directly as shell scripts using a shebang line. The file extension does not matter.
+
+```bash
+#!/usr/bin/env rustcfml
+writeOutput("Hello from a shell script!" & chr(10));
+var x = 2 + 2;
+writeOutput("2 + 2 = " & x & chr(10));
+```
+
+```plaintext
+chmod +x myscript.cfm
+./myscript.cfm
 ```
 
 ## Examples
@@ -249,9 +267,9 @@ cargo run -- examples/08_builtins.cfm         # Built-in functions
 *   **Full CFScript parser** with proper operator precedence
 *   **CFML Tag preprocessor** — automatic tag-to-script conversion
 *   **Stack-based bytecode VM** for execution
-*   **200+ built-in functions** across strings, arrays, structs, math, dates, lists, JSON, queries, and type checking
+*   **250+ built-in functions** across strings, arrays, structs, math, dates, lists, JSON, queries, and type checking
 *   **Member functions** — `"hello".ucase()`, `[1,2,3].len()`, `{a:1}.keyList()`
-*   **Higher-order functions** — `arrayMap`, `arrayFilter`, `arrayReduce`, `structEach`, etc. with closure support
+*   **Higher-order functions** — `arrayMap`, `arrayFilter`, `arrayReduce`, `arraySome`, `arrayEvery`, `structEach`, `structReduce`, `listMap`, `listFilter`, etc. with closure support
 *   **Method chaining** — `"hello world".ucase().reverse()`
 *   **CFML keyword operators** — `GT`, `LT`, `EQ`, `NEQ`, `CONTAINS`, `AND`, `OR`, `NOT`, `MOD`, `EQV`, `IMP`
 *   **Control flow** — `for`, `for-in`, `while`, `do/while`, `switch/case`, `break`, `continue`
@@ -265,7 +283,7 @@ cargo run -- examples/08_builtins.cfm         # Built-in functions
 *   **Null-safe navigation** — `obj?.prop?.nested` returns null instead of erroring
 *   **Regex support** — `reFind()`, `reReplace()`, `reMatch()` + case-insensitive variants via `regex` crate
 *   **File I/O** — `fileRead()`, `fileWrite()`, `fileExists()`, `directoryList()`, `getFileInfo()`, and more
-*   **Hashing** — `hash()` with MD5, SHA-256, SHA-384, SHA-512 support
+*   **Hashing** — `hash()` with MD5, SHA-1, SHA-256, SHA-384, SHA-512 support
 *   **Include** — `include "file.cfm"` executes in current scope
 *   **Components** — `component Name { }` with `init()` constructor, `this` scope, and method calls
 *   **CFML tags** — `<cfset>`, `<cfoutput>`, `<cfif>`, `<cfloop>`, `<cffunction>`, `<cfscript>`, `<cftry>`, `<cfthrow>`, `<cfinclude>`, `<cfdump>`, `<cfparam>`, `<cfabort>`, and more
@@ -317,7 +335,7 @@ RustCFML/
 │   ├── cfml-compiler/   # Lexer, Parser, AST, Tag Preprocessor
 │   ├── cfml-codegen/    # Bytecode compiler (AST → BytecodeOp)
 │   ├── cfml-vm/         # Stack-based bytecode execution engine
-│   ├── cfml-stdlib/     # 200+ built-in functions
+│   ├── cfml-stdlib/     # 250+ built-in functions
 │   ├── cli/             # Command-line interface (rustcfml binary)
 │   └── wasm/            # WebAssembly target via wasm-bindgen
 ├── examples/            # Example .cfm files
@@ -385,8 +403,9 @@ const output = engine.execute('writeOutput("Hello from WASM!");');
 console.log(output); // "Hello from WASM!"
 ```
 
-\> **Note:** A full interactive web demo is planned but not yet built. The WASM  
-\> bindings are functional and ready to be integrated into a frontend.
+> **[Try the interactive demo](https://pixl8.github.io/RustCFML/demo/)** — runs entirely
+> in your browser via WebAssembly. The demo is automatically built and deployed
+> via GitHub Actions on every push to `main`.
 
 ## Testing
 
@@ -410,6 +429,19 @@ cargo run -- -d -c 'var x = [1,2,3]; writeOutput(x.len());'
 
 See [TESTING.md](TESTING.md) for the full testing guide, including how to add  
 unit tests, integration tests, and test individual features.
+
+## Performance
+
+Benchmarked serving a simple "Hello World" `.cfm` page using Apache Bench (`ab -n 100 -c 1`). Each server was warmed up before measuring. Memory is peak RSS from `ps`.
+
+| Metric | RustCFML | Lucee 7.0.1 | BoxLang 1.10 |
+|---|---|---|---|
+| **Memory (RSS)** | **~8 MB** | ~350 MB | ~305 MB |
+| **Requests/sec** | **1,949 req/s** | 635 req/s | 293 req/s |
+| **Avg response time** | **0.5 ms** | 1.6 ms | 3.4 ms |
+| **Startup** | instant | ~15s | ~15s |
+
+RustCFML compiles to a native binary with no runtime VM overhead, resulting in significantly lower memory usage and faster response times compared to JVM-based CFML engines.
 
 ## Disclaimer
 

@@ -18,6 +18,8 @@ use cfml_common::dynamic::{CfmlAccess, CfmlClosureBody, CfmlFunction, CfmlQuery,
 use cfml_common::vm::{CfmlError, CfmlResult};
 use std::collections::HashMap;
 use regex::Regex;
+use serde_json;
+use chrono::{NaiveDateTime, NaiveDate, NaiveTime, Datelike, Timelike};
 
 pub type BuiltinFunction = fn(Vec<CfmlValue>) -> CfmlResult;
 
@@ -78,13 +80,18 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("urlDecode".into(), fn_url_decode);
     f.insert("htmlEditFormat".into(), fn_html_edit_format);
     f.insert("htmlCodeFormat".into(), fn_html_code_format);
-    f.insert("encodeForHTML".into(), fn_html_edit_format);
+    f.insert("encodeForHTML".into(), fn_encode_for_html);
     f.insert("lJustify".into(), fn_ljustify);
     f.insert("rJustify".into(), fn_rjustify);
     f.insert("numberFormat".into(), fn_number_format);
     f.insert("decimalFormat".into(), fn_decimal_format);
     f.insert("formatBaseN".into(), fn_format_base_n);
     f.insert("inputBaseN".into(), fn_input_base_n);
+    f.insert("replaceList".into(), fn_replace_list);
+    f.insert("replaceListNoCase".into(), fn_replace_list_no_case);
+    f.insert("xmlFormat".into(), fn_xml_format);
+    f.insert("paragraphFormat".into(), fn_paragraph_format);
+    f.insert("cJustify".into(), fn_cjustify);
 
     // ---- Array functions ----
     f.insert("arrayNew".into(), fn_array_new);
@@ -114,7 +121,15 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("arrayFilter".into(), fn_array_filter);
     f.insert("arrayReduce".into(), fn_array_reduce);
     f.insert("arrayEach".into(), fn_array_each);
+    f.insert("arraySome".into(), fn_array_each);  // VM intercepts
+    f.insert("arrayEvery".into(), fn_array_each);  // VM intercepts
     f.insert("isArray".into(), fn_is_array);
+    f.insert("arrayIsEmpty".into(), fn_array_is_empty);
+    f.insert("arrayDelete".into(), fn_array_delete);
+    f.insert("arrayFindAll".into(), fn_array_find_all);
+    f.insert("arrayFindAllNoCase".into(), fn_array_find_all_no_case);
+    f.insert("arrayFirst".into(), fn_array_first);
+    f.insert("arrayLast".into(), fn_array_last);
 
     // ---- Struct functions ----
     f.insert("structNew".into(), fn_struct_new);
@@ -136,7 +151,16 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("structEach".into(), fn_struct_each);
     f.insert("structMap".into(), fn_struct_map);
     f.insert("structFilter".into(), fn_struct_filter);
+    f.insert("structReduce".into(), fn_struct_each);  // VM intercepts
+    f.insert("structSome".into(), fn_struct_each);  // VM intercepts
+    f.insert("structEvery".into(), fn_struct_each);  // VM intercepts
     f.insert("isStruct".into(), fn_is_struct);
+    f.insert("structGet".into(), fn_struct_get);
+    f.insert("structValueArray".into(), fn_struct_value_array);
+    f.insert("structEquals".into(), fn_struct_equals);
+
+    // ---- General utility functions ----
+    f.insert("isEmpty".into(), fn_is_empty);
 
     // ---- Type checking functions ----
     f.insert("isNull".into(), fn_is_null);
@@ -196,13 +220,18 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("now".into(), fn_now);
     f.insert("createDate".into(), fn_create_date);
     f.insert("createDateTime".into(), fn_create_date_time);
+    f.insert("createTime".into(), fn_create_time);
     f.insert("createODBCDate".into(), fn_create_odbc_date);
     f.insert("createODBCDateTime".into(), fn_create_odbc_date_time);
+    f.insert("createODBCTime".into(), fn_create_odbc_time);
     f.insert("dateAdd".into(), fn_date_add);
     f.insert("dateDiff".into(), fn_date_diff);
     f.insert("dateFormat".into(), fn_date_format);
     f.insert("timeFormat".into(), fn_time_format);
     f.insert("dateTimeFormat".into(), fn_date_time_format);
+    f.insert("parseDateTime".into(), fn_parse_date_time);
+    f.insert("datePart".into(), fn_date_part);
+    f.insert("dateCompare".into(), fn_date_compare);
     f.insert("year".into(), fn_year);
     f.insert("month".into(), fn_month);
     f.insert("day".into(), fn_day);
@@ -211,12 +240,14 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("second".into(), fn_second);
     f.insert("dayOfWeek".into(), fn_day_of_week);
     f.insert("dayOfWeekAsString".into(), fn_day_of_week_as_string);
+    f.insert("dayOfWeekShortAsString".into(), fn_day_of_week_short_as_string);
     f.insert("dayOfYear".into(), fn_day_of_year);
     f.insert("daysInMonth".into(), fn_days_in_month);
     f.insert("daysInYear".into(), fn_days_in_year);
     f.insert("firstDayOfMonth".into(), fn_first_day_of_month);
     f.insert("isLeapYear".into(), fn_is_leap_year);
     f.insert("monthAsString".into(), fn_month_as_string);
+    f.insert("monthShortAsString".into(), fn_month_short_as_string);
     f.insert("quarter".into(), fn_quarter);
     f.insert("week".into(), fn_week);
     f.insert("getTickCount".into(), fn_get_tick_count);
@@ -245,6 +276,9 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("listChangeDelims".into(), fn_list_change_delims);
     f.insert("listQualify".into(), fn_list_qualify);
     f.insert("listCompact".into(), fn_list_compact);
+    f.insert("listEach".into(), fn_list_each);
+    f.insert("listMap".into(), fn_list_map);
+    f.insert("listFilter".into(), fn_list_filter);
 
     // ---- JSON functions ----
     f.insert("serializeJSON".into(), fn_serialize_json);
@@ -256,6 +290,13 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("queryAddRow".into(), fn_query_add_row);
     f.insert("querySetCell".into(), fn_query_set_cell);
     f.insert("queryAddColumn".into(), fn_query_add_column);
+    f.insert("queryGetRow".into(), fn_query_get_row as BuiltinFunction);
+    f.insert("queryGetCell".into(), fn_query_get_cell as BuiltinFunction);
+    f.insert("queryRecordCount".into(), fn_query_record_count as BuiltinFunction);
+    f.insert("queryColumnCount".into(), fn_query_column_count as BuiltinFunction);
+    f.insert("queryColumnList".into(), fn_query_column_list as BuiltinFunction);
+    f.insert("queryDeleteRow".into(), fn_query_delete_row as BuiltinFunction);
+    f.insert("queryDeleteColumn".into(), fn_query_delete_column as BuiltinFunction);
 
     // ---- Utility functions ----
     f.insert("evaluate".into(), fn_evaluate);
@@ -264,7 +305,7 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("sleep".into(), fn_sleep);
     f.insert("getMetadata".into(), fn_get_metadata);
     f.insert("createUUID".into(), fn_create_uuid);
-    f.insert("createGUID".into(), fn_create_uuid);
+    f.insert("createGUID".into(), fn_create_guid);
     f.insert("hash".into(), fn_hash);
     f.insert("lsParseNumber".into(), fn_ls_parse_number);
 
@@ -319,6 +360,7 @@ fn create_builtin_func(name: &str) -> CfmlValue {
 
 // ---- Helper functions ----
 
+#[allow(dead_code)]
 fn get_arg(args: &[CfmlValue], idx: usize) -> &CfmlValue {
     args.get(idx).unwrap_or(&CfmlValue::Null)
 }
@@ -350,6 +392,34 @@ fn get_delimiter(args: &[CfmlValue], idx: usize) -> String {
     args.get(idx)
         .map(|v| v.as_string())
         .unwrap_or_else(|| ",".to_string())
+}
+
+/// Case-insensitive key lookup for CFML structs. Returns the actual key in the HashMap.
+fn struct_find_key_ci<'a>(s: &'a HashMap<String, CfmlValue>, key: &str) -> Option<&'a str> {
+    if s.contains_key(key) {
+        return Some(s.keys().find(|k| *k == key).unwrap());
+    }
+    let key_lower = key.to_lowercase();
+    s.keys().find(|k| k.to_lowercase() == key_lower).map(|k| k.as_str())
+}
+
+/// CFML list splitting: each character in `delimiters` is a separate delimiter.
+/// Empty elements are excluded (CFML default behavior).
+fn cfml_list_split<'a>(list: &'a str, delimiters: &str) -> Vec<&'a str> {
+    if list.is_empty() {
+        return Vec::new();
+    }
+    list.split(|c: char| delimiters.contains(c))
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// CFML list splitting that keeps empty elements (for includeEmptyValues=true).
+fn cfml_list_split_keep_empty<'a>(list: &'a str, delimiters: &str) -> Vec<&'a str> {
+    if list.is_empty() {
+        return Vec::new();
+    }
+    list.split(|c: char| delimiters.contains(c)).collect()
 }
 
 fn pseudo_random() -> f64 {
@@ -419,7 +489,7 @@ fn fn_replace(args: Vec<CfmlValue>) -> CfmlResult {
         let string = get_str(&args, 0);
         let find = get_str(&args, 1);
         let replace_with = get_str(&args, 2);
-        let scope = get_str(&args, 3).to_lowercase();
+        let scope = if args.len() >= 4 { get_str(&args, 3).to_lowercase() } else { "one".to_string() };
         if scope == "all" {
             Ok(CfmlValue::String(string.replace(&find, &replace_with)))
         } else {
@@ -433,17 +503,33 @@ fn fn_replace(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_replace_no_case(args: Vec<CfmlValue>) -> CfmlResult {
     if args.len() >= 3 {
         let string = get_str(&args, 0);
-        let find = get_str(&args, 1).to_lowercase();
+        let find = get_str(&args, 1);
         let replace_with = get_str(&args, 2);
-        let lower = string.to_lowercase();
-        if let Some(pos) = lower.find(&find) {
+        let scope = if args.len() >= 4 { get_str(&args, 3).to_lowercase() } else { "one".to_string() };
+        let find_lower = find.to_lowercase();
+
+        if scope == "all" {
             let mut result = String::new();
-            result.push_str(&string[..pos]);
-            result.push_str(&replace_with);
-            result.push_str(&string[pos + find.len()..]);
+            let lower = string.to_lowercase();
+            let mut start = 0;
+            while let Some(pos) = lower[start..].find(&find_lower) {
+                result.push_str(&string[start..start + pos]);
+                result.push_str(&replace_with);
+                start += pos + find.len();
+            }
+            result.push_str(&string[start..]);
             Ok(CfmlValue::String(result))
         } else {
-            Ok(CfmlValue::String(string))
+            let lower = string.to_lowercase();
+            if let Some(pos) = lower.find(&find_lower) {
+                let mut result = String::new();
+                result.push_str(&string[..pos]);
+                result.push_str(&replace_with);
+                result.push_str(&string[pos + find.len()..]);
+                Ok(CfmlValue::String(result))
+            } else {
+                Ok(CfmlValue::String(string))
+            }
         }
     } else {
         Ok(CfmlValue::String(get_str(&args, 0)))
@@ -486,7 +572,8 @@ fn fn_find_one_of(args: Vec<CfmlValue>) -> CfmlResult {
     if args.len() >= 2 {
         let chars = get_str(&args, 0);
         let string = get_str(&args, 1);
-        for (i, c) in string.chars().enumerate() {
+        let start = if args.len() >= 3 { (get_int(&args, 2) as usize).saturating_sub(1) } else { 0 };
+        for (i, c) in string.chars().enumerate().skip(start) {
             if chars.contains(c) {
                 return Ok(CfmlValue::Int((i + 1) as i64));
             }
@@ -743,9 +830,11 @@ fn re_match_impl(args: Vec<CfmlValue>, case_insensitive: bool) -> CfmlResult {
 fn fn_wrap(args: Vec<CfmlValue>) -> CfmlResult {
     let string = get_str(&args, 0);
     let limit = get_int(&args, 1).max(1) as usize;
+    let strip = args.get(2).map(|v| v.is_true()).unwrap_or(false);
+    let input = if strip { string.replace('\n', " ").replace('\r', " ") } else { string };
     let mut result = String::new();
     let mut col = 0;
-    for word in string.split_whitespace() {
+    for word in input.split_whitespace() {
         if col + word.len() > limit && col > 0 {
             result.push('\n');
             col = 0;
@@ -766,7 +855,6 @@ fn fn_strip_cr(args: Vec<CfmlValue>) -> CfmlResult {
 
 fn fn_to_base64(args: Vec<CfmlValue>) -> CfmlResult {
     // Simple base64 encoding
-    use std::fmt::Write;
     let input = get_str(&args, 0);
     let bytes = input.as_bytes();
     let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -786,7 +874,23 @@ fn fn_to_base64(args: Vec<CfmlValue>) -> CfmlResult {
 
 fn fn_to_binary(args: Vec<CfmlValue>) -> CfmlResult {
     let s = get_str(&args, 0);
-    Ok(CfmlValue::Binary(s.into_bytes()))
+    let table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut bytes = Vec::new();
+    let chars: Vec<u8> = s.bytes().filter(|&b| b != b'\n' && b != b'\r' && b != b' ').collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if i + 1 >= chars.len() { break; }
+        let b0 = table.iter().position(|&c| c == chars[i]).unwrap_or(0) as u32;
+        let b1 = table.iter().position(|&c| c == chars[i + 1]).unwrap_or(0) as u32;
+        let b2 = if i + 2 < chars.len() && chars[i + 2] != b'=' { table.iter().position(|&c| c == chars[i + 2]).unwrap_or(0) as u32 } else { 0 };
+        let b3 = if i + 3 < chars.len() && chars[i + 3] != b'=' { table.iter().position(|&c| c == chars[i + 3]).unwrap_or(0) as u32 } else { 0 };
+        let triple = (b0 << 18) | (b1 << 12) | (b2 << 6) | b3;
+        bytes.push(((triple >> 16) & 0xFF) as u8);
+        if i + 2 < chars.len() && chars[i + 2] != b'=' { bytes.push(((triple >> 8) & 0xFF) as u8); }
+        if i + 3 < chars.len() && chars[i + 3] != b'=' { bytes.push((triple & 0xFF) as u8); }
+        i += 4;
+    }
+    Ok(CfmlValue::Binary(bytes))
 }
 
 fn fn_url_encode(args: Vec<CfmlValue>) -> CfmlResult {
@@ -794,8 +898,8 @@ fn fn_url_encode(args: Vec<CfmlValue>) -> CfmlResult {
     let mut result = String::new();
     for c in s.chars() {
         match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => result.push(c),
-            ' ' => result.push('+'),
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '*' => result.push(c),
+            ' ' => result.push_str("%20"),
             _ => {
                 for b in c.to_string().as_bytes() {
                     result.push_str(&format!("%{:02X}", b));
@@ -809,17 +913,47 @@ fn fn_url_encode(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_url_decode(args: Vec<CfmlValue>) -> CfmlResult {
     let s = get_str(&args, 0);
     let mut result = String::new();
-    let mut chars = s.chars();
+    let mut bytes = Vec::new();
+    let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             '%' => {
                 let hex: String = chars.by_ref().take(2).collect();
                 if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    result.push(byte as char);
+                    bytes.push(byte);
+                }
+                if chars.peek() != Some(&'%') {
+                    if let Ok(decoded) = String::from_utf8(bytes.clone()) {
+                        result.push_str(&decoded);
+                    } else {
+                        for b in &bytes { result.push(*b as char); }
+                    }
+                    bytes.clear();
                 }
             }
-            '+' => result.push(' '),
-            _ => result.push(c),
+            '+' => {
+                if !bytes.is_empty() {
+                    if let Ok(decoded) = String::from_utf8(bytes.clone()) {
+                        result.push_str(&decoded);
+                    }
+                    bytes.clear();
+                }
+                result.push(' ');
+            }
+            _ => {
+                if !bytes.is_empty() {
+                    if let Ok(decoded) = String::from_utf8(bytes.clone()) {
+                        result.push_str(&decoded);
+                    }
+                    bytes.clear();
+                }
+                result.push(c);
+            }
+        }
+    }
+    if !bytes.is_empty() {
+        if let Ok(decoded) = String::from_utf8(bytes.clone()) {
+            result.push_str(&decoded);
         }
     }
     Ok(CfmlValue::String(result))
@@ -840,6 +974,18 @@ fn fn_html_code_format(args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::String(format!("<pre>{}</pre>", inner.as_string())))
 }
 
+fn fn_encode_for_html(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0);
+    Ok(CfmlValue::String(
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#x27;")
+            .replace('/', "&#x2f;"),
+    ))
+}
+
 fn fn_ljustify(args: Vec<CfmlValue>) -> CfmlResult {
     let s = get_str(&args, 0);
     let length = get_int(&args, 1).max(0) as usize;
@@ -852,31 +998,117 @@ fn fn_rjustify(args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::String(format!("{:>width$}", s, width = length)))
 }
 
+fn add_thousands_separator(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    if len <= 3 { return s.to_string(); }
+    let mut result = String::new();
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(b as char);
+    }
+    result
+}
+
 fn fn_number_format(args: Vec<CfmlValue>) -> CfmlResult {
     let n = get_float(&args, 0);
     let mask = get_str(&args, 1);
     if mask.is_empty() {
-        Ok(CfmlValue::String(format!("{:.0}", n)))
-    } else {
-        let decimals = mask.find('.').map(|p| mask.len() - p - 1).unwrap_or(0);
-        Ok(CfmlValue::String(format!("{:.prec$}", n, prec = decimals)))
+        let rounded = n.round() as i64;
+        let s = rounded.to_string();
+        let negative = rounded < 0;
+        let digits = if negative { &s[1..] } else { &s };
+        let formatted = add_thousands_separator(digits);
+        if negative {
+            return Ok(CfmlValue::String(format!("-{}", formatted)));
+        }
+        return Ok(CfmlValue::String(formatted));
     }
+
+    let has_dollar = mask.contains('$');
+    let has_parens = mask.contains('(') && mask.contains(')');
+    let has_plus = mask.contains('+');
+    let has_comma = mask.contains(',');
+
+    let decimals = if let Some(dot_pos) = mask.find('.') {
+        mask[dot_pos + 1..].chars().filter(|c| *c == '9' || *c == '0' || *c == '_').count()
+    } else {
+        0
+    };
+
+    let formatted_num = format!("{:.prec$}", n.abs(), prec = decimals);
+    let parts: Vec<&str> = formatted_num.split('.').collect();
+    let int_part = parts[0];
+    let dec_part = if parts.len() > 1 { parts[1] } else { "" };
+
+    let int_formatted = if has_comma {
+        add_thousands_separator(int_part)
+    } else {
+        int_part.to_string()
+    };
+
+    let mut result = if decimals > 0 {
+        format!("{}.{}", int_formatted, dec_part)
+    } else {
+        int_formatted
+    };
+
+    if n < 0.0 {
+        if has_parens {
+            result = format!("({})", result);
+        } else {
+            result = format!("-{}", result);
+        }
+    } else if has_plus {
+        result = format!("+{}", result);
+    }
+
+    if has_dollar {
+        if result.starts_with('-') || result.starts_with('(') {
+            let sign = result.chars().next().unwrap();
+            result = format!("{}${}", sign, &result[1..]);
+        } else {
+            result = format!("${}", result);
+        }
+    }
+
+    Ok(CfmlValue::String(result))
 }
 
 fn fn_decimal_format(args: Vec<CfmlValue>) -> CfmlResult {
     let n = get_float(&args, 0);
-    Ok(CfmlValue::String(format!("{:.2}", n)))
+    let formatted = format!("{:.2}", n.abs());
+    let parts: Vec<&str> = formatted.split('.').collect();
+    let int_with_commas = add_thousands_separator(parts[0]);
+    let result = format!("{}.{}", int_with_commas, parts.get(1).unwrap_or(&"00"));
+    if n < 0.0 {
+        Ok(CfmlValue::String(format!("-{}", result)))
+    } else {
+        Ok(CfmlValue::String(result))
+    }
 }
 
 fn fn_format_base_n(args: Vec<CfmlValue>) -> CfmlResult {
-    let n = get_int(&args, 0);
+    let n = get_int(&args, 0) as i32;
     let radix = get_int(&args, 1) as u32;
-    match radix {
-        2 => Ok(CfmlValue::String(format!("{:b}", n))),
-        8 => Ok(CfmlValue::String(format!("{:o}", n))),
-        16 => Ok(CfmlValue::String(format!("{:X}", n))),
-        _ => Ok(CfmlValue::String(n.to_string())),
+    if radix < 2 || radix > 36 {
+        return Err(CfmlError::runtime("formatBaseN: radix must be between 2 and 36".to_string()));
     }
+    let is_negative = n < 0;
+    let abs_n = if is_negative { (n as i64).unsigned_abs() } else { n as u64 };
+    if abs_n == 0 { return Ok(CfmlValue::String("0".to_string())); }
+    let digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let mut result = String::new();
+    let mut val = abs_n;
+    while val > 0 {
+        let d = (val % radix as u64) as usize;
+        result.push(digits.as_bytes()[d] as char);
+        val /= radix as u64;
+    }
+    if is_negative { result.push('-'); }
+    Ok(CfmlValue::String(result.chars().rev().collect()))
 }
 
 fn fn_input_base_n(args: Vec<CfmlValue>) -> CfmlResult {
@@ -885,6 +1117,77 @@ fn fn_input_base_n(args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::Int(
         i64::from_str_radix(&s, radix).unwrap_or(0),
     ))
+}
+
+fn fn_replace_list(args: Vec<CfmlValue>) -> CfmlResult {
+    let mut string = get_str(&args, 0);
+    let list1 = get_str(&args, 1);
+    let list2 = get_str(&args, 2);
+    let delimiter = get_delimiter(&args, 3);
+    let items1: Vec<&str> = list1.split(|c: char| delimiter.contains(c)).filter(|s| !s.is_empty()).collect();
+    let items2: Vec<&str> = list2.split(|c: char| delimiter.contains(c)).filter(|s| !s.is_empty()).collect();
+    for (i, find) in items1.iter().enumerate() {
+        let replace_with = items2.get(i).unwrap_or(&"");
+        string = string.replace(find, replace_with);
+    }
+    Ok(CfmlValue::String(string))
+}
+
+fn fn_replace_list_no_case(args: Vec<CfmlValue>) -> CfmlResult {
+    let mut string = get_str(&args, 0);
+    let list1 = get_str(&args, 1);
+    let list2 = get_str(&args, 2);
+    let delimiter = get_delimiter(&args, 3);
+    let items1: Vec<&str> = list1.split(|c: char| delimiter.contains(c)).filter(|s| !s.is_empty()).collect();
+    let items2: Vec<&str> = list2.split(|c: char| delimiter.contains(c)).filter(|s| !s.is_empty()).collect();
+    for (i, find) in items1.iter().enumerate() {
+        let replace_with = items2.get(i).unwrap_or(&"");
+        let lower = string.to_lowercase();
+        let find_lower = find.to_lowercase();
+        let mut result = String::new();
+        let mut start = 0;
+        while let Some(pos) = lower[start..].find(&find_lower) {
+            result.push_str(&string[start..start + pos]);
+            result.push_str(replace_with);
+            start += pos + find.len();
+        }
+        result.push_str(&string[start..]);
+        string = result;
+    }
+    Ok(CfmlValue::String(string))
+}
+
+fn fn_xml_format(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0);
+    Ok(CfmlValue::String(
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;"),
+    ))
+}
+
+fn fn_paragraph_format(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0);
+    let result = s.replace("\r\n", "\n")
+        .split('\n')
+        .map(|line| if line.trim().is_empty() { "<p>".to_string() } else { format!("{}<br>", line) })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(CfmlValue::String(result))
+}
+
+fn fn_cjustify(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0);
+    let length = get_int(&args, 1) as usize;
+    if s.len() >= length {
+        return Ok(CfmlValue::String(s));
+    }
+    let padding = length - s.len();
+    let left_pad = padding / 2;
+    let right_pad = padding - left_pad;
+    Ok(CfmlValue::String(format!("{}{}{}", " ".repeat(left_pad), s, " ".repeat(right_pad))))
 }
 
 // ===============================================
@@ -1014,21 +1317,26 @@ fn fn_array_find_no_case(args: Vec<CfmlValue>) -> CfmlResult {
 
 fn fn_array_sort(args: Vec<CfmlValue>) -> CfmlResult {
     if let Some(CfmlValue::Array(arr)) = args.first() {
-        let mut sorted = arr.clone();
-        let sort_type = get_str(&args, 1).to_lowercase();
+        let mut result = arr.clone();
+        let sort_type = if args.len() > 1 { get_str(&args, 1).to_lowercase() } else { "text".to_string() };
+        let sort_order = if args.len() > 2 { get_str(&args, 2).to_lowercase() } else { "asc".to_string() };
         match sort_type.as_str() {
             "numeric" => {
-                sorted.sort_by(|a, b| {
-                    let fa = get_float(&[a.clone()], 0);
-                    let fb = get_float(&[b.clone()], 0);
+                result.sort_by(|a, b| {
+                    let fa = a.as_string().parse::<f64>().unwrap_or(0.0);
+                    let fb = b.as_string().parse::<f64>().unwrap_or(0.0);
                     fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
                 });
             }
+            "textnocase" => {
+                result.sort_by(|a, b| a.as_string().to_lowercase().cmp(&b.as_string().to_lowercase()));
+            }
             _ => {
-                sorted.sort_by(|a, b| a.as_string().cmp(&b.as_string()));
+                result.sort_by(|a, b| a.as_string().cmp(&b.as_string()));
             }
         }
-        Ok(CfmlValue::Array(sorted))
+        if sort_order == "desc" { result.reverse(); }
+        Ok(CfmlValue::Array(result))
     } else {
         Ok(CfmlValue::Array(Vec::new()))
     }
@@ -1046,18 +1354,27 @@ fn fn_array_reverse(args: Vec<CfmlValue>) -> CfmlResult {
 
 fn fn_array_slice(args: Vec<CfmlValue>) -> CfmlResult {
     if let Some(CfmlValue::Array(arr)) = args.first() {
-        let offset = (get_int(&args, 1).max(1) as usize).saturating_sub(1);
-        let length = if args.len() >= 3 {
-            get_int(&args, 2).max(0) as usize
+        let offset = get_int(&args, 1);
+        let length = if args.len() >= 3 { Some(get_int(&args, 2) as usize) } else { None };
+
+        let start = if offset >= 0 {
+            (offset as usize).saturating_sub(1) // 1-based to 0-based
         } else {
-            arr.len().saturating_sub(offset)
+            // Negative: count from end
+            let from_end = (-offset) as usize;
+            if from_end > arr.len() { 0 } else { arr.len() - from_end }
         };
-        let end = (offset + length).min(arr.len());
-        if offset < arr.len() {
-            Ok(CfmlValue::Array(arr[offset..end].to_vec()))
-        } else {
-            Ok(CfmlValue::Array(Vec::new()))
+
+        if start >= arr.len() {
+            return Ok(CfmlValue::Array(Vec::new()));
         }
+
+        let end = match length {
+            Some(len) => (start + len).min(arr.len()),
+            None => arr.len(),
+        };
+
+        Ok(CfmlValue::Array(arr[start..end].to_vec()))
     } else {
         Ok(CfmlValue::Array(Vec::new()))
     }
@@ -1074,16 +1391,30 @@ fn fn_array_to_list(args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn fn_array_merge(args: Vec<CfmlValue>) -> CfmlResult {
-    let mut result = Vec::new();
-    for arg in &args {
-        if let CfmlValue::Array(arr) = arg {
-            result.extend(arr.clone());
+    if args.len() >= 2 {
+        if let (CfmlValue::Array(a), CfmlValue::Array(b)) = (&args[0], &args[1]) {
+            let leave_index = args.get(2).map(|v| v.is_true()).unwrap_or(false);
+            if leave_index {
+                let mut result = a.clone();
+                for (i, item) in b.iter().enumerate() {
+                    if i < result.len() {
+                        result[i] = item.clone();
+                    } else {
+                        result.push(item.clone());
+                    }
+                }
+                return Ok(CfmlValue::Array(result));
+            } else {
+                let mut result = a.clone();
+                result.extend(b.clone());
+                return Ok(CfmlValue::Array(result));
+            }
         }
     }
-    Ok(CfmlValue::Array(result))
+    Ok(CfmlValue::Array(Vec::new()))
 }
 
-fn fn_array_clear(args: Vec<CfmlValue>) -> CfmlResult {
+fn fn_array_clear(_args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::Array(Vec::new()))
 }
 
@@ -1183,15 +1514,88 @@ fn fn_array_map(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_array_filter(args: Vec<CfmlValue>) -> CfmlResult {
     Ok(args.into_iter().next().unwrap_or(CfmlValue::Array(Vec::new())))
 }
-fn fn_array_reduce(args: Vec<CfmlValue>) -> CfmlResult {
+fn fn_array_reduce(_args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::Null)
 }
-fn fn_array_each(args: Vec<CfmlValue>) -> CfmlResult {
+fn fn_array_each(_args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::Null)
 }
 
 fn fn_is_array(args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::Bool(matches!(args.first(), Some(CfmlValue::Array(_)))))
+}
+
+fn fn_array_is_empty(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.first() {
+        Some(CfmlValue::Array(arr)) => Ok(CfmlValue::Bool(arr.is_empty())),
+        _ => Ok(CfmlValue::Bool(true)),
+    }
+}
+
+fn fn_array_delete(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() >= 2 {
+        if let CfmlValue::Array(arr) = &args[0] {
+            let value_str = args[1].as_string().to_lowercase();
+            let mut result = arr.clone();
+            if let Some(pos) = result.iter().position(|v| v.as_string().to_lowercase() == value_str) {
+                result.remove(pos);
+            }
+            return Ok(CfmlValue::Array(result));
+        }
+    }
+    Ok(CfmlValue::Array(Vec::new()))
+}
+
+fn fn_array_find_all(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() >= 2 {
+        if let CfmlValue::Array(arr) = &args[0] {
+            let value = args[1].as_string();
+            let indices: Vec<CfmlValue> = arr.iter().enumerate()
+                .filter(|(_, v)| v.as_string() == value)
+                .map(|(i, _)| CfmlValue::Int((i + 1) as i64))
+                .collect();
+            return Ok(CfmlValue::Array(indices));
+        }
+    }
+    Ok(CfmlValue::Array(Vec::new()))
+}
+
+fn fn_array_find_all_no_case(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() >= 2 {
+        if let CfmlValue::Array(arr) = &args[0] {
+            let value = args[1].as_string().to_lowercase();
+            let indices: Vec<CfmlValue> = arr.iter().enumerate()
+                .filter(|(_, v)| v.as_string().to_lowercase() == value)
+                .map(|(i, _)| CfmlValue::Int((i + 1) as i64))
+                .collect();
+            return Ok(CfmlValue::Array(indices));
+        }
+    }
+    Ok(CfmlValue::Array(Vec::new()))
+}
+
+fn fn_array_first(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.first() {
+        Some(CfmlValue::Array(arr)) => Ok(arr.first().cloned().unwrap_or(CfmlValue::Null)),
+        _ => Err(CfmlError::runtime("arrayFirst: argument must be an array".to_string())),
+    }
+}
+
+fn fn_array_last(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.first() {
+        Some(CfmlValue::Array(arr)) => Ok(arr.last().cloned().unwrap_or(CfmlValue::Null)),
+        _ => Err(CfmlError::runtime("arrayLast: argument must be an array".to_string())),
+    }
+}
+
+fn fn_is_empty(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.first() {
+        Some(CfmlValue::String(s)) => Ok(CfmlValue::Bool(s.is_empty())),
+        Some(CfmlValue::Array(arr)) => Ok(CfmlValue::Bool(arr.is_empty())),
+        Some(CfmlValue::Struct(s)) => Ok(CfmlValue::Bool(s.is_empty())),
+        Some(CfmlValue::Null) => Ok(CfmlValue::Bool(true)),
+        _ => Ok(CfmlValue::Bool(false)),
+    }
 }
 
 // ===============================================
@@ -1213,11 +1617,7 @@ fn fn_struct_key_exists(args: Vec<CfmlValue>) -> CfmlResult {
     if args.len() >= 2 {
         if let CfmlValue::Struct(s) = &args[0] {
             let key = args[1].as_string();
-            return Ok(CfmlValue::Bool(
-                s.contains_key(&key)
-                    || s.contains_key(&key.to_uppercase())
-                    || s.contains_key(&key.to_lowercase()),
-            ));
+            return Ok(CfmlValue::Bool(struct_find_key_ci(s, &key).is_some()));
         }
     }
     Ok(CfmlValue::Bool(false))
@@ -1247,8 +1647,10 @@ fn fn_struct_delete(args: Vec<CfmlValue>) -> CfmlResult {
         if let CfmlValue::Struct(s) = &args[0] {
             let mut result = s.clone();
             let key = args[1].as_string();
-            result.remove(&key);
-            result.remove(&key.to_uppercase());
+            if let Some(actual_key) = struct_find_key_ci(&result, &key) {
+                let owned_key = actual_key.to_string();
+                result.remove(&owned_key);
+            }
             return Ok(CfmlValue::Struct(result));
         }
     }
@@ -1259,7 +1661,20 @@ fn fn_struct_insert(args: Vec<CfmlValue>) -> CfmlResult {
     if args.len() >= 3 {
         if let CfmlValue::Struct(s) = &args[0] {
             let mut result = s.clone();
-            result.insert(args[1].as_string(), args[2].clone());
+            let key = args[1].as_string();
+            let allow_overwrite = if args.len() >= 4 { args[3].is_true() } else { true };
+            if !allow_overwrite {
+                if struct_find_key_ci(&result, &key).is_some() {
+                    return Err(CfmlError::runtime(format!("Key '{}' already exists in struct. Use allowOverwrite=true to overwrite.", key)));
+                }
+            }
+            if let Some(actual_key) = struct_find_key_ci(&result, &key) {
+                if actual_key != key {
+                    let owned_key = actual_key.to_string();
+                    result.remove(&owned_key);
+                }
+            }
+            result.insert(key, args[2].clone());
             return Ok(CfmlValue::Struct(result));
         }
     }
@@ -1274,24 +1689,110 @@ fn fn_struct_find(args: Vec<CfmlValue>) -> CfmlResult {
     if args.len() >= 2 {
         if let CfmlValue::Struct(s) = &args[0] {
             let key = args[1].as_string();
-            return Ok(s.get(&key)
-                .or_else(|| s.get(&key.to_uppercase()))
-                .cloned()
-                .unwrap_or(CfmlValue::Null));
+            if let Some(actual_key) = struct_find_key_ci(s, &key) {
+                return Ok(s.get(actual_key).cloned().unwrap_or(CfmlValue::Null));
+            }
+            return Ok(CfmlValue::Null);
         }
     }
     Ok(CfmlValue::Null)
 }
 
 fn fn_struct_find_key(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() >= 2 {
+        if let CfmlValue::Struct(s) = &args[0] {
+            let key = get_str(&args, 1);
+            let scope = if args.len() >= 3 { get_str(&args, 2).to_lowercase() } else { "one".to_string() };
+            let mut results = Vec::new();
+            struct_find_key_recursive(s, &key, "", &scope, &mut results);
+            return Ok(CfmlValue::Array(results));
+        }
+    }
     Ok(CfmlValue::Array(Vec::new()))
+}
+
+fn struct_find_key_recursive(
+    s: &HashMap<String, CfmlValue>,
+    search_key: &str,
+    path: &str,
+    scope: &str,
+    results: &mut Vec<CfmlValue>,
+) {
+    let search_lower = search_key.to_lowercase();
+    for (k, v) in s {
+        let current_path = if path.is_empty() { k.clone() } else { format!("{}.{}", path, k) };
+        if k.to_lowercase() == search_lower {
+            let mut result_struct = HashMap::new();
+            result_struct.insert("owner".to_string(), CfmlValue::Struct(s.clone()));
+            result_struct.insert("path".to_string(), CfmlValue::String(current_path.clone()));
+            result_struct.insert("value".to_string(), v.clone());
+            results.push(CfmlValue::Struct(result_struct));
+            if scope == "one" { return; }
+        }
+        if let CfmlValue::Struct(nested) = v {
+            struct_find_key_recursive(nested, search_key, &current_path, scope, results);
+            if scope == "one" && !results.is_empty() { return; }
+        }
+        if let CfmlValue::Array(arr) = v {
+            for (i, item) in arr.iter().enumerate() {
+                if let CfmlValue::Struct(nested) = item {
+                    let arr_path = format!("{}[{}]", current_path, i + 1);
+                    struct_find_key_recursive(nested, search_key, &arr_path, scope, results);
+                    if scope == "one" && !results.is_empty() { return; }
+                }
+            }
+        }
+    }
 }
 
 fn fn_struct_find_value(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() >= 2 {
+        if let CfmlValue::Struct(s) = &args[0] {
+            let search_value = get_str(&args, 1);
+            let scope = if args.len() >= 3 { get_str(&args, 2).to_lowercase() } else { "one".to_string() };
+            let mut results = Vec::new();
+            struct_find_value_recursive(s, &search_value, "", &scope, &mut results);
+            return Ok(CfmlValue::Array(results));
+        }
+    }
     Ok(CfmlValue::Array(Vec::new()))
 }
 
-fn fn_struct_clear(args: Vec<CfmlValue>) -> CfmlResult {
+fn struct_find_value_recursive(
+    s: &HashMap<String, CfmlValue>,
+    search_value: &str,
+    path: &str,
+    scope: &str,
+    results: &mut Vec<CfmlValue>,
+) {
+    let search_lower = search_value.to_lowercase();
+    for (k, v) in s {
+        let current_path = if path.is_empty() { k.clone() } else { format!("{}.{}", path, k) };
+        if v.as_string().to_lowercase() == search_lower {
+            let mut result_struct = HashMap::new();
+            result_struct.insert("owner".to_string(), CfmlValue::Struct(s.clone()));
+            result_struct.insert("path".to_string(), CfmlValue::String(current_path.clone()));
+            result_struct.insert("key".to_string(), CfmlValue::String(k.clone()));
+            results.push(CfmlValue::Struct(result_struct));
+            if scope == "one" { return; }
+        }
+        if let CfmlValue::Struct(nested) = v {
+            struct_find_value_recursive(nested, search_value, &current_path, scope, results);
+            if scope == "one" && !results.is_empty() { return; }
+        }
+        if let CfmlValue::Array(arr) = v {
+            for (i, item) in arr.iter().enumerate() {
+                if let CfmlValue::Struct(nested) = item {
+                    let arr_path = format!("{}[{}]", current_path, i + 1);
+                    struct_find_value_recursive(nested, search_value, &arr_path, scope, results);
+                    if scope == "one" && !results.is_empty() { return; }
+                }
+            }
+        }
+    }
+}
+
+fn fn_struct_clear(_args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::Struct(HashMap::new()))
 }
 
@@ -1305,9 +1806,12 @@ fn fn_struct_copy(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_struct_append(args: Vec<CfmlValue>) -> CfmlResult {
     if args.len() >= 2 {
         if let (CfmlValue::Struct(a), CfmlValue::Struct(b)) = (&args[0], &args[1]) {
+            let overwrite = if args.len() >= 3 { args[2].is_true() } else { true };
             let mut result = a.clone();
             for (k, v) in b {
-                result.insert(k.clone(), v.clone());
+                if overwrite || struct_find_key_ci(&result, k).is_none() {
+                    result.insert(k.clone(), v.clone());
+                }
             }
             return Ok(CfmlValue::Struct(result));
         }
@@ -1324,20 +1828,93 @@ fn fn_struct_is_empty(args: Vec<CfmlValue>) -> CfmlResult {
 
 fn fn_struct_sort(args: Vec<CfmlValue>) -> CfmlResult {
     if let Some(CfmlValue::Struct(s)) = args.first() {
+        let sort_type = if args.len() > 1 { get_str(&args, 1).to_lowercase() } else { "text".to_string() };
+        let sort_order = if args.len() > 2 { get_str(&args, 2).to_lowercase() } else { "asc".to_string() };
         let mut keys: Vec<String> = s.keys().cloned().collect();
-        keys.sort();
+        match sort_type.as_str() {
+            "numeric" => {
+                keys.sort_by(|a, b| {
+                    let va = s.get(a).map(|v| v.as_string().parse::<f64>().unwrap_or(0.0)).unwrap_or(0.0);
+                    let vb = s.get(b).map(|v| v.as_string().parse::<f64>().unwrap_or(0.0)).unwrap_or(0.0);
+                    va.partial_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            "textnocase" => {
+                keys.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+            }
+            _ => keys.sort(),
+        }
+        if sort_order == "desc" { keys.reverse(); }
         Ok(CfmlValue::Array(keys.into_iter().map(CfmlValue::String).collect()))
     } else {
         Ok(CfmlValue::Array(Vec::new()))
     }
 }
 
-fn fn_struct_each(args: Vec<CfmlValue>) -> CfmlResult { Ok(CfmlValue::Null) }
+fn fn_struct_each(_args: Vec<CfmlValue>) -> CfmlResult { Ok(CfmlValue::Null) }
 fn fn_struct_map(args: Vec<CfmlValue>) -> CfmlResult { Ok(args.into_iter().next().unwrap_or(CfmlValue::Null)) }
 fn fn_struct_filter(args: Vec<CfmlValue>) -> CfmlResult { Ok(args.into_iter().next().unwrap_or(CfmlValue::Null)) }
 
 fn fn_is_struct(args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::Bool(matches!(args.first(), Some(CfmlValue::Struct(_)))))
+}
+
+fn fn_struct_get(args: Vec<CfmlValue>) -> CfmlResult {
+    let path = get_str(&args, 0);
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut current = CfmlValue::Struct(HashMap::new());
+    for part in parts.iter().rev() {
+        let mut s = HashMap::new();
+        s.insert(part.to_string(), current);
+        current = CfmlValue::Struct(s);
+    }
+    let mut result = &current;
+    for part in &parts {
+        if let CfmlValue::Struct(s) = result {
+            if let Some(v) = s.get(*part) {
+                result = v;
+            }
+        }
+    }
+    Ok(result.clone())
+}
+
+fn fn_struct_value_array(args: Vec<CfmlValue>) -> CfmlResult {
+    if let Some(CfmlValue::Struct(s)) = args.first() {
+        let values: Vec<CfmlValue> = s.values().cloned().collect();
+        Ok(CfmlValue::Array(values))
+    } else {
+        Ok(CfmlValue::Array(Vec::new()))
+    }
+}
+
+fn fn_struct_equals(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() >= 2 {
+        if let (CfmlValue::Struct(a), CfmlValue::Struct(b)) = (&args[0], &args[1]) {
+            if a.len() != b.len() { return Ok(CfmlValue::Bool(false)); }
+            for (k, v) in a {
+                match b.get(k) {
+                    Some(bv) => {
+                        if v.as_string() != bv.as_string() {
+                            return Ok(CfmlValue::Bool(false));
+                        }
+                    }
+                    None => {
+                        match struct_find_key_ci(b, k) {
+                            Some(actual) => {
+                                if v.as_string() != b.get(actual).unwrap().as_string() {
+                                    return Ok(CfmlValue::Bool(false));
+                                }
+                            }
+                            None => return Ok(CfmlValue::Bool(false)),
+                        }
+                    }
+                }
+            }
+            return Ok(CfmlValue::Bool(true));
+        }
+    }
+    Ok(CfmlValue::Bool(false))
 }
 
 // ===============================================
@@ -1355,7 +1932,7 @@ fn fn_is_defined(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_is_simple_value(args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::Bool(matches!(
         args.first(),
-        Some(CfmlValue::Null | CfmlValue::Bool(_) | CfmlValue::Int(_) | CfmlValue::Double(_) | CfmlValue::String(_))
+        Some(CfmlValue::Bool(_) | CfmlValue::Int(_) | CfmlValue::Double(_) | CfmlValue::String(_))
     )))
 }
 
@@ -1371,22 +1948,21 @@ fn fn_is_numeric(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_is_boolean(args: Vec<CfmlValue>) -> CfmlResult {
     match args.first() {
         Some(CfmlValue::Bool(_)) => Ok(CfmlValue::Bool(true)),
+        Some(CfmlValue::Int(_)) | Some(CfmlValue::Double(_)) => Ok(CfmlValue::Bool(true)),
         Some(CfmlValue::String(s)) => {
             let lower = s.trim().to_lowercase();
-            Ok(CfmlValue::Bool(matches!(lower.as_str(), "true" | "false" | "yes" | "no")))
+            Ok(CfmlValue::Bool(
+                matches!(lower.as_str(), "true" | "false" | "yes" | "no")
+                || s.trim().parse::<f64>().is_ok()
+            ))
         }
-        Some(CfmlValue::Int(_)) | Some(CfmlValue::Double(_)) => Ok(CfmlValue::Bool(true)),
         _ => Ok(CfmlValue::Bool(false)),
     }
 }
 
 fn fn_is_date(args: Vec<CfmlValue>) -> CfmlResult {
-    if let Some(CfmlValue::String(s)) = args.first() {
-        let result = !s.is_empty() && (s.contains('/') || s.contains('-'));
-        Ok(CfmlValue::Bool(result))
-    } else {
-        Ok(CfmlValue::Bool(false))
-    }
+    let s = get_str(&args, 0);
+    Ok(CfmlValue::Bool(parse_cfml_date(&s).is_some()))
 }
 
 fn fn_is_query(args: Vec<CfmlValue>) -> CfmlResult {
@@ -1435,10 +2011,30 @@ fn fn_is_valid(args: Vec<CfmlValue>) -> CfmlResult {
                     s.starts_with("http://") || s.starts_with("https://") || s.starts_with("ftp://")
                 ))
             }
+            "query" => fn_is_query(vec![value.clone()]),
             "uuid" => {
+                // CFML UUID format: 8-4-4-16 (35 chars total)
+                let s = value.as_string();
+                let re = Regex::new(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{16}$").unwrap();
+                Ok(CfmlValue::Bool(re.is_match(&s)))
+            }
+            "guid" => {
+                // Standard GUID format: 8-4-4-4-12
                 let s = value.as_string();
                 let re = Regex::new(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$").unwrap();
                 Ok(CfmlValue::Bool(re.is_match(&s)))
+            }
+            "range" => {
+                // isValid("range", value, min, max)
+                if args.len() >= 4 {
+                    let n = value.as_string().parse::<f64>().unwrap_or(f64::NAN);
+                    if n.is_nan() { return Ok(CfmlValue::Bool(false)); }
+                    let min_val = get_float(&args, 2);
+                    let max_val = get_float(&args, 3);
+                    Ok(CfmlValue::Bool(n >= min_val && n <= max_val))
+                } else {
+                    Ok(CfmlValue::Bool(false))
+                }
             }
             "regex" => {
                 let s = value.as_string();
@@ -1447,7 +2043,6 @@ fn fn_is_valid(args: Vec<CfmlValue>) -> CfmlResult {
             "creditcard" => {
                 let s: String = value.as_string().chars().filter(|c| c.is_ascii_digit()).collect();
                 if s.len() < 13 || s.len() > 19 { return Ok(CfmlValue::Bool(false)); }
-                // Luhn algorithm
                 let mut sum = 0u32;
                 let mut double = false;
                 for c in s.chars().rev() {
@@ -1458,7 +2053,21 @@ fn fn_is_valid(args: Vec<CfmlValue>) -> CfmlResult {
                 }
                 Ok(CfmlValue::Bool(sum % 10 == 0))
             }
-            _ => Ok(CfmlValue::Bool(true)),
+            "zipcode" => {
+                let s = value.as_string();
+                let re = Regex::new(r"^\d{5}(-\d{4})?$").unwrap();
+                Ok(CfmlValue::Bool(re.is_match(&s)))
+            }
+            "telephone" | "phone" => {
+                let digits: String = value.as_string().chars().filter(|c| c.is_ascii_digit()).collect();
+                Ok(CfmlValue::Bool(digits.len() >= 10 && digits.len() <= 15))
+            }
+            "ssn" | "social_security_number" => {
+                let s = value.as_string();
+                let re = Regex::new(r"^\d{3}-\d{2}-\d{4}$").unwrap();
+                Ok(CfmlValue::Bool(re.is_match(&s)))
+            }
+            _ => Ok(CfmlValue::Bool(false)),
         }
     } else {
         Ok(CfmlValue::Bool(false))
@@ -1470,7 +2079,12 @@ fn fn_is_valid(args: Vec<CfmlValue>) -> CfmlResult {
 // ===============================================
 
 fn fn_to_string(args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(CfmlValue::String(get_str(&args, 0)))
+    match args.first() {
+        Some(CfmlValue::Binary(bytes)) => {
+            Ok(CfmlValue::String(String::from_utf8_lossy(bytes).to_string()))
+        }
+        _ => Ok(CfmlValue::String(get_str(&args, 0))),
+    }
 }
 
 fn fn_to_numeric(args: Vec<CfmlValue>) -> CfmlResult {
@@ -1479,15 +2093,16 @@ fn fn_to_numeric(args: Vec<CfmlValue>) -> CfmlResult {
         Some(CfmlValue::Double(d)) => Ok(CfmlValue::Double(*d)),
         Some(CfmlValue::Bool(b)) => Ok(CfmlValue::Int(if *b { 1 } else { 0 })),
         Some(CfmlValue::String(s)) => {
-            if let Ok(i) = s.trim().parse::<i64>() {
+            let trimmed = s.trim();
+            if let Ok(i) = trimmed.parse::<i64>() {
                 Ok(CfmlValue::Int(i))
-            } else if let Ok(d) = s.trim().parse::<f64>() {
+            } else if let Ok(d) = trimmed.parse::<f64>() {
                 Ok(CfmlValue::Double(d))
             } else {
-                Ok(CfmlValue::Int(0))
+                Err(CfmlError::runtime(format!("Cannot convert '{}' to a number", s)))
             }
         }
-        _ => Ok(CfmlValue::Int(0)),
+        _ => Err(CfmlError::runtime("Cannot convert value to a number".to_string())),
     }
 }
 
@@ -1506,8 +2121,9 @@ fn fn_val(args: Vec<CfmlValue>) -> CfmlResult {
         } else if c == '.' && !has_dot {
             has_dot = true;
             num_str.push(c);
-        } else if c == '-' && i == 0 {
-            num_str.push(c);
+        } else if (c == '-' || c == '+') && i == 0 {
+            if c == '-' { num_str.push(c); }
+            // Skip '+' sign (don't push it, but continue parsing)
         } else {
             break;
         }
@@ -1524,7 +2140,7 @@ fn fn_val(args: Vec<CfmlValue>) -> CfmlResult {
 
 fn fn_int(args: Vec<CfmlValue>) -> CfmlResult {
     let n = get_float(&args, 0);
-    Ok(CfmlValue::Int(n as i64))
+    Ok(CfmlValue::Int(n.floor() as i64))
 }
 
 fn fn_java_cast(args: Vec<CfmlValue>) -> CfmlResult {
@@ -1580,13 +2196,18 @@ fn fn_rand(_args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn fn_rand_range(args: Vec<CfmlValue>) -> CfmlResult {
-    let min = get_float(&args, 0);
-    let max = get_float(&args, 1);
-    Ok(CfmlValue::Double(min + pseudo_random() * (max - min)))
+    let min = get_int(&args, 0);
+    let max = get_int(&args, 1);
+    let range = (max - min + 1) as f64;
+    let result = min + (pseudo_random() * range).floor() as i64;
+    Ok(CfmlValue::Int(result.min(max)))
 }
 
 fn fn_randomize(args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(CfmlValue::Int(0)) // Seed not truly supported with simple PRNG
+    let seed = get_float(&args, 0);
+    // Use the seed to generate a deterministic value
+    let val = ((seed * 1103515245.0 + 12345.0) / 65536.0) % 32768.0;
+    Ok(CfmlValue::Double((val.abs() / 32768.0).fract()))
 }
 
 fn fn_max(args: Vec<CfmlValue>) -> CfmlResult {
@@ -1674,7 +2295,8 @@ fn fn_bit_xor(args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn fn_bit_not(args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(CfmlValue::Int(!get_int(&args, 0)))
+    let n = get_int(&args, 0) as i32;
+    Ok(CfmlValue::Int((!n) as i64))
 }
 
 fn fn_bit_shln(args: Vec<CfmlValue>) -> CfmlResult {
@@ -1686,6 +2308,283 @@ fn fn_bit_shrn(args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 // ===============================================
+// DATE/TIME HELPERS
+// ===============================================
+
+/// Convert 2-digit year to 4-digit: 0-29 → 2000-2029, 30-99 → 1930-1999
+fn short_year(y: i64) -> i64 {
+    if y >= 0 && y <= 29 { 2000 + y }
+    else if y >= 30 && y <= 99 { 1900 + y }
+    else { y }
+}
+
+/// Days in a given month/year
+fn days_in_month_calc(year: i32, month: u32) -> u32 {
+    match month {
+        1 => 31,
+        2 => if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 29 } else { 28 },
+        3 => 31, 4 => 30, 5 => 31, 6 => 30,
+        7 => 31, 8 => 31, 9 => 30, 10 => 31, 11 => 30, 12 => 31,
+        _ => 30,
+    }
+}
+
+/// Add months to a NaiveDateTime, clamping day to valid range
+fn add_months(dt: &NaiveDateTime, months: i64) -> Option<NaiveDateTime> {
+    let total = (dt.year() as i64) * 12 + (dt.month0() as i64) + months;
+    let new_year = total.div_euclid(12) as i32;
+    let new_month = (total.rem_euclid(12) as u32) + 1;
+    let max_day = days_in_month_calc(new_year, new_month);
+    let new_day = dt.day().min(max_day);
+    NaiveDate::from_ymd_opt(new_year, new_month, new_day)
+        .and_then(|d| d.and_hms_opt(dt.hour(), dt.minute(), dt.second()))
+}
+
+/// Parse ODBC literal: {d '...'}, {t '...'}, {ts '...'}
+fn parse_odbc_literal(s: &str) -> Option<NaiveDateTime> {
+    let start = s.find('\'')?;
+    let end = s.rfind('\'')?;
+    if start >= end { return None; }
+    let inner = &s[start+1..end];
+    let lower = s.to_lowercase();
+    if lower.starts_with("{ts ") {
+        NaiveDateTime::parse_from_str(inner, "%Y-%m-%d %H:%M:%S").ok()
+    } else if lower.starts_with("{d ") {
+        NaiveDate::parse_from_str(inner, "%Y-%m-%d").ok()
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+    } else if lower.starts_with("{t ") {
+        NaiveTime::parse_from_str(inner, "%H:%M:%S").ok()
+            .and_then(|t| NaiveDate::from_ymd_opt(2000, 1, 1).map(|d| d.and_time(t)))
+    } else {
+        None
+    }
+}
+
+/// Central date parser: tries ODBC, ISO 8601, common US/EU formats, time-only, date serial
+fn parse_cfml_date(s: &str) -> Option<NaiveDateTime> {
+    let s = s.trim();
+    if s.is_empty() { return None; }
+
+    // ODBC literals
+    if s.starts_with('{') {
+        return parse_odbc_literal(s);
+    }
+
+    // DateTime formats (most specific first)
+    for fmt in &[
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y %I:%M:%S %p",
+        "%m/%d/%Y %H:%M",
+        "%d %b %Y %H:%M:%S",
+        "%b %d, %Y %H:%M:%S",
+        "%B %d, %Y %H:%M:%S",
+        "%d-%b-%Y %H:%M:%S",
+    ] {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
+            return Some(dt);
+        }
+    }
+
+    // Date-only formats → midnight
+    for fmt in &[
+        "%Y-%m-%d",
+        "%m/%d/%Y",
+        "%m-%d-%Y",
+        "%d %b %Y",
+        "%b %d, %Y",
+        "%B %d, %Y",
+        "%d-%b-%Y",
+    ] {
+        if let Ok(d) = NaiveDate::parse_from_str(s, fmt) {
+            return d.and_hms_opt(0, 0, 0);
+        }
+    }
+
+    // Time-only → base date 2000-01-01
+    for fmt in &["%H:%M:%S", "%I:%M:%S %p", "%H:%M"] {
+        if let Ok(t) = NaiveTime::parse_from_str(s, fmt) {
+            return NaiveDate::from_ymd_opt(2000, 1, 1).map(|d| d.and_time(t));
+        }
+    }
+
+    // Date serial number (days since 1899-12-30, OLE Automation date)
+    if let Ok(n) = s.parse::<f64>() {
+        if n.is_finite() {
+            let base = NaiveDate::from_ymd_opt(1899, 12, 30)?;
+            let days = n.floor() as i64;
+            let frac = n - n.floor();
+            let secs = (frac * 86400.0) as u32;
+            return base.and_hms_opt(0, 0, 0)
+                .and_then(|dt| dt.checked_add_signed(chrono::Duration::days(days)))
+                .and_then(|dt| dt.checked_add_signed(chrono::Duration::seconds(secs as i64)));
+        }
+    }
+
+    None
+}
+
+/// Determines whether `m`/`mm` means month or minute
+#[derive(Clone, Copy)]
+enum FormatMode { Date, Time, DateTime }
+
+fn month_name_full(m: u32) -> &'static str {
+    match m {
+        1 => "January", 2 => "February", 3 => "March", 4 => "April",
+        5 => "May", 6 => "June", 7 => "July", 8 => "August",
+        9 => "September", 10 => "October", 11 => "November", 12 => "December",
+        _ => "",
+    }
+}
+fn month_name_short(m: u32) -> &'static str {
+    match m {
+        1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr",
+        5 => "May", 6 => "Jun", 7 => "Jul", 8 => "Aug",
+        9 => "Sep", 10 => "Oct", 11 => "Nov", 12 => "Dec",
+        _ => "",
+    }
+}
+fn day_name_full(w: chrono::Weekday) -> &'static str {
+    match w {
+        chrono::Weekday::Mon => "Monday", chrono::Weekday::Tue => "Tuesday",
+        chrono::Weekday::Wed => "Wednesday", chrono::Weekday::Thu => "Thursday",
+        chrono::Weekday::Fri => "Friday", chrono::Weekday::Sat => "Saturday",
+        chrono::Weekday::Sun => "Sunday",
+    }
+}
+fn day_name_short(w: chrono::Weekday) -> &'static str {
+    match w {
+        chrono::Weekday::Mon => "Mon", chrono::Weekday::Tue => "Tue",
+        chrono::Weekday::Wed => "Wed", chrono::Weekday::Thu => "Thu",
+        chrono::Weekday::Fri => "Fri", chrono::Weekday::Sat => "Sat",
+        chrono::Weekday::Sun => "Sun",
+    }
+}
+fn hour12(h: u32) -> u32 {
+    match h % 12 { 0 => 12, other => other }
+}
+
+/// Resolve preset mask names into actual mask patterns
+fn resolve_preset(mask: &str, mode: &FormatMode) -> String {
+    let lower = mask.to_lowercase();
+    match mode {
+        FormatMode::Date => match lower.as_str() {
+            "" => "dd-mmm-yy".into(),
+            "short" => "m/d/yy".into(),
+            "medium" => "mmm d, yyyy".into(),
+            "long" => "mmmm d, yyyy".into(),
+            "full" => "dddd, mmmm d, yyyy".into(),
+            _ => mask.into(),
+        },
+        FormatMode::Time => match lower.as_str() {
+            "" => "hh:mm tt".into(),
+            "short" => "h:mm tt".into(),
+            "medium" => "h:mm:ss tt".into(),
+            "long" | "full" => "h:mm:ss tt".into(),
+            _ => mask.into(),
+        },
+        FormatMode::DateTime => match lower.as_str() {
+            "" => "dd-mmm-yyyy HH:nn:ss".into(),
+            "short" => "m/d/yy h:nn tt".into(),
+            "medium" => "mmm d, yyyy h:nn:ss tt".into(),
+            "long" => "mmmm d, yyyy h:nn:ss tt".into(),
+            "full" => "dddd, mmmm d, yyyy h:nn:ss tt".into(),
+            _ => mask.into(),
+        },
+    }
+}
+
+/// Match a format token at position `pos` in the mask character array
+fn match_format_token(chars: &[char], pos: usize, dt: &NaiveDateTime, mode: FormatMode) -> Option<(usize, String)> {
+    let remaining = chars.len() - pos;
+    // 4-char tokens
+    if remaining >= 4 {
+        let four: String = chars[pos..pos+4].iter().collect();
+        match four.to_lowercase().as_str() {
+            "dddd" => return Some((4, day_name_full(dt.weekday()).into())),
+            "mmmm" => return Some((4, match mode {
+                FormatMode::Time => format!("{:02}", dt.minute()),
+                _ => month_name_full(dt.month()).into(),
+            })),
+            "yyyy" => return Some((4, format!("{:04}", dt.year()))),
+            _ => {}
+        }
+    }
+    // 3-char tokens
+    if remaining >= 3 {
+        let three: String = chars[pos..pos+3].iter().collect();
+        match three.to_lowercase().as_str() {
+            "ddd" => return Some((3, day_name_short(dt.weekday()).into())),
+            "mmm" => return Some((3, match mode {
+                FormatMode::Time => format!("{:02}", dt.minute()),
+                _ => month_name_short(dt.month()).into(),
+            })),
+            _ => {}
+        }
+    }
+    // 2-char tokens
+    if remaining >= 2 {
+        let two: String = chars[pos..pos+2].iter().collect();
+        match two.as_str() {
+            "dd" | "DD" => return Some((2, format!("{:02}", dt.day()))),
+            "mm" | "MM" => return Some((2, match mode {
+                FormatMode::Time => format!("{:02}", dt.minute()),
+                _ => format!("{:02}", dt.month()),
+            })),
+            "yy" | "YY" => return Some((2, format!("{:02}", dt.year() % 100))),
+            "HH" => return Some((2, format!("{:02}", dt.hour()))),
+            "hh" => return Some((2, format!("{:02}", hour12(dt.hour())))),
+            "nn" | "NN" => return Some((2, format!("{:02}", dt.minute()))),
+            "ss" | "SS" => return Some((2, format!("{:02}", dt.second()))),
+            "tt" | "TT" => return Some((2, if dt.hour() < 12 { "AM".into() } else { "PM".into() })),
+            _ => {}
+        }
+    }
+    // 1-char tokens
+    if remaining >= 1 {
+        match chars[pos] {
+            'd' | 'D' => return Some((1, format!("{}", dt.day()))),
+            'm' | 'M' => return Some((1, match mode {
+                FormatMode::Time => format!("{}", dt.minute()),
+                _ => format!("{}", dt.month()),
+            })),
+            'y' | 'Y' => return Some((1, format!("{:02}", dt.year() % 100))),
+            'H' => return Some((1, format!("{}", dt.hour()))),
+            'h' => return Some((1, format!("{}", hour12(dt.hour())))),
+            'n' | 'N' => return Some((1, format!("{}", dt.minute()))),
+            's' | 'S' => return Some((1, format!("{}", dt.second()))),
+            't' | 'T' => return Some((1, if dt.hour() < 12 { "A".into() } else { "P".into() })),
+            'l' | 'L' => return Some((1, "000".into())),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Format a NaiveDateTime using a CFML mask string
+fn format_cfml_date(dt: &NaiveDateTime, mask: &str, mode: FormatMode) -> String {
+    let resolved = match mask.to_lowercase().as_str() {
+        "" | "short" | "medium" | "long" | "full" => resolve_preset(mask, &mode),
+        _ => mask.to_string(),
+    };
+    let chars: Vec<char> = resolved.chars().collect();
+    let mut result = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if let Some((len, replacement)) = match_format_token(&chars, i, dt, mode) {
+            result.push_str(&replacement);
+            i += len;
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+    result
+}
+
+// ===============================================
 // DATE/TIME FUNCTIONS
 // ===============================================
 
@@ -1694,14 +2593,14 @@ fn fn_now(_args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn fn_create_date(args: Vec<CfmlValue>) -> CfmlResult {
-    let year = get_int(&args, 0);
+    let year = short_year(get_int(&args, 0));
     let month = get_int(&args, 1);
     let day = get_int(&args, 2);
     Ok(CfmlValue::String(format!("{:04}-{:02}-{:02}", year, month, day)))
 }
 
 fn fn_create_date_time(args: Vec<CfmlValue>) -> CfmlResult {
-    let year = get_int(&args, 0);
+    let year = short_year(get_int(&args, 0));
     let month = get_int(&args, 1);
     let day = get_int(&args, 2);
     let hour = get_int(&args, 3);
@@ -1713,102 +2612,344 @@ fn fn_create_date_time(args: Vec<CfmlValue>) -> CfmlResult {
     )))
 }
 
+fn fn_create_time(args: Vec<CfmlValue>) -> CfmlResult {
+    let hour = get_int(&args, 0);
+    let minute = get_int(&args, 1);
+    let second = get_int(&args, 2);
+    Ok(CfmlValue::String(format!("{:02}:{:02}:{:02}", hour, minute, second)))
+}
+
 fn fn_create_odbc_date(args: Vec<CfmlValue>) -> CfmlResult {
-    let date = get_str(&args, 0);
-    Ok(CfmlValue::String(format!("{{d '{}'}}", date)))
+    let s = get_str(&args, 0);
+    if let Some(dt) = parse_cfml_date(&s) {
+        Ok(CfmlValue::String(format!("{{d '{}'}}", dt.format("%Y-%m-%d"))))
+    } else {
+        Ok(CfmlValue::String(format!("{{d '{}'}}", s)))
+    }
 }
 
 fn fn_create_odbc_date_time(args: Vec<CfmlValue>) -> CfmlResult {
-    let date = get_str(&args, 0);
-    Ok(CfmlValue::String(format!("{{ts '{}'}}", date)))
+    let s = get_str(&args, 0);
+    if let Some(dt) = parse_cfml_date(&s) {
+        Ok(CfmlValue::String(format!("{{ts '{}'}}", dt.format("%Y-%m-%d %H:%M:%S"))))
+    } else {
+        Ok(CfmlValue::String(format!("{{ts '{}'}}", s)))
+    }
 }
 
-fn fn_date_add(_args: Vec<CfmlValue>) -> CfmlResult {
-    // Would need proper date arithmetic
-    Ok(CfmlValue::String(get_str(&_args, 2)))
+fn fn_create_odbc_time(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0);
+    if let Some(dt) = parse_cfml_date(&s) {
+        Ok(CfmlValue::String(format!("{{t '{}'}}", dt.format("%H:%M:%S"))))
+    } else {
+        Ok(CfmlValue::String(format!("{{t '{}'}}", s)))
+    }
 }
 
-fn fn_date_diff(_args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(CfmlValue::Int(0))
+fn fn_date_add(args: Vec<CfmlValue>) -> CfmlResult {
+    let part = get_str(&args, 0).to_lowercase();
+    let number = get_int(&args, 1);
+    let date_str = get_str(&args, 2);
+    let dt = parse_cfml_date(&date_str)
+        .ok_or_else(|| CfmlError::runtime(format!("Invalid date: {}", date_str)))?;
+
+    let result: Option<NaiveDateTime> = match part.as_str() {
+        "yyyy" => add_months(&dt, number * 12),
+        "q" => add_months(&dt, number * 3),
+        "m" => add_months(&dt, number),
+        "y" | "d" => dt.checked_add_signed(chrono::Duration::days(number)),
+        "w" => dt.checked_add_signed(chrono::Duration::days(number)),
+        "ww" => dt.checked_add_signed(chrono::Duration::weeks(number)),
+        "h" => dt.checked_add_signed(chrono::Duration::hours(number)),
+        "n" => dt.checked_add_signed(chrono::Duration::minutes(number)),
+        "s" => dt.checked_add_signed(chrono::Duration::seconds(number)),
+        "l" => dt.checked_add_signed(chrono::Duration::milliseconds(number)),
+        _ => Some(dt),
+    };
+
+    match result {
+        Some(r) => Ok(CfmlValue::String(r.format("%Y-%m-%d %H:%M:%S").to_string())),
+        None => Err(CfmlError::runtime("Date arithmetic overflow".into())),
+    }
+}
+
+fn fn_date_diff(args: Vec<CfmlValue>) -> CfmlResult {
+    let part = get_str(&args, 0).to_lowercase();
+    let date1 = parse_cfml_date(&get_str(&args, 1))
+        .ok_or_else(|| CfmlError::runtime("Invalid date1".into()))?;
+    let date2 = parse_cfml_date(&get_str(&args, 2))
+        .ok_or_else(|| CfmlError::runtime("Invalid date2".into()))?;
+
+    let diff = match part.as_str() {
+        "yyyy" => date2.year() as i64 - date1.year() as i64,
+        "q" => {
+            let q1 = (date1.year() as i64) * 4 + ((date1.month() as i64 - 1) / 3);
+            let q2 = (date2.year() as i64) * 4 + ((date2.month() as i64 - 1) / 3);
+            q2 - q1
+        }
+        "m" => {
+            (date2.year() as i64 - date1.year() as i64) * 12
+                + date2.month() as i64 - date1.month() as i64
+        }
+        "y" | "d" => (date2 - date1).num_days(),
+        "w" => (date2 - date1).num_days() / 7,
+        "ww" => (date2 - date1).num_days() / 7,
+        "h" => (date2 - date1).num_hours(),
+        "n" => (date2 - date1).num_minutes(),
+        "s" => (date2 - date1).num_seconds(),
+        "l" => (date2 - date1).num_milliseconds(),
+        _ => 0,
+    };
+    Ok(CfmlValue::Int(diff))
 }
 
 fn fn_date_format(args: Vec<CfmlValue>) -> CfmlResult {
-    let date = get_str(&args, 0);
-    let _mask = get_str(&args, 1);
-    // Return date as-is for now (proper formatting would need date parsing)
-    Ok(CfmlValue::String(date))
+    let date_str = get_str(&args, 0);
+    let mask = if args.len() > 1 { get_str(&args, 1) } else { String::new() };
+    let dt = parse_cfml_date(&date_str)
+        .ok_or_else(|| CfmlError::runtime(format!("Invalid date: {}", date_str)))?;
+    Ok(CfmlValue::String(format_cfml_date(&dt, &mask, FormatMode::Date)))
 }
 
 fn fn_time_format(args: Vec<CfmlValue>) -> CfmlResult {
-    let date = get_str(&args, 0);
-    Ok(CfmlValue::String(date))
+    let date_str = get_str(&args, 0);
+    let mask = if args.len() > 1 { get_str(&args, 1) } else { String::new() };
+    let dt = parse_cfml_date(&date_str)
+        .ok_or_else(|| CfmlError::runtime(format!("Invalid date: {}", date_str)))?;
+    Ok(CfmlValue::String(format_cfml_date(&dt, &mask, FormatMode::Time)))
 }
 
 fn fn_date_time_format(args: Vec<CfmlValue>) -> CfmlResult {
-    let date = get_str(&args, 0);
-    Ok(CfmlValue::String(date))
+    let date_str = get_str(&args, 0);
+    let mask = if args.len() > 1 { get_str(&args, 1) } else { String::new() };
+    let dt = parse_cfml_date(&date_str)
+        .ok_or_else(|| CfmlError::runtime(format!("Invalid date: {}", date_str)))?;
+    Ok(CfmlValue::String(format_cfml_date(&dt, &mask, FormatMode::DateTime)))
+}
+
+fn fn_parse_date_time(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0);
+    match parse_cfml_date(&s) {
+        Some(dt) => Ok(CfmlValue::String(dt.format("%Y-%m-%d %H:%M:%S").to_string())),
+        None => Err(CfmlError::runtime(format!("Cannot parse date: {}", s))),
+    }
 }
 
 fn fn_year(args: Vec<CfmlValue>) -> CfmlResult {
-    let date = get_str(&args, 0);
-    let year: i64 = date.split(|c: char| !c.is_ascii_digit()).next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    Ok(CfmlValue::Int(year))
+    let dt = parse_cfml_date(&get_str(&args, 0))
+        .ok_or_else(|| CfmlError::runtime("Invalid date".into()))?;
+    Ok(CfmlValue::Int(dt.year() as i64))
 }
 
 fn fn_month(args: Vec<CfmlValue>) -> CfmlResult {
-    let date = get_str(&args, 0);
-    let parts: Vec<&str> = date.split(|c: char| !c.is_ascii_digit()).collect();
-    Ok(CfmlValue::Int(parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0)))
+    let dt = parse_cfml_date(&get_str(&args, 0))
+        .ok_or_else(|| CfmlError::runtime("Invalid date".into()))?;
+    Ok(CfmlValue::Int(dt.month() as i64))
 }
 
 fn fn_day(args: Vec<CfmlValue>) -> CfmlResult {
-    let date = get_str(&args, 0);
-    let parts: Vec<&str> = date.split(|c: char| !c.is_ascii_digit()).collect();
-    Ok(CfmlValue::Int(parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0)))
+    let dt = parse_cfml_date(&get_str(&args, 0))
+        .ok_or_else(|| CfmlError::runtime("Invalid date".into()))?;
+    Ok(CfmlValue::Int(dt.day() as i64))
 }
 
 fn fn_hour(args: Vec<CfmlValue>) -> CfmlResult {
-    let date = get_str(&args, 0);
-    let parts: Vec<&str> = date.split(|c: char| !c.is_ascii_digit()).collect();
-    Ok(CfmlValue::Int(parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0)))
+    let dt = parse_cfml_date(&get_str(&args, 0))
+        .ok_or_else(|| CfmlError::runtime("Invalid date".into()))?;
+    Ok(CfmlValue::Int(dt.hour() as i64))
 }
 
 fn fn_minute(args: Vec<CfmlValue>) -> CfmlResult {
-    let date = get_str(&args, 0);
-    let parts: Vec<&str> = date.split(|c: char| !c.is_ascii_digit()).collect();
-    Ok(CfmlValue::Int(parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0)))
+    let dt = parse_cfml_date(&get_str(&args, 0))
+        .ok_or_else(|| CfmlError::runtime("Invalid date".into()))?;
+    Ok(CfmlValue::Int(dt.minute() as i64))
 }
 
 fn fn_second(args: Vec<CfmlValue>) -> CfmlResult {
-    let date = get_str(&args, 0);
-    let parts: Vec<&str> = date.split(|c: char| !c.is_ascii_digit()).collect();
-    Ok(CfmlValue::Int(parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(0)))
+    let dt = parse_cfml_date(&get_str(&args, 0))
+        .ok_or_else(|| CfmlError::runtime("Invalid date".into()))?;
+    Ok(CfmlValue::Int(dt.second() as i64))
 }
 
-fn fn_day_of_week(_args: Vec<CfmlValue>) -> CfmlResult { Ok(CfmlValue::Int(1)) }
+/// CFML dayOfWeek: 1=Sunday, 2=Monday, ..., 7=Saturday
+fn fn_day_of_week(args: Vec<CfmlValue>) -> CfmlResult {
+    let dt = parse_cfml_date(&get_str(&args, 0))
+        .ok_or_else(|| CfmlError::runtime("Invalid date".into()))?;
+    Ok(CfmlValue::Int(dt.weekday().number_from_sunday() as i64))
+}
+
 fn fn_day_of_week_as_string(args: Vec<CfmlValue>) -> CfmlResult {
-    let dow = get_int(&args, 0);
+    let input = get_str(&args, 0);
+    // Accept either a day number (1-7) or a date string
+    let dow = if let Ok(n) = input.parse::<i64>() {
+        n
+    } else if let Some(dt) = parse_cfml_date(&input) {
+        dt.weekday().number_from_sunday() as i64
+    } else {
+        return Ok(CfmlValue::String(String::new()));
+    };
     let names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
     Ok(CfmlValue::String(names.get((dow - 1) as usize).unwrap_or(&"").to_string()))
 }
-fn fn_day_of_year(_args: Vec<CfmlValue>) -> CfmlResult { Ok(CfmlValue::Int(1)) }
-fn fn_days_in_month(_args: Vec<CfmlValue>) -> CfmlResult { Ok(CfmlValue::Int(30)) }
-fn fn_days_in_year(_args: Vec<CfmlValue>) -> CfmlResult { Ok(CfmlValue::Int(365)) }
-fn fn_first_day_of_month(_args: Vec<CfmlValue>) -> CfmlResult { Ok(CfmlValue::Int(1)) }
+
+fn fn_day_of_week_short_as_string(args: Vec<CfmlValue>) -> CfmlResult {
+    let input = get_str(&args, 0);
+    let dow = if let Ok(n) = input.parse::<i64>() {
+        n
+    } else if let Some(dt) = parse_cfml_date(&input) {
+        dt.weekday().number_from_sunday() as i64
+    } else {
+        return Ok(CfmlValue::String(String::new()));
+    };
+    let names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    Ok(CfmlValue::String(names.get((dow - 1) as usize).unwrap_or(&"").to_string()))
+}
+
+fn fn_day_of_year(args: Vec<CfmlValue>) -> CfmlResult {
+    let dt = parse_cfml_date(&get_str(&args, 0))
+        .ok_or_else(|| CfmlError::runtime("Invalid date".into()))?;
+    Ok(CfmlValue::Int(dt.ordinal() as i64))
+}
+
+fn fn_days_in_month(args: Vec<CfmlValue>) -> CfmlResult {
+    let dt = parse_cfml_date(&get_str(&args, 0))
+        .ok_or_else(|| CfmlError::runtime("Invalid date".into()))?;
+    Ok(CfmlValue::Int(days_in_month_calc(dt.year(), dt.month()) as i64))
+}
+
+fn fn_days_in_year(args: Vec<CfmlValue>) -> CfmlResult {
+    let dt = parse_cfml_date(&get_str(&args, 0))
+        .ok_or_else(|| CfmlError::runtime("Invalid date".into()))?;
+    let y = dt.year();
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    Ok(CfmlValue::Int(if leap { 366 } else { 365 }))
+}
+
+/// Returns the day-of-year for the first day of the date's month
+fn fn_first_day_of_month(args: Vec<CfmlValue>) -> CfmlResult {
+    let dt = parse_cfml_date(&get_str(&args, 0))
+        .ok_or_else(|| CfmlError::runtime("Invalid date".into()))?;
+    let first = NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1)
+        .ok_or_else(|| CfmlError::runtime("Invalid date".into()))?;
+    Ok(CfmlValue::Int(first.ordinal() as i64))
+}
+
 fn fn_is_leap_year(args: Vec<CfmlValue>) -> CfmlResult {
-    let year = get_int(&args, 0);
+    let input = get_str(&args, 0);
+    // Accept either a year number or a date string
+    let year = if let Ok(y) = input.parse::<i64>() {
+        y
+    } else if let Some(dt) = parse_cfml_date(&input) {
+        dt.year() as i64
+    } else {
+        return Ok(CfmlValue::Bool(false));
+    };
     Ok(CfmlValue::Bool((year % 4 == 0 && year % 100 != 0) || year % 400 == 0))
 }
+
 fn fn_month_as_string(args: Vec<CfmlValue>) -> CfmlResult {
-    let month = get_int(&args, 0);
-    let names = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-    Ok(CfmlValue::String(names.get((month - 1) as usize).unwrap_or(&"").to_string()))
+    let input = get_str(&args, 0);
+    let month = if let Ok(m) = input.parse::<i64>() {
+        m
+    } else if let Some(dt) = parse_cfml_date(&input) {
+        dt.month() as i64
+    } else {
+        return Ok(CfmlValue::String(String::new()));
+    };
+    Ok(CfmlValue::String(month_name_full(month as u32).to_string()))
 }
+
+fn fn_month_short_as_string(args: Vec<CfmlValue>) -> CfmlResult {
+    let input = get_str(&args, 0);
+    let month = if let Ok(m) = input.parse::<i64>() {
+        m
+    } else if let Some(dt) = parse_cfml_date(&input) {
+        dt.month() as i64
+    } else {
+        return Ok(CfmlValue::String(String::new()));
+    };
+    Ok(CfmlValue::String(month_name_short(month as u32).to_string()))
+}
+
+/// quarter(date) - returns 1-4 based on the month of the date
 fn fn_quarter(args: Vec<CfmlValue>) -> CfmlResult {
-    let month = get_int(&args, 0);
+    let input = get_str(&args, 0);
+    let month = if let Ok(m) = input.parse::<i64>() {
+        // Legacy: accept a raw month number
+        m
+    } else if let Some(dt) = parse_cfml_date(&input) {
+        dt.month() as i64
+    } else {
+        return Ok(CfmlValue::Int(0));
+    };
     Ok(CfmlValue::Int(((month - 1) / 3) + 1))
 }
-fn fn_week(_args: Vec<CfmlValue>) -> CfmlResult { Ok(CfmlValue::Int(1)) }
+
+fn fn_week(args: Vec<CfmlValue>) -> CfmlResult {
+    let dt = parse_cfml_date(&get_str(&args, 0))
+        .ok_or_else(|| CfmlError::runtime("Invalid date".into()))?;
+    // CFML week: ISO week number
+    Ok(CfmlValue::Int(dt.iso_week().week() as i64))
+}
+
+/// datePart(datepart, date) - extracts the specified part from a date
+fn fn_date_part(args: Vec<CfmlValue>) -> CfmlResult {
+    let part = get_str(&args, 0).to_lowercase();
+    let dt = parse_cfml_date(&get_str(&args, 1))
+        .ok_or_else(|| CfmlError::runtime("Invalid date".into()))?;
+    let val = match part.as_str() {
+        "yyyy" => dt.year() as i64,
+        "q" => ((dt.month() as i64 - 1) / 3) + 1,
+        "m" => dt.month() as i64,
+        "y" => dt.ordinal() as i64,
+        "d" => dt.day() as i64,
+        "w" => dt.weekday().number_from_sunday() as i64,
+        "ww" => dt.iso_week().week() as i64,
+        "h" => dt.hour() as i64,
+        "n" => dt.minute() as i64,
+        "s" => dt.second() as i64,
+        "l" => 0, // milliseconds not tracked
+        _ => return Err(CfmlError::runtime(format!("Invalid datepart: {}", part))),
+    };
+    Ok(CfmlValue::Int(val))
+}
+
+/// dateCompare(date1, date2 [, datePart]) - returns -1, 0, or 1
+fn fn_date_compare(args: Vec<CfmlValue>) -> CfmlResult {
+    let dt1 = parse_cfml_date(&get_str(&args, 0))
+        .ok_or_else(|| CfmlError::runtime("Invalid date1".into()))?;
+    let dt2 = parse_cfml_date(&get_str(&args, 1))
+        .ok_or_else(|| CfmlError::runtime("Invalid date2".into()))?;
+    let part = if args.len() > 2 { get_str(&args, 2).to_lowercase() } else { "s".into() };
+
+    // Truncate precision based on datepart
+    let (v1, v2) = match part.as_str() {
+        "yyyy" => (
+            NaiveDate::from_ymd_opt(dt1.year(), 1, 1).unwrap().and_hms_opt(0,0,0).unwrap(),
+            NaiveDate::from_ymd_opt(dt2.year(), 1, 1).unwrap().and_hms_opt(0,0,0).unwrap(),
+        ),
+        "m" => (
+            NaiveDate::from_ymd_opt(dt1.year(), dt1.month(), 1).unwrap().and_hms_opt(0,0,0).unwrap(),
+            NaiveDate::from_ymd_opt(dt2.year(), dt2.month(), 1).unwrap().and_hms_opt(0,0,0).unwrap(),
+        ),
+        "d" => (
+            dt1.date().and_hms_opt(0,0,0).unwrap(),
+            dt2.date().and_hms_opt(0,0,0).unwrap(),
+        ),
+        "h" => (
+            dt1.date().and_hms_opt(dt1.hour(), 0, 0).unwrap(),
+            dt2.date().and_hms_opt(dt2.hour(), 0, 0).unwrap(),
+        ),
+        "n" => (
+            dt1.date().and_hms_opt(dt1.hour(), dt1.minute(), 0).unwrap(),
+            dt2.date().and_hms_opt(dt2.hour(), dt2.minute(), 0).unwrap(),
+        ),
+        _ => (dt1, dt2), // "s" or default: full precision
+    };
+
+    let cmp = if v1 < v2 { -1i64 } else if v1 > v2 { 1 } else { 0 };
+    Ok(CfmlValue::Int(cmp))
+}
 
 fn fn_get_tick_count(_args: Vec<CfmlValue>) -> CfmlResult {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1828,7 +2969,7 @@ fn fn_list_len(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
     if list.is_empty() { return Ok(CfmlValue::Int(0)); }
     let delimiter = get_delimiter(&args, 1);
-    Ok(CfmlValue::Int(list.split(&delimiter).count() as i64))
+    Ok(CfmlValue::Int(cfml_list_split(&list, &delimiter).len() as i64))
 }
 
 fn fn_list_append(args: Vec<CfmlValue>) -> CfmlResult {
@@ -1857,8 +2998,8 @@ fn fn_list_get_at(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
     let index = (get_int(&args, 1) as usize).saturating_sub(1);
     let delimiter = get_delimiter(&args, 2);
-    let items: Vec<&str> = list.split(&delimiter).collect();
-    Ok(CfmlValue::String(items.get(index).unwrap_or(&"").trim().to_string()))
+    let items = cfml_list_split(&list, &delimiter);
+    Ok(CfmlValue::String(items.get(index).unwrap_or(&"").to_string()))
 }
 
 fn fn_list_set_at(args: Vec<CfmlValue>) -> CfmlResult {
@@ -1866,11 +3007,12 @@ fn fn_list_set_at(args: Vec<CfmlValue>) -> CfmlResult {
     let index = (get_int(&args, 1) as usize).saturating_sub(1);
     let value = get_str(&args, 2);
     let delimiter = get_delimiter(&args, 3);
-    let mut items: Vec<String> = list.split(&delimiter).map(|s| s.to_string()).collect();
+    let first_delim = delimiter.chars().next().unwrap_or(',').to_string();
+    let mut items: Vec<String> = cfml_list_split(&list, &delimiter).iter().map(|s| s.to_string()).collect();
     if index < items.len() {
         items[index] = value;
     }
-    Ok(CfmlValue::String(items.join(&delimiter)))
+    Ok(CfmlValue::String(items.join(&first_delim)))
 }
 
 fn fn_list_insert_at(args: Vec<CfmlValue>) -> CfmlResult {
@@ -1878,29 +3020,31 @@ fn fn_list_insert_at(args: Vec<CfmlValue>) -> CfmlResult {
     let index = (get_int(&args, 1) as usize).saturating_sub(1);
     let value = get_str(&args, 2);
     let delimiter = get_delimiter(&args, 3);
-    let mut items: Vec<String> = list.split(&delimiter).map(|s| s.to_string()).collect();
+    let first_delim = delimiter.chars().next().unwrap_or(',').to_string();
+    let mut items: Vec<String> = cfml_list_split(&list, &delimiter).iter().map(|s| s.to_string()).collect();
     if index <= items.len() {
         items.insert(index, value);
     }
-    Ok(CfmlValue::String(items.join(&delimiter)))
+    Ok(CfmlValue::String(items.join(&first_delim)))
 }
 
 fn fn_list_delete_at(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
     let index = (get_int(&args, 1) as usize).saturating_sub(1);
     let delimiter = get_delimiter(&args, 2);
-    let mut items: Vec<String> = list.split(&delimiter).map(|s| s.to_string()).collect();
+    let first_delim = delimiter.chars().next().unwrap_or(',').to_string();
+    let mut items: Vec<String> = cfml_list_split(&list, &delimiter).iter().map(|s| s.to_string()).collect();
     if index < items.len() {
         items.remove(index);
     }
-    Ok(CfmlValue::String(items.join(&delimiter)))
+    Ok(CfmlValue::String(items.join(&first_delim)))
 }
 
 fn fn_list_find(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
     let value = get_str(&args, 1);
     let delimiter = get_delimiter(&args, 2);
-    for (i, item) in list.split(&delimiter).enumerate() {
+    for (i, item) in cfml_list_split(&list, &delimiter).iter().enumerate() {
         if item.trim() == value { return Ok(CfmlValue::Int((i + 1) as i64)); }
     }
     Ok(CfmlValue::Int(0))
@@ -1910,7 +3054,7 @@ fn fn_list_find_no_case(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
     let value = get_str(&args, 1).to_lowercase();
     let delimiter = get_delimiter(&args, 2);
-    for (i, item) in list.split(&delimiter).enumerate() {
+    for (i, item) in cfml_list_split(&list, &delimiter).iter().enumerate() {
         if item.trim().to_lowercase() == value { return Ok(CfmlValue::Int((i + 1) as i64)); }
     }
     Ok(CfmlValue::Int(0))
@@ -1920,7 +3064,7 @@ fn fn_list_contains(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
     let value = get_str(&args, 1);
     let delimiter = get_delimiter(&args, 2);
-    for (i, item) in list.split(&delimiter).enumerate() {
+    for (i, item) in cfml_list_split(&list, &delimiter).iter().enumerate() {
         if item.trim().contains(&value) { return Ok(CfmlValue::Int((i + 1) as i64)); }
     }
     Ok(CfmlValue::Int(0))
@@ -1930,7 +3074,7 @@ fn fn_list_contains_no_case(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
     let value = get_str(&args, 1).to_lowercase();
     let delimiter = get_delimiter(&args, 2);
-    for (i, item) in list.split(&delimiter).enumerate() {
+    for (i, item) in cfml_list_split(&list, &delimiter).iter().enumerate() {
         if item.trim().to_lowercase().contains(&value) { return Ok(CfmlValue::Int((i + 1) as i64)); }
     }
     Ok(CfmlValue::Int(0))
@@ -1938,9 +3082,11 @@ fn fn_list_contains_no_case(args: Vec<CfmlValue>) -> CfmlResult {
 
 fn fn_list_sort(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
-    let sort_type = get_str(&args, 1).to_lowercase();
-    let delimiter = get_delimiter(&args, 2);
-    let mut items: Vec<String> = list.split(&delimiter).map(|s| s.trim().to_string()).collect();
+    let sort_type = if args.len() > 1 { get_str(&args, 1).to_lowercase() } else { "text".to_string() };
+    let sort_order = if args.len() > 2 { get_str(&args, 2).to_lowercase() } else { "asc".to_string() };
+    let delimiter = if args.len() > 3 { get_str(&args, 3) } else { ",".to_string() };
+    let first_delim = delimiter.chars().next().unwrap_or(',').to_string();
+    let mut items: Vec<String> = cfml_list_split(&list, &delimiter).iter().map(|s| s.trim().to_string()).collect();
     match sort_type.as_str() {
         "numeric" => {
             items.sort_by(|a, b| {
@@ -1949,39 +3095,53 @@ fn fn_list_sort(args: Vec<CfmlValue>) -> CfmlResult {
                 fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
             });
         }
-        _ => items.sort(),
+        "textnocase" => {
+            items.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+        }
+        _ => items.sort(), // "text" - case-sensitive
     }
-    Ok(CfmlValue::String(items.join(&delimiter)))
+    if sort_order == "desc" {
+        items.reverse();
+    }
+    Ok(CfmlValue::String(items.join(&first_delim)))
 }
 
 fn fn_list_to_array(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
     let delimiter = get_delimiter(&args, 1);
+    let include_empty = args.get(2).map(|v| v.is_true()).unwrap_or(false);
     if list.is_empty() {
         return Ok(CfmlValue::Array(Vec::new()));
     }
-    let items: Vec<CfmlValue> = list.split(&delimiter).map(|s| CfmlValue::String(s.trim().to_string())).collect();
+    let items: Vec<CfmlValue> = if include_empty {
+        cfml_list_split_keep_empty(&list, &delimiter).iter().map(|s| CfmlValue::String(s.to_string())).collect()
+    } else {
+        cfml_list_split(&list, &delimiter).iter().map(|s| CfmlValue::String(s.to_string())).collect()
+    };
     Ok(CfmlValue::Array(items))
 }
 
 fn fn_list_first(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
     let delimiter = get_delimiter(&args, 1);
-    Ok(CfmlValue::String(list.split(&delimiter).next().unwrap_or("").trim().to_string()))
+    let items = cfml_list_split(&list, &delimiter);
+    Ok(CfmlValue::String(items.first().unwrap_or(&"").to_string()))
 }
 
 fn fn_list_last(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
     let delimiter = get_delimiter(&args, 1);
-    Ok(CfmlValue::String(list.split(&delimiter).last().unwrap_or("").trim().to_string()))
+    let items = cfml_list_split(&list, &delimiter);
+    Ok(CfmlValue::String(items.last().unwrap_or(&"").to_string()))
 }
 
 fn fn_list_rest(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
     let delimiter = get_delimiter(&args, 1);
-    let items: Vec<&str> = list.split(&delimiter).collect();
+    let first_delim = delimiter.chars().next().unwrap_or(',').to_string();
+    let items = cfml_list_split(&list, &delimiter);
     if items.len() > 1 {
-        Ok(CfmlValue::String(items[1..].join(&delimiter)))
+        Ok(CfmlValue::String(items[1..].join(&first_delim)))
     } else {
         Ok(CfmlValue::String(String::new()))
     }
@@ -1990,23 +3150,25 @@ fn fn_list_rest(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_list_remove_duplicates(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
     let delimiter = get_delimiter(&args, 1);
+    let ignore_case = args.get(2).map(|v| v.is_true()).unwrap_or(false);
+    let first_delim = delimiter.chars().next().unwrap_or(',').to_string();
     let mut seen = Vec::new();
     let mut result = Vec::new();
-    for item in list.split(&delimiter) {
-        let trimmed = item.trim().to_string();
-        if !seen.contains(&trimmed) {
-            seen.push(trimmed.clone());
-            result.push(trimmed);
+    for item in cfml_list_split(&list, &delimiter) {
+        let compare_key = if ignore_case { item.to_lowercase() } else { item.to_string() };
+        if !seen.contains(&compare_key) {
+            seen.push(compare_key);
+            result.push(item.to_string());
         }
     }
-    Ok(CfmlValue::String(result.join(&delimiter)))
+    Ok(CfmlValue::String(result.join(&first_delim)))
 }
 
 fn fn_list_value_count(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
     let value = get_str(&args, 1);
     let delimiter = get_delimiter(&args, 2);
-    let count = list.split(&delimiter).filter(|s| s.trim() == value).count();
+    let count = cfml_list_split(&list, &delimiter).iter().filter(|s| s.trim() == value).count();
     Ok(CfmlValue::Int(count as i64))
 }
 
@@ -2014,7 +3176,7 @@ fn fn_list_value_count_no_case(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
     let value = get_str(&args, 1).to_lowercase();
     let delimiter = get_delimiter(&args, 2);
-    let count = list.split(&delimiter).filter(|s| s.trim().to_lowercase() == value).count();
+    let count = cfml_list_split(&list, &delimiter).iter().filter(|s| s.trim().to_lowercase() == value).count();
     Ok(CfmlValue::Int(count as i64))
 }
 
@@ -2022,22 +3184,39 @@ fn fn_list_change_delims(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
     let new_delim = get_str(&args, 1);
     let old_delim = get_delimiter(&args, 2);
-    Ok(CfmlValue::String(list.split(&old_delim).collect::<Vec<_>>().join(&new_delim)))
+    Ok(CfmlValue::String(cfml_list_split(&list, &old_delim).join(&new_delim)))
 }
 
 fn fn_list_qualify(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
-    let delimiter = get_delimiter(&args, 1);
-    let qualifier = get_str(&args, 2);
-    let items: Vec<String> = list.split(&delimiter).map(|s| format!("{}{}{}", qualifier, s.trim(), qualifier)).collect();
-    Ok(CfmlValue::String(items.join(&delimiter)))
+    let qualifier = get_str(&args, 1);
+    let delimiter = get_delimiter(&args, 2);
+    let first_delim = delimiter.chars().next().unwrap_or(',').to_string();
+    let items: Vec<String> = cfml_list_split(&list, &delimiter).iter().map(|s| format!("{}{}{}", qualifier, s.trim(), qualifier)).collect();
+    Ok(CfmlValue::String(items.join(&first_delim)))
 }
 
 fn fn_list_compact(args: Vec<CfmlValue>) -> CfmlResult {
     let list = get_str(&args, 0);
     let delimiter = get_delimiter(&args, 1);
-    let items: Vec<&str> = list.split(&delimiter).filter(|s| !s.trim().is_empty()).collect();
-    Ok(CfmlValue::String(items.join(&delimiter)))
+    let first_delim = delimiter.chars().next().unwrap_or(',').to_string();
+    let items: Vec<&str> = cfml_list_split(&list, &delimiter);
+    Ok(CfmlValue::String(items.join(&first_delim)))
+}
+
+fn fn_list_each(_args: Vec<CfmlValue>) -> CfmlResult {
+    // Needs VM closure support
+    Err(CfmlError::runtime("listEach() requires VM-level closure support".to_string()))
+}
+
+fn fn_list_map(_args: Vec<CfmlValue>) -> CfmlResult {
+    // Needs VM closure support
+    Err(CfmlError::runtime("listMap() requires VM-level closure support".to_string()))
+}
+
+fn fn_list_filter(_args: Vec<CfmlValue>) -> CfmlResult {
+    // Needs VM closure support
+    Err(CfmlError::runtime("listFilter() requires VM-level closure support".to_string()))
 }
 
 // ===============================================
@@ -2063,33 +3242,58 @@ fn serialize_value(val: &CfmlValue) -> String {
             let items: Vec<String> = s.iter().map(|(k, v)| format!("\"{}\":{}", k.replace('"', "\\\""), serialize_value(v))).collect();
             format!("{{{}}}", items.join(","))
         }
+        CfmlValue::Query(q) => {
+            let rows: Vec<String> = q.rows.iter().map(|row| {
+                let fields: Vec<String> = q.columns.iter().map(|col| {
+                    let val = row.get(col).unwrap_or(&CfmlValue::Null);
+                    format!("\"{}\":{}", col.replace('"', "\\\""), serialize_value(val))
+                }).collect();
+                format!("{{{}}}", fields.join(","))
+            }).collect();
+            format!("[{}]", rows.join(","))
+        }
         _ => "null".to_string(),
     }
 }
 
 fn fn_deserialize_json(args: Vec<CfmlValue>) -> CfmlResult {
-    let json = get_str(&args, 0).trim().to_string();
-    Ok(parse_json(&json))
+    let json = get_str(&args, 0);
+    match serde_json::from_str::<serde_json::Value>(&json) {
+        Ok(value) => Ok(serde_json_to_cfml(value)),
+        Err(e) => Err(CfmlError::runtime(format!("Invalid JSON: {}", e))),
+    }
 }
 
-fn parse_json(s: &str) -> CfmlValue {
-    let s = s.trim();
-    if s == "null" { return CfmlValue::Null; }
-    if s == "true" { return CfmlValue::Bool(true); }
-    if s == "false" { return CfmlValue::Bool(false); }
-    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-        return CfmlValue::String(s[1..s.len()-1].replace("\\\"", "\"").replace("\\n", "\n").replace("\\\\", "\\"));
+fn serde_json_to_cfml(value: serde_json::Value) -> CfmlValue {
+    match value {
+        serde_json::Value::Null => CfmlValue::Null,
+        serde_json::Value::Bool(b) => CfmlValue::Bool(b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                CfmlValue::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                CfmlValue::Double(f)
+            } else {
+                CfmlValue::Int(0)
+            }
+        }
+        serde_json::Value::String(s) => CfmlValue::String(s),
+        serde_json::Value::Array(arr) => {
+            CfmlValue::Array(arr.into_iter().map(serde_json_to_cfml).collect())
+        }
+        serde_json::Value::Object(obj) => {
+            let mut map = HashMap::new();
+            for (k, v) in obj {
+                map.insert(k, serde_json_to_cfml(v));
+            }
+            CfmlValue::Struct(map)
+        }
     }
-    if let Ok(i) = s.parse::<i64>() { return CfmlValue::Int(i); }
-    if let Ok(d) = s.parse::<f64>() { return CfmlValue::Double(d); }
-    // Simplified: return as string for complex JSON
-    CfmlValue::String(s.to_string())
 }
 
 fn fn_is_json(args: Vec<CfmlValue>) -> CfmlResult {
-    let s = get_str(&args, 0).trim().to_string();
-    let valid = s.starts_with('{') || s.starts_with('[') || s.starts_with('"') || s == "null" || s == "true" || s == "false" || s.parse::<f64>().is_ok();
-    Ok(CfmlValue::Bool(valid))
+    let s = get_str(&args, 0);
+    Ok(CfmlValue::Bool(serde_json::from_str::<serde_json::Value>(&s).is_ok()))
 }
 
 // ===============================================
@@ -2117,8 +3321,35 @@ fn fn_query_new(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_query_add_row(args: Vec<CfmlValue>) -> CfmlResult {
     if let Some(CfmlValue::Query(q)) = args.first() {
         let mut result = q.clone();
-        let row = HashMap::new();
-        result.rows.push(row);
+        let num_rows = if args.len() >= 2 {
+            match &args[1] {
+                CfmlValue::Int(n) => *n as usize,
+                CfmlValue::Struct(data) => {
+                    let mut row = HashMap::new();
+                    for (k, v) in data {
+                        row.insert(k.clone(), v.clone());
+                    }
+                    result.rows.push(row);
+                    return Ok(CfmlValue::Query(result));
+                }
+                CfmlValue::Array(rows) => {
+                    for item in rows {
+                        if let CfmlValue::Struct(data) = item {
+                            result.rows.push(data.clone());
+                        } else {
+                            result.rows.push(HashMap::new());
+                        }
+                    }
+                    return Ok(CfmlValue::Query(result));
+                }
+                _ => 1,
+            }
+        } else {
+            1
+        };
+        for _ in 0..num_rows {
+            result.rows.push(HashMap::new());
+        }
         Ok(CfmlValue::Query(result))
     } else {
         Ok(CfmlValue::Null)
@@ -2149,7 +3380,106 @@ fn fn_query_add_column(args: Vec<CfmlValue>) -> CfmlResult {
     if args.len() >= 2 {
         if let CfmlValue::Query(q) = &args[0] {
             let mut result = q.clone();
-            result.columns.push(args[1].as_string());
+            let col_name = args[1].as_string();
+            result.columns.push(col_name.clone());
+            if let Some(CfmlValue::Array(values)) = args.get(2) {
+                for (i, val) in values.iter().enumerate() {
+                    if i < result.rows.len() {
+                        result.rows[i].insert(col_name.clone(), val.clone());
+                    }
+                }
+            }
+            return Ok(CfmlValue::Query(result));
+        }
+    }
+    Ok(CfmlValue::Null)
+}
+
+fn fn_query_get_row(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() >= 2 {
+        if let CfmlValue::Query(q) = &args[0] {
+            let row_idx = (get_int(&args, 1) as usize).saturating_sub(1);
+            if row_idx < q.rows.len() {
+                return Ok(CfmlValue::Struct(q.rows[row_idx].clone()));
+            }
+            return Err(CfmlError::runtime(format!("queryGetRow: row {} is out of range (query has {} rows)", row_idx + 1, q.rows.len())));
+        }
+    }
+    Err(CfmlError::runtime("queryGetRow requires a query and row number".to_string()))
+}
+
+fn fn_query_get_cell(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() >= 2 {
+        if let CfmlValue::Query(q) = &args[0] {
+            let column = args[1].as_string();
+            let row_idx = if args.len() >= 3 {
+                (get_int(&args, 2) as usize).saturating_sub(1)
+            } else {
+                0
+            };
+            if row_idx < q.rows.len() {
+                let col_lower = column.to_lowercase();
+                for (k, v) in &q.rows[row_idx] {
+                    if k.to_lowercase() == col_lower {
+                        return Ok(v.clone());
+                    }
+                }
+                return Ok(CfmlValue::Null);
+            }
+            return Err(CfmlError::runtime(format!("queryGetCell: row {} is out of range", row_idx + 1)));
+        }
+    }
+    Err(CfmlError::runtime("queryGetCell requires a query and column name".to_string()))
+}
+
+fn fn_query_record_count(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.first() {
+        Some(CfmlValue::Query(q)) => Ok(CfmlValue::Int(q.rows.len() as i64)),
+        _ => Ok(CfmlValue::Int(0)),
+    }
+}
+
+fn fn_query_column_count(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.first() {
+        Some(CfmlValue::Query(q)) => Ok(CfmlValue::Int(q.columns.len() as i64)),
+        _ => Ok(CfmlValue::Int(0)),
+    }
+}
+
+fn fn_query_column_list(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.first() {
+        Some(CfmlValue::Query(q)) => Ok(CfmlValue::String(q.columns.join(","))),
+        _ => Ok(CfmlValue::String(String::new())),
+    }
+}
+
+fn fn_query_delete_row(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() >= 2 {
+        if let CfmlValue::Query(q) = &args[0] {
+            let mut result = q.clone();
+            let row_idx = (get_int(&args, 1) as usize).saturating_sub(1);
+            if row_idx < result.rows.len() {
+                result.rows.remove(row_idx);
+                return Ok(CfmlValue::Query(result));
+            }
+            return Err(CfmlError::runtime(format!("queryDeleteRow: row {} is out of range", row_idx + 1)));
+        }
+    }
+    Ok(CfmlValue::Null)
+}
+
+fn fn_query_delete_column(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() >= 2 {
+        if let CfmlValue::Query(q) = &args[0] {
+            let mut result = q.clone();
+            let col_name = args[1].as_string().to_lowercase();
+            result.columns.retain(|c| c.to_lowercase() != col_name);
+            for row in &mut result.rows {
+                let key_to_remove: Option<String> = row.keys().find(|k| k.to_lowercase() == col_name).cloned();
+                if let Some(key) = key_to_remove {
+                    row.remove(&key);
+                }
+            }
             return Ok(CfmlValue::Query(result));
         }
     }
@@ -2193,25 +3523,53 @@ fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_create_uuid(_args: Vec<CfmlValue>) -> CfmlResult {
     use std::time::{SystemTime, UNIX_EPOCH};
     let time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let nanos = time.as_nanos();
+    let nanos = time.as_nanos() as u64;
+    let random_bits = ((pseudo_random() * u32::MAX as f64) as u64) << 32
+                    | (pseudo_random() * u32::MAX as f64) as u64;
+    let mixed = nanos ^ random_bits;
+    // CFML UUID format: 8-4-4-16
+    Ok(CfmlValue::String(format!(
+        "{:08X}-{:04X}-{:04X}-{:016X}",
+        ((mixed >> 32) as u32),
+        ((mixed >> 16) as u16),
+        (mixed as u16),
+        (nanos.wrapping_mul(6364136223846793005).wrapping_add(random_bits)),
+    )))
+}
+
+fn fn_create_guid(_args: Vec<CfmlValue>) -> CfmlResult {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let nanos = time.as_nanos() as u64;
+    let random_bits = ((pseudo_random() * u32::MAX as f64) as u64) << 32
+                    | (pseudo_random() * u32::MAX as f64) as u64;
+    let mixed = nanos ^ random_bits;
+    let extra = nanos.wrapping_mul(6364136223846793005).wrapping_add(random_bits);
+    // Standard GUID format: 8-4-4-4-12
     Ok(CfmlValue::String(format!(
         "{:08X}-{:04X}-{:04X}-{:04X}-{:012X}",
-        (nanos >> 96) as u32,
-        (nanos >> 80) as u16,
-        ((nanos >> 64) as u16 & 0x0FFF) | 0x4000,
-        ((nanos >> 48) as u16 & 0x3FFF) | 0x8000,
-        nanos as u64 & 0xFFFFFFFFFFFF,
+        (mixed >> 32) as u32,
+        (mixed >> 16) as u16,
+        ((mixed as u16) & 0x0FFF) | 0x4000,
+        ((extra >> 48) as u16 & 0x3FFF) | 0x8000,
+        extra & 0xFFFFFFFFFFFF,
     )))
 }
 
 fn fn_hash(args: Vec<CfmlValue>) -> CfmlResult {
     use md5::Md5;
     use sha2::{Sha256, Sha384, Sha512, Digest};
+    use sha1::Sha1;
     let input = get_str(&args, 0);
     let algorithm = if args.len() >= 2 { get_str(&args, 1).to_uppercase() } else { "MD5".to_string() };
     let hex = match algorithm.as_str() {
         "MD5" => {
             let mut hasher = Md5::new();
+            hasher.update(input.as_bytes());
+            format!("{:X}", hasher.finalize())
+        }
+        "SHA-1" | "SHA1" => {
+            let mut hasher = Sha1::new();
             hasher.update(input.as_bytes());
             format!("{:X}", hasher.finalize())
         }
@@ -2470,10 +3828,9 @@ fn fn_encode_for_javascript(args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::String(result))
 }
 
-fn fn_list_reduce(args: Vec<CfmlValue>) -> CfmlResult {
-    // listReduce is a higher-order function; without closure support in builtins,
-    // return the list as-is (handled by VM for closures)
-    Ok(args.into_iter().next().unwrap_or(CfmlValue::Null))
+fn fn_list_reduce(_args: Vec<CfmlValue>) -> CfmlResult {
+    // Needs VM closure support - stub
+    Err(CfmlError::runtime("listReduce() requires VM-level closure support".to_string()))
 }
 
 fn fn_array_pop(args: Vec<CfmlValue>) -> CfmlResult {

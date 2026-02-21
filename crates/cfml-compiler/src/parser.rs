@@ -83,6 +83,7 @@ impl Parser {
         false
     }
 
+    #[allow(dead_code)]
     fn match_any(&mut self, tokens: &[Token]) -> Option<Token> {
         for token in tokens {
             if self.check(token) {
@@ -859,7 +860,7 @@ impl Parser {
         }
 
         loop {
-            let mut required = self.match_token(&Token::Required);
+            let required = self.match_token(&Token::Required);
             let mut param_type = None;
 
             let first = self
