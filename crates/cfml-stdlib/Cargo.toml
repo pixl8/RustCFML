@@ -9,7 +9,8 @@ repository.workspace = true
 license.workspace = true
 
 [features]
-default = ["http", "database", "xml"]
+default = ["http", "database", "xml", "security"]
+security = ["rand"]
 http = ["ureq"]
 database = ["sqlite"]
 sqlite = ["rusqlite"]
@@ -37,6 +38,6 @@ cbc = { version = "0.1", features = ["alloc"] }
 des = "0.8"
 blowfish = "0.9"
 hmac = "0.12"
-rand = "0.8"
+rand = { version = "0.8", optional = true }
 iana-time-zone = "0.1"
 quick-xml = { version = "0.36", optional = true }

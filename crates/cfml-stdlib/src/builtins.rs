@@ -366,6 +366,7 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
 
     // ---- Security functions ----
     f.insert("hmac".into(), fn_hmac);
+    #[cfg(feature = "security")]
     f.insert("generateSecretKey".into(), fn_generate_secret_key);
     f.insert("encrypt".into(), fn_encrypt);
     f.insert("decrypt".into(), fn_decrypt);
@@ -5351,6 +5352,7 @@ fn fn_hmac(args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::String(hex_result))
 }
 
+#[cfg(feature = "security")]
 fn fn_generate_secret_key(args: Vec<CfmlValue>) -> CfmlResult {
     use rand::RngCore;
 
