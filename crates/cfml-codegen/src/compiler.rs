@@ -103,7 +103,11 @@ pub enum BytecodeOp {
     Throw,
 
     // Method call: object is on stack, then args, method name + arg count
-    CallMethod(String, usize),
+    // Optional write-back: (object_var, Option<property_name>)
+    //   - Some(("dog", None)) for dog.method() — write modified this back to dog
+    //   - Some(("this", Some("items"))) for this.items.method() — write result back to this.items
+    //   - None — no write-back needed
+    CallMethod(String, usize, Option<(String, Option<String>)>),
 
     // For-in support
     GetKeys,  // Pop value: if struct, push array of keys; if array, leave as-is
@@ -131,6 +135,34 @@ impl CfmlCompiler {
                 }],
             },
             loop_stack: Vec::new(),
+        }
+    }
+
+    /// Determine write-back target for a method call from the AST.
+    /// Returns Some((var_name, Some(prop_name))) for obj.prop.method()
+    /// or Some((var_name, None)) for var.method()
+    fn method_call_write_back(object: &Expression) -> Option<(String, Option<String>)> {
+        match object {
+            // this.items.method() or var.prop.method()
+            Expression::MemberAccess(access) => {
+                match &*access.object {
+                    Expression::Identifier(ident) => {
+                        Some((ident.name.clone(), Some(access.member.clone())))
+                    }
+                    Expression::This(_) => {
+                        Some(("this".to_string(), Some(access.member.clone())))
+                    }
+                    _ => None,
+                }
+            }
+            // var.method() or this.method()
+            Expression::Identifier(ident) => {
+                Some((ident.name.clone(), None))
+            }
+            Expression::This(_) => {
+                Some(("this".to_string(), None))
+            }
+            _ => None,
         }
     }
 
@@ -884,14 +916,17 @@ impl CfmlCompiler {
                 instructions.push(BytecodeOp::Call(call.arguments.len()));
             }
             Expression::MethodCall(call) => {
+                // Determine write-back target from the AST.
+                // this.items.append(x) → write_back = Some(("this", Some("items")))
+                // dog.method(x)        → write_back = Some(("dog", None))
+                let write_back = Self::method_call_write_back(&call.object);
+
                 self.compile_expression(&call.object, instructions);
                 if call.null_safe {
-                    // Null-safe: if object is null, skip method call (null stays on stack)
-                    // JumpIfNotNull peeks without popping, so no Dup needed
                     let jump_idx = instructions.len();
-                    instructions.push(BytecodeOp::JumpIfNotNull(0)); // placeholder
+                    instructions.push(BytecodeOp::JumpIfNotNull(0));
                     let jump_end = instructions.len();
-                    instructions.push(BytecodeOp::Jump(0)); // placeholder
+                    instructions.push(BytecodeOp::Jump(0));
                     instructions[jump_idx] = BytecodeOp::JumpIfNotNull(instructions.len());
                     for arg in &call.arguments {
                         self.compile_expression(arg, instructions);
@@ -899,6 +934,7 @@ impl CfmlCompiler {
                     instructions.push(BytecodeOp::CallMethod(
                         call.method.clone(),
                         call.arguments.len(),
+                        write_back.clone(),
                     ));
                     instructions[jump_end] = BytecodeOp::Jump(instructions.len());
                 } else {
@@ -908,6 +944,7 @@ impl CfmlCompiler {
                     instructions.push(BytecodeOp::CallMethod(
                         call.method.clone(),
                         call.arguments.len(),
+                        write_back,
                     ));
                 }
             }

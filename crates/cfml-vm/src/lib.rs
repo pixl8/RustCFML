@@ -22,6 +22,9 @@ pub struct CfmlVirtualMachine {
     try_stack: Vec<TryHandler>,
     /// Current exception (if any)
     current_exception: Option<CfmlValue>,
+    /// After a component method executes, holds the modified `this` for write-back
+    /// to the caller's object variable. Set by execute_function_with_args.
+    method_this_writeback: Option<CfmlValue>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +54,7 @@ impl CfmlVirtualMachine {
             call_stack: Vec::new(),
             try_stack: Vec::new(),
             current_exception: None,
+            method_this_writeback: None,
         }
     }
 
@@ -380,6 +384,10 @@ impl CfmlVirtualMachine {
                 }
 
                 BytecodeOp::Return => {
+                    // Save modified 'this' for component method write-back
+                    if let Some(this_val) = locals.get("this") {
+                        self.method_this_writeback = Some(this_val.clone());
+                    }
                     return Ok(stack.pop().unwrap_or(CfmlValue::Null));
                 }
 
@@ -720,14 +728,65 @@ impl CfmlVirtualMachine {
                     }
                 }
 
-                BytecodeOp::CallMethod(method_name, arg_count) => {
+                BytecodeOp::CallMethod(method_name, arg_count, write_back) => {
                     // Pop explicit args
                     let mut extra_args: Vec<CfmlValue> =
                         (0..arg_count).filter_map(|_| stack.pop()).collect::<Vec<_>>().into_iter().rev().collect();
                     // Pop the object (receiver)
                     let object = stack.pop().unwrap_or(CfmlValue::Null);
 
+                    // Clear method_this_writeback before the call
+                    self.method_this_writeback = None;
+
                     let result = self.call_member_function(&object, &method_name, &mut extra_args)?;
+
+                    // Write-back: emulate CFML pass-by-reference semantics for mutating methods.
+                    // The compiler encodes where to write back based on the AST:
+                    //   Some((var, Some(prop))) — e.g. this.items.append(x) → write result to var.prop
+                    //   Some((var, None))       — e.g. arr.append(x) → write result to var
+                    if let Some((var_name, prop_name)) = &write_back {
+                        match prop_name {
+                            Some(prop) => {
+                                // Property access write-back: var.prop.method(args)
+                                if Self::is_mutating_method(&method_name) {
+                                    let parent = locals.get(var_name).cloned()
+                                        .or_else(|| self.globals.get(var_name).cloned());
+                                    if let Some(mut parent_obj) = parent {
+                                        parent_obj.set(prop.clone(), result.clone());
+                                        if locals.contains_key(var_name) {
+                                            locals.insert(var_name.clone(), parent_obj);
+                                        } else if self.globals.contains_key(var_name) {
+                                            self.globals.insert(var_name.clone(), parent_obj);
+                                        }
+                                    }
+                                }
+                            }
+                            None => {
+                                // Direct variable write-back: var.method(args)
+                                if Self::is_mutating_method(&method_name) {
+                                    if locals.contains_key(var_name) {
+                                        locals.insert(var_name.clone(), result.clone());
+                                    } else if self.globals.contains_key(var_name) {
+                                        self.globals.insert(var_name.clone(), result.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Propagate component method `this` modifications back to caller.
+                    // When a component method modifies `this` internally, the modified
+                    // `this` is saved by execute_function_with_args. Write it back.
+                    if let Some(modified_this) = self.method_this_writeback.take() {
+                        if let Some((var_name, None)) = &write_back {
+                            if locals.contains_key(var_name) {
+                                locals.insert(var_name.clone(), modified_this);
+                            } else if self.globals.contains_key(var_name) {
+                                self.globals.insert(var_name.clone(), modified_this);
+                            }
+                        }
+                    }
+
                     stack.push(result);
                 }
 
@@ -831,6 +890,10 @@ impl CfmlVirtualMachine {
             }
         }
 
+        // Save modified 'this' for component method write-back
+        if let Some(this_val) = locals.get("this") {
+            self.method_this_writeback = Some(this_val.clone());
+        }
         Ok(stack.pop().unwrap_or(CfmlValue::Null))
     }
 
@@ -1017,6 +1080,18 @@ impl CfmlVirtualMachine {
     /// Handle member function calls like "hello".ucase(), [1,2,3].len(), etc.
     /// CFML member functions are syntactic sugar for standalone function calls
     /// where the object becomes the first argument.
+    /// Returns true if the method name is a mutating array/struct operation.
+    /// These methods modify the receiver in-place in CFML (pass-by-reference semantics).
+    fn is_mutating_method(method: &str) -> bool {
+        matches!(method.to_lowercase().as_str(),
+            // Array mutators
+            "append" | "push" | "prepend" | "deleteat" | "insertat" |
+            "sort" | "reverse" | "clear" |
+            // Struct mutators
+            "delete" | "insert" | "update"
+        )
+    }
+
     fn call_member_function(
         &mut self,
         object: &CfmlValue,
