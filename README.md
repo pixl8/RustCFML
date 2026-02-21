@@ -121,6 +121,19 @@ chmod +x myscript.cfm
 ./myscript.cfm
 ```
 
+## Performance
+
+Benchmarked serving a simple "Hello World" `.cfm` page using Apache Bench (`ab -n 100 -c 1`). Each server was warmed up before measuring. Memory is peak RSS from `ps`.
+
+| Metric | RustCFML | Lucee 7.0.1 | BoxLang 1.10 |
+|---|---|---|---|
+| **Memory (RSS)** | **~8 MB** | ~350 MB | ~305 MB |
+| **Requests/sec** | **1,949 req/s** | 635 req/s | 293 req/s |
+| **Avg response time** | **0.5 ms** | 1.6 ms | 3.4 ms |
+| **Startup** | instant | ~15s | ~15s |
+
+RustCFML compiles to a native binary with no runtime VM overhead, resulting in significantly lower memory usage and faster response times compared to JVM-based CFML engines.
+
 ## Examples
 
 RustCFML supports both **CFScript** (script syntax) and **CFML Tags** (HTML-like syntax).
@@ -430,19 +443,6 @@ cargo run -- -d -c 'var x = [1,2,3]; writeOutput(x.len());'
 
 See [TESTING.md](TESTING.md) for the full testing guide, including how to add  
 unit tests, integration tests, and test individual features.
-
-## Performance
-
-Benchmarked serving a simple "Hello World" `.cfm` page using Apache Bench (`ab -n 100 -c 1`). Each server was warmed up before measuring. Memory is peak RSS from `ps`.
-
-| Metric | RustCFML | Lucee 7.0.1 | BoxLang 1.10 |
-|---|---|---|---|
-| **Memory (RSS)** | **~8 MB** | ~350 MB | ~305 MB |
-| **Requests/sec** | **1,949 req/s** | 635 req/s | 293 req/s |
-| **Avg response time** | **0.5 ms** | 1.6 ms | 3.4 ms |
-| **Startup** | instant | ~15s | ~15s |
-
-RustCFML compiles to a native binary with no runtime VM overhead, resulting in significantly lower memory usage and faster response times compared to JVM-based CFML engines.
 
 ## Disclaimer
 
