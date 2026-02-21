@@ -10,7 +10,7 @@ use cfml_compiler::lexer;
 use cfml_compiler::parser::Parser as CfmlParser;
 use cfml_compiler::tag_parser;
 use cfml_stdlib::builtins::{get_builtin_functions, get_builtins};
-use cfml_vm::CfmlVirtualMachine;
+use cfml_vm::{CfmlVirtualMachine, ServerState};
 
 #[derive(Parser, Debug)]
 #[command(name = "rustcfml")]
@@ -47,6 +47,16 @@ struct Args {
     /// Server port (default: 8500)
     #[arg(long, default_value = "8500")]
     port: u16,
+}
+
+/// Encapsulates the full response from CFML execution, including HTTP metadata.
+struct CfmlResponse {
+    output: String,
+    response_headers: Vec<(String, String)>,
+    response_status: Option<(u16, String)>,
+    response_content_type: Option<String>,
+    response_body: Option<CfmlValue>,
+    redirect_url: Option<String>,
 }
 
 fn main() {
@@ -110,10 +120,10 @@ fn execute_code(source: &str, debug: bool) {
 }
 
 fn execute_code_with_file(source: &str, debug: bool, source_file: Option<String>) {
-    match compile_and_run(source, debug, source_file, HashMap::new()) {
-        Ok(output) => {
-            if !output.is_empty() {
-                print!("{}", output);
+    match compile_and_run(source, debug, source_file, HashMap::new(), None, None) {
+        Ok(response) => {
+            if !response.output.is_empty() {
+                print!("{}", response.output);
             }
         }
         Err(e) => {
@@ -130,7 +140,9 @@ fn compile_and_run(
     debug: bool,
     source_file: Option<String>,
     extra_globals: HashMap<String, CfmlValue>,
-) -> Result<String, String> {
+    server_state: Option<&ServerState>,
+    http_request_data: Option<CfmlValue>,
+) -> Result<CfmlResponse, String> {
     // Strip shebang line if present (e.g. #!/usr/bin/env rustcfml)
     let source = if source.starts_with("#!") {
         source.split_once('\n').map_or("", |(_shebang, rest)| rest)
@@ -198,6 +210,7 @@ fn compile_and_run(
 
     // Execute
     let mut vm = CfmlVirtualMachine::new(program);
+    vm.base_template_path = source_file.clone();
     vm.source_file = source_file;
 
     // Register builtins
@@ -213,7 +226,21 @@ fn compile_and_run(
         vm.globals.insert(name, value);
     }
 
-    let result = vm.execute();
+    // Wire up server state if provided (for --serve mode)
+    if let Some(ss) = server_state {
+        vm.server_state = Some(ss.clone());
+    }
+
+    // Wire up HTTP request data if provided
+    vm.http_request_data = http_request_data;
+
+    let result = vm.execute_with_lifecycle();
+
+    // Catch redirect errors as success
+    let result = match result {
+        Err(e) if e.message == "__cflocation_redirect" => Ok(CfmlValue::Null),
+        other => other,
+    };
 
     match result {
         Ok(value) => {
@@ -224,7 +251,14 @@ fn compile_and_run(
             if debug {
                 println!("Result: {:?}", value);
             }
-            Ok(output)
+            Ok(CfmlResponse {
+                output,
+                response_headers: vm.response_headers,
+                response_status: vm.response_status,
+                response_content_type: vm.response_content_type,
+                response_body: vm.response_body,
+                redirect_url: vm.redirect_url,
+            })
         }
         Err(e) => Err(format!("Runtime Error: {}", e.message)),
     }
@@ -241,16 +275,18 @@ fn run_server(doc_root: &Path, port: u16, debug: bool) {
         exit(1);
     });
 
+    let server_state = ServerState::new();
+
     println!("RustCFML server running on http://127.0.0.1:{}", port);
     println!("Document root: {}", fs::canonicalize(doc_root).unwrap_or_else(|_| doc_root.to_path_buf()).display());
     println!("Press Ctrl+C to stop\n");
 
     for request in server.incoming_requests() {
-        handle_request(request, doc_root, port, debug);
+        handle_request(request, doc_root, port, debug, &server_state);
     }
 }
 
-fn handle_request(mut request: tiny_http::Request, doc_root: &Path, port: u16, debug: bool) {
+fn handle_request(mut request: tiny_http::Request, doc_root: &Path, port: u16, debug: bool, server_state: &ServerState) {
     let method = request.method().to_string();
     let url = request.url().to_string();
 
@@ -279,23 +315,72 @@ fn handle_request(mut request: tiny_http::Request, doc_root: &Path, port: u16, d
             };
 
             // Build web scopes
-            let extra_globals = build_web_scopes(&mut request, path, query_string, port);
+            let (extra_globals, http_request_data) = build_web_scopes(&mut request, path, query_string, port);
 
             match compile_and_run(
                 &source,
                 debug,
                 Some(file_path.to_string_lossy().to_string()),
                 extra_globals,
+                Some(server_state),
+                Some(http_request_data),
             ) {
-                Ok(output) => {
-                    let response = tiny_http::Response::from_string(output).with_header(
-                        tiny_http::Header::from_bytes(
-                            b"Content-Type",
-                            b"text/html; charset=utf-8",
-                        )
-                        .unwrap(),
-                    );
-                    let _ = request.respond(response);
+                Ok(response) => {
+                    // Check for redirect
+                    if let Some(ref redirect_url) = response.redirect_url {
+                        let status_code = response.response_status
+                            .as_ref()
+                            .map(|(c, _)| *c)
+                            .unwrap_or(302);
+                        let mut http_response = tiny_http::Response::from_string("")
+                            .with_status_code(tiny_http::StatusCode(status_code))
+                            .with_header(
+                                tiny_http::Header::from_bytes(b"Location", redirect_url.as_bytes()).unwrap(),
+                            );
+                        // Add any extra response headers
+                        for (name, value) in &response.response_headers {
+                            if name.to_lowercase() != "location" {
+                                if let Ok(h) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+                                    http_response.add_header(h);
+                                }
+                            }
+                        }
+                        let _ = request.respond(http_response);
+                        return;
+                    }
+
+                    // Determine content type
+                    let content_type = response.response_content_type
+                        .as_deref()
+                        .unwrap_or("text/html; charset=utf-8");
+
+                    // Determine body
+                    let body = if let Some(ref body_override) = response.response_body {
+                        body_override.as_string()
+                    } else {
+                        response.output
+                    };
+
+                    // Determine status code
+                    let status_code = response.response_status
+                        .as_ref()
+                        .map(|(c, _)| *c)
+                        .unwrap_or(200);
+
+                    let mut http_response = tiny_http::Response::from_string(body)
+                        .with_status_code(tiny_http::StatusCode(status_code))
+                        .with_header(
+                            tiny_http::Header::from_bytes(b"Content-Type", content_type.as_bytes()).unwrap(),
+                        );
+
+                    // Add response headers
+                    for (name, value) in &response.response_headers {
+                        if let Ok(h) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+                            http_response.add_header(h);
+                        }
+                    }
+
+                    let _ = request.respond(http_response);
                 }
                 Err(e) => {
                     let body = format!(
@@ -354,7 +439,7 @@ fn build_web_scopes(
     path: &str,
     query_string: &str,
     port: u16,
-) -> HashMap<String, CfmlValue> {
+) -> (HashMap<String, CfmlValue>, CfmlValue) {
     let mut globals = HashMap::new();
 
     // CGI scope
@@ -385,27 +470,48 @@ fn build_web_scopes(
     let url_scope = parse_query_string(query_string);
     globals.insert("url".to_string(), CfmlValue::Struct(url_scope));
 
-    // Form scope — parsed POST body (application/x-www-form-urlencoded)
-    let form_scope = if request.method().as_str() == "POST"
-        && content_type.starts_with("application/x-www-form-urlencoded")
-    {
+    // Read raw body BEFORE form parsing consumes it
+    let raw_body = {
         let body_len = request.body_length().unwrap_or(0);
         if body_len > 0 && body_len < 10_000_000 {
             let mut body = String::new();
             if std::io::Read::read_to_string(request.as_reader(), &mut body).is_ok() {
-                parse_query_string(&body)
+                body
             } else {
-                HashMap::new()
+                String::new()
             }
         } else {
-            HashMap::new()
+            String::new()
         }
+    };
+
+    // Form scope — parsed POST body (application/x-www-form-urlencoded)
+    let form_scope = if request.method().as_str() == "POST"
+        && content_type.starts_with("application/x-www-form-urlencoded")
+        && !raw_body.is_empty()
+    {
+        parse_query_string(&raw_body)
     } else {
         HashMap::new()
     };
     globals.insert("form".to_string(), CfmlValue::Struct(form_scope));
 
-    globals
+    // Build full HTTP request data
+    let mut headers_struct = HashMap::new();
+    for header in request.headers() {
+        headers_struct.insert(
+            header.field.as_str().as_str().to_string(),
+            CfmlValue::String(header.value.as_str().to_string()),
+        );
+    }
+
+    let mut http_request_data = HashMap::new();
+    http_request_data.insert("headers".to_string(), CfmlValue::Struct(headers_struct));
+    http_request_data.insert("content".to_string(), CfmlValue::String(raw_body));
+    http_request_data.insert("method".to_string(), CfmlValue::String(request.method().to_string()));
+    http_request_data.insert("protocol".to_string(), CfmlValue::String("HTTP/1.1".to_string()));
+
+    (globals, CfmlValue::Struct(http_request_data))
 }
 
 /// Parse a query string like "name=World&id=1" into a HashMap.

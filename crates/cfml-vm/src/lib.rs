@@ -2,10 +2,33 @@
 
 use cfml_codegen::{BytecodeFunction, BytecodeOp, BytecodeProgram};
 use cfml_common::dynamic::CfmlValue;
-use cfml_common::vm::{CfmlError, CfmlResult};
+use cfml_common::vm::{CfmlError, CfmlErrorType, CfmlResult};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 pub type BuiltinFunction = fn(Vec<CfmlValue>) -> CfmlResult;
+
+/// Persistent application state, keyed by app name.
+pub struct ApplicationState {
+    pub name: String,
+    pub variables: HashMap<String, CfmlValue>,
+    pub started: bool,
+    pub config: HashMap<String, CfmlValue>,
+}
+
+/// Server-level state, persists across requests in --serve mode.
+#[derive(Clone)]
+pub struct ServerState {
+    pub applications: Arc<Mutex<HashMap<String, ApplicationState>>>,
+}
+
+impl ServerState {
+    pub fn new() -> Self {
+        Self {
+            applications: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
 
 pub struct CfmlVirtualMachine {
     pub program: BytecodeProgram,
@@ -27,6 +50,28 @@ pub struct CfmlVirtualMachine {
     /// After a component method executes, holds the modified `this` for write-back
     /// to the caller's object variable. Set by execute_function_with_args.
     method_this_writeback: Option<CfmlValue>,
+    /// Request scope — lives for the duration of one request
+    pub request_scope: HashMap<String, CfmlValue>,
+    /// Application scope — shared across requests (Arc<Mutex> for thread safety)
+    pub application_scope: Option<Arc<Mutex<HashMap<String, CfmlValue>>>>,
+    /// Server-level state — persists across requests in --serve mode
+    pub server_state: Option<ServerState>,
+    /// HTTP response headers set by cfheader
+    pub response_headers: Vec<(String, String)>,
+    /// HTTP response status code set by cfheader
+    pub response_status: Option<(u16, String)>,
+    /// Content type set by cfcontent
+    pub response_content_type: Option<String>,
+    /// Body override set by cfcontent (variable/file)
+    pub response_body: Option<CfmlValue>,
+    /// Redirect URL set by cflocation
+    pub redirect_url: Option<String>,
+    /// HTTP request data for getHTTPRequestData()
+    pub http_request_data: Option<CfmlValue>,
+    /// Stack of saved output buffers for cfsavecontent
+    pub saved_output_buffers: Vec<String>,
+    /// Base template path (original .cfm being served)
+    pub base_template_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +103,17 @@ impl CfmlVirtualMachine {
             try_stack: Vec::new(),
             current_exception: None,
             method_this_writeback: None,
+            request_scope: HashMap::new(),
+            application_scope: None,
+            server_state: None,
+            response_headers: Vec::new(),
+            response_status: None,
+            response_content_type: None,
+            response_body: None,
+            redirect_url: None,
+            http_request_data: None,
+            saved_output_buffers: Vec::new(),
+            base_template_path: None,
         }
     }
 
@@ -135,6 +191,33 @@ impl CfmlVirtualMachine {
                     let val = if name_lower == "local" || name_lower == "variables" {
                         // Return a struct representing the local/variables scope
                         CfmlValue::Struct(locals.clone())
+                    } else if name_lower == "request" {
+                        CfmlValue::Struct(self.request_scope.clone())
+                    } else if name_lower == "application" {
+                        if let Some(ref app_scope) = self.application_scope {
+                            if let Ok(scope) = app_scope.lock() {
+                                CfmlValue::Struct(scope.clone())
+                            } else {
+                                CfmlValue::Struct(HashMap::new())
+                            }
+                        } else {
+                            CfmlValue::Struct(HashMap::new())
+                        }
+                    } else if name_lower == "server" {
+                        let mut info = HashMap::new();
+                        info.insert("coldfusion".to_string(), CfmlValue::Struct({
+                            let mut cf = HashMap::new();
+                            cf.insert("productname".to_string(), CfmlValue::String("RustCFML".to_string()));
+                            cf.insert("productversion".to_string(), CfmlValue::String(env!("CARGO_PKG_VERSION").to_string()));
+                            cf
+                        }));
+                        info.insert("os".to_string(), CfmlValue::Struct({
+                            let mut os = HashMap::new();
+                            os.insert("name".to_string(), CfmlValue::String(std::env::consts::OS.to_string()));
+                            os.insert("arch".to_string(), CfmlValue::String(std::env::consts::ARCH.to_string()));
+                            os
+                        }));
+                        CfmlValue::Struct(info)
                     } else if let Some(val) = locals.get(&name) {
                         val.clone()
                     } else if let Some(val) = self.globals.get(&name) {
@@ -151,19 +234,61 @@ impl CfmlVirtualMachine {
                 }
                 BytecodeOp::StoreLocal(name) => {
                     if let Some(val) = stack.pop() {
-                        locals.insert(name, val);
+                        let name_lower = name.to_lowercase();
+                        if name_lower == "request" {
+                            if let CfmlValue::Struct(s) = &val {
+                                self.request_scope = s.clone();
+                            }
+                        } else if name_lower == "application" {
+                            if let CfmlValue::Struct(s) = &val {
+                                if let Some(ref app_scope) = self.application_scope {
+                                    if let Ok(mut scope) = app_scope.lock() {
+                                        *scope = s.clone();
+                                    }
+                                }
+                            }
+                        } else {
+                            locals.insert(name, val);
+                        }
                     }
                 }
                 BytecodeOp::LoadGlobal(name) => {
-                    // Check locals first (for user-defined functions that shadow builtins)
+                    let name_lower = name.to_lowercase();
+                    // 1. Check locals (exact, then CI)
                     if let Some(val) = locals.get(&name) {
                         stack.push(val.clone());
+                    } else if let Some(val) = locals.iter()
+                        .find(|(k, _)| k.to_lowercase() == name_lower)
+                        .map(|(_, v)| v.clone()) {
+                        stack.push(val);
+                    // 2. Check globals (exact, then CI)
                     } else if let Some(val) = self.globals.get(&name) {
                         stack.push(val.clone());
+                    } else if let Some(val) = self.globals.iter()
+                        .find(|(k, _)| k.to_lowercase() == name_lower)
+                        .map(|(_, v)| v.clone()) {
+                        stack.push(val);
+                    // 3. Check builtins/user_functions (exact, then CI)
                     } else if self.builtins.contains_key(&name) || self.user_functions.contains_key(&name) {
-                        // Push a function reference
                         stack.push(CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
                             name: name.clone(),
+                            params: Vec::new(),
+                            body: cfml_common::dynamic::CfmlClosureBody::Expression(
+                                Box::new(CfmlValue::Null),
+                            ),
+                            return_type: None,
+                            access: cfml_common::dynamic::CfmlAccess::Public,
+                        }));
+                    } else if self.builtins.keys().any(|k| k.to_lowercase() == name_lower)
+                           || self.user_functions.keys().any(|k| k.to_lowercase() == name_lower) {
+                        let canonical = self.builtins.keys()
+                            .find(|k| k.to_lowercase() == name_lower)
+                            .or_else(|| self.user_functions.keys()
+                                .find(|k| k.to_lowercase() == name_lower))
+                            .cloned()
+                            .unwrap_or(name.clone());
+                        stack.push(CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
+                            name: canonical,
                             params: Vec::new(),
                             body: cfml_common::dynamic::CfmlClosureBody::Expression(
                                 Box::new(CfmlValue::Null),
@@ -610,7 +735,14 @@ impl CfmlVirtualMachine {
                     // Push function reference — encode func_idx in body for super dispatch
                     stack.push(CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
                         name: func_name,
-                        params: Vec::new(),
+                        params: self.program.functions[func_idx].params.iter().map(|name| {
+                            cfml_common::dynamic::CfmlParam {
+                                name: name.clone(),
+                                param_type: None,
+                                default: None,
+                                required: false,
+                            }
+                        }).collect(),
                         body: cfml_common::dynamic::CfmlClosureBody::Expression(
                             Box::new(CfmlValue::Int(func_idx as i64)),
                         ),
@@ -915,7 +1047,13 @@ impl CfmlVirtualMachine {
                 | "structeach" | "structmap" | "structfilter"
                 | "structreduce" | "structsome" | "structevery"
                 | "listeach" | "listmap" | "listfilter" | "listreduce"
-                | "createobject" => {
+                | "createobject"
+                | "getcurrenttemplatepath"
+                | "getcomponentmetadata"
+                | "__cfheader" | "__cfcontent" | "__cflocation"
+                | "gethttprequestdata" | "__cfinvoke"
+                | "__cfsavecontent_start" | "__cfsavecontent_end" | "invoke"
+                | "getbasetemplatepath" | "gettimezone" => {
                     // Will be handled at the end of this function (needs VM access)
                 }
                 _ => {
@@ -1213,6 +1351,111 @@ impl CfmlVirtualMachine {
                     }
                     return Ok(CfmlValue::Null);
                 }
+                "getcurrenttemplatepath" => {
+                    if let Some(ref source) = self.source_file {
+                        let path = std::path::Path::new(source);
+                        if let Ok(abs) = std::fs::canonicalize(path) {
+                            return Ok(CfmlValue::String(abs.to_string_lossy().to_string()));
+                        }
+                        return Ok(CfmlValue::String(source.clone()));
+                    }
+                    // Fallback to CWD
+                    if let Ok(cwd) = std::env::current_dir() {
+                        return Ok(CfmlValue::String(cwd.to_string_lossy().to_string()));
+                    }
+                    return Ok(CfmlValue::String(String::new()));
+                }
+                "getbasetemplatepath" => {
+                    if let Some(ref base) = self.base_template_path {
+                        let path = std::path::Path::new(base);
+                        if let Ok(abs) = std::fs::canonicalize(path) {
+                            return Ok(CfmlValue::String(abs.to_string_lossy().to_string()));
+                        }
+                        return Ok(CfmlValue::String(base.clone()));
+                    }
+                    // Fall back to source_file
+                    if let Some(ref source) = self.source_file {
+                        let path = std::path::Path::new(source);
+                        if let Ok(abs) = std::fs::canonicalize(path) {
+                            return Ok(CfmlValue::String(abs.to_string_lossy().to_string()));
+                        }
+                        return Ok(CfmlValue::String(source.clone()));
+                    }
+                    return Ok(CfmlValue::String(String::new()));
+                }
+                "gettimezone" => {
+                    // Return the system timezone name
+                    // Try to get IANA timezone from environment variable first
+                    if let Ok(tz) = std::env::var("TZ") {
+                        if !tz.is_empty() {
+                            return Ok(CfmlValue::String(tz));
+                        }
+                    }
+                    // macOS/Linux: read /etc/localtime symlink target
+                    #[cfg(unix)]
+                    {
+                        if let Ok(link) = std::fs::read_link("/etc/localtime") {
+                            let link_str = link.to_string_lossy().to_string();
+                            // Extract timezone from path like /usr/share/zoneinfo/America/New_York
+                            if let Some(pos) = link_str.find("zoneinfo/") {
+                                let tz = &link_str[pos + 9..];
+                                return Ok(CfmlValue::String(tz.to_string()));
+                            }
+                        }
+                    }
+                    // Fallback: return UTC
+                    return Ok(CfmlValue::String("UTC".to_string()));
+                }
+                "getcomponentmetadata" => {
+                    if let Some(dot_path) = args.get(0) {
+                        let comp_name = dot_path.as_string();
+                        if let Some(template) = self.resolve_component_template(&comp_name, parent_locals) {
+                            let resolved = self.resolve_inheritance(template, parent_locals);
+                            if let CfmlValue::Struct(ref s) = resolved {
+                                let mut meta = HashMap::new();
+                                // Name
+                                meta.insert("name".to_string(), s.get("__name").cloned().unwrap_or(CfmlValue::String(comp_name.clone())));
+                                // Extends
+                                if let Some(chain) = s.get("__extends_chain") {
+                                    if let CfmlValue::Array(arr) = chain {
+                                        if let Some(first) = arr.first() {
+                                            meta.insert("extends".to_string(), first.clone());
+                                        }
+                                    }
+                                }
+                                // Functions array
+                                let mut functions = Vec::new();
+                                for (k, v) in s {
+                                    if let CfmlValue::Function(f) = v {
+                                        if !k.starts_with("__") {
+                                            let mut func_meta = HashMap::new();
+                                            func_meta.insert("name".to_string(), CfmlValue::String(k.clone()));
+                                            func_meta.insert("access".to_string(), CfmlValue::String(format!("{:?}", f.access).to_lowercase()));
+                                            if let Some(ref rt) = f.return_type {
+                                                func_meta.insert("returntype".to_string(), CfmlValue::String(rt.clone()));
+                                            }
+                                            let params: Vec<CfmlValue> = f.params.iter().map(|p| CfmlValue::String(p.name.clone())).collect();
+                                            func_meta.insert("parameters".to_string(), CfmlValue::Array(params));
+                                            functions.push(CfmlValue::Struct(func_meta));
+                                        }
+                                    }
+                                }
+                                meta.insert("functions".to_string(), CfmlValue::Array(functions));
+                                // Component metadata
+                                if let Some(md) = s.get("__metadata") {
+                                    meta.insert("metadata".to_string(), md.clone());
+                                }
+                                // Properties
+                                if let Some(props) = s.get("__properties") {
+                                    meta.insert("properties".to_string(), props.clone());
+                                }
+                                return Ok(CfmlValue::Struct(meta));
+                            }
+                            return Ok(resolved);
+                        }
+                    }
+                    return Ok(CfmlValue::Struct(HashMap::new()));
+                }
                 "createobject" => {
                     if args.len() >= 2 {
                         let obj_type = args[0].as_string().to_lowercase();
@@ -1225,6 +1468,286 @@ impl CfmlVirtualMachine {
                         }
                     }
                     return Ok(CfmlValue::Null);
+                }
+                "__cfheader" => {
+                    if let Some(CfmlValue::Struct(opts)) = args.get(0) {
+                        if let Some(code_val) = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "statuscode")
+                            .map(|(_, v)| v.clone())
+                        {
+                            let code = match &code_val {
+                                CfmlValue::Int(n) => *n as u16,
+                                CfmlValue::String(s) => s.parse::<u16>().unwrap_or(200),
+                                CfmlValue::Double(d) => *d as u16,
+                                _ => 200,
+                            };
+                            let text = opts.iter()
+                                .find(|(k, _)| k.to_lowercase() == "statustext")
+                                .map(|(_, v)| v.as_string())
+                                .unwrap_or_else(|| "OK".to_string());
+                            self.response_status = Some((code, text));
+                        } else if let Some(name_val) = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "name")
+                            .map(|(_, v)| v.as_string())
+                        {
+                            let value = opts.iter()
+                                .find(|(k, _)| k.to_lowercase() == "value")
+                                .map(|(_, v)| v.as_string())
+                                .unwrap_or_default();
+                            self.response_headers.push((name_val, value));
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "__cfcontent" => {
+                    if let Some(CfmlValue::Struct(opts)) = args.get(0) {
+                        if let Some(reset_val) = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "reset")
+                            .map(|(_, v)| v.clone())
+                        {
+                            if reset_val.is_true() {
+                                self.output_buffer.clear();
+                            }
+                        }
+                        if let Some(ct) = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "type")
+                            .map(|(_, v)| v.as_string())
+                        {
+                            self.response_content_type = Some(ct);
+                        }
+                        if let Some(var_val) = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "variable")
+                            .map(|(_, v)| v.clone())
+                        {
+                            self.response_body = Some(var_val);
+                        }
+                        if let Some(file_path) = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "file")
+                            .map(|(_, v)| v.as_string())
+                        {
+                            if let Ok(contents) = std::fs::read_to_string(&file_path) {
+                                self.response_body = Some(CfmlValue::String(contents));
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "__cflocation" => {
+                    if let Some(CfmlValue::Struct(opts)) = args.get(0) {
+                        let url = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "url")
+                            .map(|(_, v)| v.as_string())
+                            .unwrap_or_default();
+                        let status_code = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "statuscode")
+                            .map(|(_, v)| match v {
+                                CfmlValue::Int(n) => *n as u16,
+                                CfmlValue::String(s) => s.parse::<u16>().unwrap_or(302),
+                                CfmlValue::Double(d) => *d as u16,
+                                _ => 302,
+                            })
+                            .unwrap_or(302);
+                        self.redirect_url = Some(url.clone());
+                        self.response_headers.push(("Location".to_string(), url));
+                        self.response_status = Some((status_code, "Found".to_string()));
+                        return Err(CfmlError::new(
+                            "__cflocation_redirect".to_string(),
+                            CfmlErrorType::Custom("redirect".to_string()),
+                        ));
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "gethttprequestdata" => {
+                    if let Some(ref data) = self.http_request_data {
+                        return Ok(data.clone());
+                    }
+                    let mut empty = HashMap::new();
+                    empty.insert("headers".to_string(), CfmlValue::Struct(HashMap::new()));
+                    empty.insert("content".to_string(), CfmlValue::String(String::new()));
+                    empty.insert("method".to_string(), CfmlValue::String(String::new()));
+                    empty.insert("protocol".to_string(), CfmlValue::String(String::new()));
+                    return Ok(CfmlValue::Struct(empty));
+                }
+                "__cfinvoke" => {
+                    let comp_val = args.get(0).cloned().unwrap_or(CfmlValue::Null);
+                    let method_name = args.get(1).map(|v| v.as_string()).unwrap_or_default();
+                    let invoke_args = args.get(2).cloned().unwrap_or(CfmlValue::Null);
+
+                    let component = match &comp_val {
+                        CfmlValue::Struct(_) => comp_val.clone(),
+                        CfmlValue::String(name) => {
+                            if let Some(template) = self.resolve_component_template(name, parent_locals) {
+                                self.resolve_inheritance(template, parent_locals)
+                            } else {
+                                return Err(CfmlError::runtime(format!("Component '{}' not found", name)));
+                            }
+                        }
+                        _ => {
+                            let name = comp_val.as_string();
+                            if let Some(template) = self.resolve_component_template(&name, parent_locals) {
+                                self.resolve_inheritance(template, parent_locals)
+                            } else {
+                                return Err(CfmlError::runtime(format!("Component '{}' not found", name)));
+                            }
+                        }
+                    };
+
+                    let method_lower = method_name.to_lowercase();
+                    if let CfmlValue::Struct(ref comp_struct) = component {
+                        let method_func = comp_struct.iter()
+                            .find(|(k, _)| k.to_lowercase() == method_lower)
+                            .map(|(_, v)| v.clone());
+
+                        if let Some(func @ CfmlValue::Function(_)) = method_func {
+                            let call_args = if let CfmlValue::Struct(ref arg_map) = invoke_args {
+                                if arg_map.is_empty() {
+                                    Vec::new()
+                                } else if let CfmlValue::Function(ref f) = func {
+                                    // Get param names from bytecode function if CfmlFunction.params is empty
+                                    let param_names: Vec<String> = if f.params.is_empty() {
+                                        // Look up actual bytecode function params via func_idx
+                                        if let cfml_common::dynamic::CfmlClosureBody::Expression(ref body) = f.body {
+                                            if let CfmlValue::Int(idx) = body.as_ref() {
+                                                let idx = *idx as usize;
+                                                if idx < self.program.functions.len() {
+                                                    self.program.functions[idx].params.clone()
+                                                } else {
+                                                    Vec::new()
+                                                }
+                                            } else {
+                                                Vec::new()
+                                            }
+                                        } else {
+                                            Vec::new()
+                                        }
+                                    } else {
+                                        f.params.iter().map(|p| p.name.clone()).collect()
+                                    };
+
+                                    let mut positional = Vec::new();
+                                    for param_name in &param_names {
+                                        let param_lower = param_name.to_lowercase();
+                                        let val = arg_map.iter()
+                                            .find(|(k, _)| k.to_lowercase() == param_lower)
+                                            .map(|(_, v)| v.clone())
+                                            .unwrap_or(CfmlValue::Null);
+                                        positional.push(val);
+                                    }
+                                    positional
+                                } else {
+                                    Vec::new()
+                                }
+                            } else if matches!(invoke_args, CfmlValue::Null) {
+                                Vec::new()
+                            } else {
+                                vec![invoke_args]
+                            };
+
+                            let mut method_locals = parent_locals.clone();
+                            method_locals.insert("this".to_string(), component.clone());
+                            return self.call_function(&func, call_args, &method_locals);
+                        } else {
+                            return Err(CfmlError::runtime(
+                                format!("Method '{}' not found in component", method_name),
+                            ));
+                        }
+                    }
+                    return Err(CfmlError::runtime("Invalid component for cfinvoke".to_string()));
+                }
+                "__cfsavecontent_start" => {
+                    self.saved_output_buffers.push(std::mem::take(&mut self.output_buffer));
+                    return Ok(CfmlValue::Null);
+                }
+                "__cfsavecontent_end" => {
+                    let captured = std::mem::take(&mut self.output_buffer);
+                    self.output_buffer = self.saved_output_buffers.pop().unwrap_or_default();
+                    return Ok(CfmlValue::String(captured));
+                }
+                "invoke" => {
+                    // Same as __cfinvoke: invoke(component, "methodName", argStruct)
+                    let comp_val = args.get(0).cloned().unwrap_or(CfmlValue::Null);
+                    let method_name = args.get(1).map(|v| v.as_string()).unwrap_or_default();
+                    let invoke_args = args.get(2).cloned().unwrap_or(CfmlValue::Null);
+
+                    let component = match &comp_val {
+                        CfmlValue::Struct(_) => comp_val.clone(),
+                        CfmlValue::String(name) => {
+                            if let Some(template) = self.resolve_component_template(name, parent_locals) {
+                                self.resolve_inheritance(template, parent_locals)
+                            } else {
+                                return Err(CfmlError::runtime(format!("Component '{}' not found", name)));
+                            }
+                        }
+                        _ => {
+                            let name = comp_val.as_string();
+                            if let Some(template) = self.resolve_component_template(&name, parent_locals) {
+                                self.resolve_inheritance(template, parent_locals)
+                            } else {
+                                return Err(CfmlError::runtime(format!("Component '{}' not found", name)));
+                            }
+                        }
+                    };
+
+                    let method_lower = method_name.to_lowercase();
+                    if let CfmlValue::Struct(ref comp_struct) = component {
+                        let method_func = comp_struct.iter()
+                            .find(|(k, _)| k.to_lowercase() == method_lower)
+                            .map(|(_, v)| v.clone());
+
+                        if let Some(func @ CfmlValue::Function(_)) = method_func {
+                            let call_args = if let CfmlValue::Struct(ref arg_map) = invoke_args {
+                                if arg_map.is_empty() {
+                                    Vec::new()
+                                } else if let CfmlValue::Function(ref f) = func {
+                                    let param_names: Vec<String> = if f.params.is_empty() {
+                                        if let cfml_common::dynamic::CfmlClosureBody::Expression(ref body) = f.body {
+                                            if let CfmlValue::Int(idx) = body.as_ref() {
+                                                let idx = *idx as usize;
+                                                if idx < self.program.functions.len() {
+                                                    self.program.functions[idx].params.clone()
+                                                } else {
+                                                    Vec::new()
+                                                }
+                                            } else {
+                                                Vec::new()
+                                            }
+                                        } else {
+                                            Vec::new()
+                                        }
+                                    } else {
+                                        f.params.iter().map(|p| p.name.clone()).collect()
+                                    };
+
+                                    let mut positional = Vec::new();
+                                    for param_name in &param_names {
+                                        let param_lower = param_name.to_lowercase();
+                                        let val = arg_map.iter()
+                                            .find(|(k, _)| k.to_lowercase() == param_lower)
+                                            .map(|(_, v)| v.clone())
+                                            .unwrap_or(CfmlValue::Null);
+                                        positional.push(val);
+                                    }
+                                    positional
+                                } else {
+                                    Vec::new()
+                                }
+                            } else if matches!(invoke_args, CfmlValue::Null) {
+                                Vec::new()
+                            } else {
+                                vec![invoke_args]
+                            };
+
+                            let mut method_locals = parent_locals.clone();
+                            method_locals.insert("this".to_string(), component.clone());
+                            return self.call_function(&func, call_args, &method_locals);
+                        } else {
+                            return Err(CfmlError::runtime(
+                                format!("Method '{}' not found on component", method_name)
+                            ));
+                        }
+                    } else {
+                        return Err(CfmlError::runtime("invoke() first argument must be a component or component name".into()));
+                    }
                 }
                 _ => {}
             }
@@ -1239,7 +1762,12 @@ impl CfmlVirtualMachine {
     /// Returns true if the method name is a mutating array/struct operation.
     /// These methods modify the receiver in-place in CFML (pass-by-reference semantics).
     fn is_mutating_method(method: &str) -> bool {
-        matches!(method.to_lowercase().as_str(),
+        let lower = method.to_lowercase();
+        // Implicit property setters (setXxx) are mutating
+        if lower.starts_with("set") && lower.len() > 3 {
+            return true;
+        }
+        matches!(lower.as_str(),
             // Array mutators
             "append" | "push" | "prepend" | "deleteat" | "insertat" |
             "sort" | "reverse" | "clear" |
@@ -1569,7 +2097,15 @@ impl CfmlVirtualMachine {
 
         // If no builtin match found, try to get property and call it
         // This handles user-defined methods on components
-        let prop = object.get(method).unwrap_or(CfmlValue::Null);
+        let prop = if let CfmlValue::Struct(ref s) = object {
+            let method_lower = method.to_lowercase();
+            s.iter()
+                .find(|(k, _)| k.to_lowercase() == method_lower)
+                .map(|(_, v)| v.clone())
+                .unwrap_or(CfmlValue::Null)
+        } else {
+            object.get(method).unwrap_or(CfmlValue::Null)
+        };
         if let CfmlValue::Function(_) = &prop {
             let func_ref = prop.clone();
             let args: Vec<CfmlValue> = extra_args.drain(..).collect();
@@ -1577,6 +2113,57 @@ impl CfmlVirtualMachine {
             let mut method_locals = HashMap::new();
             method_locals.insert("this".to_string(), object.clone());
             return self.call_function(&func_ref, args, &method_locals);
+        }
+
+        // Implicit property accessors (getXxx / setXxx) for components
+        if let CfmlValue::Struct(ref s) = object {
+            if s.contains_key("__name") || s.iter().any(|(k, _)| k.to_lowercase() == "__properties") {
+                let method_lower = method.to_lowercase();
+                if method_lower.starts_with("get") && method_lower.len() > 3 {
+                    let prop_name = &method[3..];
+                    let val = s.iter()
+                        .find(|(k, _)| k.to_lowercase() == prop_name.to_lowercase())
+                        .map(|(_, v)| v.clone());
+                    if let Some(v) = val {
+                        return Ok(v);
+                    }
+                }
+                if method_lower.starts_with("set") && method_lower.len() > 3 {
+                    let prop_name = &method[3..];
+                    if let Some(value) = extra_args.first() {
+                        let mut modified = object.clone();
+                        if let CfmlValue::Struct(ref mut ms) = modified {
+                            let actual_key = ms.keys()
+                                .find(|k| k.to_lowercase() == prop_name.to_lowercase())
+                                .cloned()
+                                .unwrap_or_else(|| prop_name.to_string());
+                            ms.insert(actual_key, value.clone());
+                        }
+                        return Ok(modified);
+                    }
+                }
+            }
+        }
+
+        // onMissingMethod fallback for components
+        if let CfmlValue::Struct(ref s) = object {
+            let missing_handler = s.iter()
+                .find(|(k, _)| k.to_lowercase() == "onmissingmethod")
+                .map(|(_, v)| v.clone());
+            if let Some(handler @ CfmlValue::Function(_)) = missing_handler {
+                let args_array: Vec<CfmlValue> = extra_args.drain(..).collect();
+                let mut missing_args = HashMap::new();
+                for (i, a) in args_array.iter().enumerate() {
+                    missing_args.insert((i + 1).to_string(), a.clone());
+                }
+                let mut method_locals = HashMap::new();
+                method_locals.insert("this".to_string(), object.clone());
+                return self.call_function(
+                    &handler,
+                    vec![CfmlValue::String(method.to_string()), CfmlValue::Struct(missing_args)],
+                    &method_locals,
+                );
+            }
         }
 
         Ok(CfmlValue::Null)
@@ -1765,6 +2352,265 @@ impl CfmlVirtualMachine {
         parent_map.insert("__extends_chain".to_string(), CfmlValue::Array(chain));
 
         CfmlValue::Struct(parent_map)
+    }
+
+    /// Walk up the directory tree from source_file to find Application.cfc
+    fn find_application_cfc(&self) -> Option<String> {
+        let start_dir = if let Some(ref source) = self.source_file {
+            std::path::Path::new(source).parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+        } else {
+            std::env::current_dir().unwrap_or_default()
+        };
+
+        let mut dir = start_dir.as_path();
+        loop {
+            // Check for Application.cfc (case-insensitive)
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if name.to_lowercase() == "application.cfc" {
+                            return Some(entry.path().to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+            match dir.parent() {
+                Some(parent) if parent != dir => dir = parent,
+                _ => break,
+            }
+        }
+        None
+    }
+
+    /// Load and execute Application.cfc, returning the component struct
+    fn load_application_cfc(&mut self, path: &str) -> Option<CfmlValue> {
+        let source_code = std::fs::read_to_string(path).ok()?;
+        let source_code = if cfml_compiler::tag_parser::has_cfml_tags(&source_code) {
+            cfml_compiler::tag_parser::tags_to_script(&source_code)
+        } else {
+            source_code
+        };
+
+        let ast = cfml_compiler::parser::Parser::new(source_code).parse().ok()?;
+        let compiler = cfml_codegen::compiler::CfmlCompiler::new();
+        let sub_program = compiler.compile(ast);
+
+        // Save current program, swap in sub-program
+        let old_program = std::mem::replace(&mut self.program, sub_program);
+        let main_idx = self.program.functions.iter()
+            .position(|f| f.name == "__main__")
+            .unwrap_or(0);
+        let cfc_func = self.program.functions[main_idx].clone();
+        let empty_locals = HashMap::new();
+        let _ = self.execute_function_with_args(&cfc_func, Vec::new(), Some(&empty_locals));
+
+        // Merge sub-program functions into main program
+        let sub_funcs = self.program.functions.clone();
+        self.program = old_program;
+        for func in sub_funcs {
+            if func.name != "__main__" {
+                self.program.functions.push(func.clone());
+                self.user_functions.insert(func.name.clone(), self.program.functions.len() - 1);
+            }
+        }
+
+        // Find the component struct in globals
+        self.globals.iter()
+            .find(|(k, v)| {
+                let k_lower = k.to_lowercase();
+                (k_lower == "application" || *k == "Anonymous")
+                    && matches!(v, CfmlValue::Struct(_))
+                    && if let CfmlValue::Struct(s) = v { s.contains_key("__name") || s.values().any(|v| matches!(v, CfmlValue::Function(_))) } else { false }
+            })
+            .map(|(_, v)| v.clone())
+            .or_else(|| {
+                // Look for any struct with component-like structure
+                self.globals.iter()
+                    .find(|(_, v)| {
+                        if let CfmlValue::Struct(s) = v {
+                            s.contains_key("__name") || s.values().any(|val| matches!(val, CfmlValue::Function(_)))
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|(_, v)| v.clone())
+            })
+    }
+
+    /// Extract application config from a component struct
+    fn extract_app_config(template: &CfmlValue) -> (String, HashMap<String, CfmlValue>) {
+        let s = match template {
+            CfmlValue::Struct(s) => s,
+            _ => return ("default".to_string(), HashMap::new()),
+        };
+
+        // Case-insensitive lookup for this.name
+        let app_name = s.iter()
+            .find(|(k, _)| k.to_lowercase() == "name")
+            .and_then(|(_, v)| match v {
+                CfmlValue::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "default".to_string());
+
+        let mut config = HashMap::new();
+        for (k, v) in s {
+            if !k.starts_with("__") && !matches!(v, CfmlValue::Function(_)) {
+                config.insert(k.to_lowercase(), v.clone());
+            }
+        }
+
+        (app_name, config)
+    }
+
+    /// Call a lifecycle method on the Application.cfc template
+    fn call_lifecycle_method(
+        &mut self,
+        template: &CfmlValue,
+        method: &str,
+        args: Vec<CfmlValue>,
+    ) -> Result<bool, CfmlError> {
+        let s = match template {
+            CfmlValue::Struct(s) => s,
+            _ => return Ok(false),
+        };
+
+        // Case-insensitive lookup for the method
+        let method_lower = method.to_lowercase();
+        let func_val = s.iter()
+            .find(|(k, _)| k.to_lowercase() == method_lower)
+            .map(|(_, v)| v.clone());
+
+        match func_val {
+            Some(ref func @ CfmlValue::Function(_)) => {
+                // Bind `this` to the template
+                let mut parent_locals = HashMap::new();
+                parent_locals.insert("this".to_string(), template.clone());
+                self.call_function(func, args, &parent_locals)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Execute with Application.cfc lifecycle
+    pub fn execute_with_lifecycle(&mut self) -> CfmlResult {
+        // 1. Find Application.cfc
+        let app_cfc_path = self.find_application_cfc();
+
+        let app_cfc_path = match app_cfc_path {
+            Some(path) => path,
+            None => return self.execute(), // No Application.cfc, just execute directly
+        };
+
+        // 2. Load Application.cfc
+        let template = match self.load_application_cfc(&app_cfc_path) {
+            Some(t) => t,
+            None => return self.execute(), // Failed to load, fall through
+        };
+
+        // 3. Extract config
+        let (app_name, _config) = Self::extract_app_config(&template);
+
+        // 4. Wire up application scope
+        if let Some(ref server_state) = self.server_state.clone() {
+            let mut apps = server_state.applications.lock().unwrap();
+            if !apps.contains_key(&app_name) {
+                // New application
+                let app_state = ApplicationState {
+                    name: app_name.clone(),
+                    variables: HashMap::new(),
+                    started: false,
+                    config: _config.clone(),
+                };
+                apps.insert(app_name.clone(), app_state);
+            }
+            let app = apps.get_mut(&app_name).unwrap();
+            let scope = Arc::new(Mutex::new(app.variables.clone()));
+            self.application_scope = Some(scope.clone());
+
+            // 5. onApplicationStart (if not yet started)
+            if !app.started {
+                app.started = true;
+                drop(apps); // Release lock before calling lifecycle method
+                if let Err(e) = self.call_lifecycle_method(&template, "onApplicationStart", vec![]) {
+                    let _ = self.call_lifecycle_method(&template, "onError", vec![
+                        CfmlValue::String(e.message.clone()),
+                        CfmlValue::String("onApplicationStart".to_string()),
+                    ]);
+                    return Err(e);
+                }
+            } else {
+                drop(apps);
+            }
+        } else {
+            // CLI mode: fresh application scope each time
+            let scope = Arc::new(Mutex::new(HashMap::new()));
+            self.application_scope = Some(scope);
+
+            // Still call onApplicationStart in CLI mode
+            let _ = self.call_lifecycle_method(&template, "onApplicationStart", vec![]);
+        }
+
+        // 6. onRequestStart
+        let target_page = self.source_file.clone().unwrap_or_default();
+        let _ = self.call_lifecycle_method(
+            &template,
+            "onRequestStart",
+            vec![CfmlValue::String(target_page.clone())],
+        );
+
+        // 7. Check for onRequest — if exists, call it; else execute normally
+        let has_on_request = if let CfmlValue::Struct(ref s) = template {
+            s.iter().any(|(k, v)| k.to_lowercase() == "onrequest" && matches!(v, CfmlValue::Function(_)))
+        } else {
+            false
+        };
+
+        let result = if has_on_request {
+            match self.call_lifecycle_method(
+                &template,
+                "onRequest",
+                vec![CfmlValue::String(target_page.clone())],
+            ) {
+                Ok(_) => Ok(CfmlValue::Null),
+                Err(e) if e.message == "__cflocation_redirect" => Ok(CfmlValue::Null),
+                Err(e) => Err(e),
+            }
+        } else {
+            match self.execute() {
+                Ok(v) => Ok(v),
+                Err(e) if e.message == "__cflocation_redirect" => Ok(CfmlValue::Null),
+                Err(e) => Err(e),
+            }
+        };
+
+        // 8. onRequestEnd
+        let _ = self.call_lifecycle_method(
+            &template,
+            "onRequestEnd",
+            vec![CfmlValue::String(target_page)],
+        );
+
+        // 9. Write application scope back to ServerState
+        if let Some(ref server_state) = self.server_state.clone() {
+            if let Some(ref app_scope) = self.application_scope {
+                if let Ok(scope) = app_scope.lock() {
+                    if let Ok(mut apps) = server_state.applications.lock() {
+                        if let Some(app) = apps.get_mut(&app_name) {
+                            app.variables = scope.clone();
+                        }
+                    }
+                }
+            }
+        }
+
+        // 10. Clear request scope
+        self.request_scope.clear();
+
+        result
     }
 
     pub fn get_output(&self) -> String {

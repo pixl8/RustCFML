@@ -158,6 +158,7 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("structGet".into(), fn_struct_get);
     f.insert("structValueArray".into(), fn_struct_value_array);
     f.insert("structEquals".into(), fn_struct_equals);
+    f.insert("structKeyTranslate".into(), fn_struct_key_translate);
 
     // ---- General utility functions ----
     f.insert("isEmpty".into(), fn_is_empty);
@@ -306,6 +307,8 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("getMetadata".into(), fn_get_metadata);
     f.insert("isInstanceOf".into(), fn_is_instance_of);
     f.insert("createObject".into(), fn_create_object);
+    f.insert("getDirectoryFromPath".into(), fn_get_directory_from_path);
+    f.insert("getComponentMetadata".into(), fn_get_component_metadata);
     f.insert("createUUID".into(), fn_create_uuid);
     f.insert("createGUID".into(), fn_create_guid);
     f.insert("hash".into(), fn_hash);
@@ -313,6 +316,9 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
 
     // ---- System functions ----
     f.insert("getTickCount".into(), fn_get_tick_count);
+    f.insert("getCurrentTemplatePath".into(), fn_get_current_template_path);
+    f.insert("getBaseTemplatePath".into(), fn_get_base_template_path);
+    f.insert("getTimeZone".into(), fn_get_time_zone);
 
     // ---- File I/O functions ----
     f.insert("fileRead".into(), fn_file_read);
@@ -339,6 +345,17 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("arrayPop".into(), fn_array_pop);
     f.insert("arrayShift".into(), fn_array_shift);
 
+    // ---- HTTP/Tag infrastructure (VM-intercepted) ----
+    f.insert("__cfheader".into(), fn_cfheader_stub);
+    f.insert("__cfcontent".into(), fn_cfcontent_stub);
+    f.insert("__cflocation".into(), fn_cflocation_stub);
+    f.insert("getHTTPRequestData".into(), fn_get_http_request_data_stub);
+    f.insert("__cfinvoke".into(), fn_cfinvoke_stub);
+    f.insert("__cfsavecontent_start".into(), fn_cfsavecontent_start_stub);
+    f.insert("__cfsavecontent_end".into(), fn_cfsavecontent_end_stub);
+    f.insert("invoke".into(), fn_invoke_stub);
+    f.insert("cfdirectory".into(), fn_cfdirectory);
+
     // ---- HTTP functions ----
     #[cfg(feature = "http")]
     f.insert("cfhttp".into(), fn_cfhttp);
@@ -346,6 +363,22 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     // ---- Database functions ----
     #[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db"))]
     f.insert("queryExecute".into(), fn_query_execute);
+
+    // ---- Security functions ----
+    f.insert("hmac".into(), fn_hmac);
+    f.insert("generateSecretKey".into(), fn_generate_secret_key);
+    f.insert("encrypt".into(), fn_encrypt);
+    f.insert("decrypt".into(), fn_decrypt);
+
+    // ---- XML functions ----
+    #[cfg(feature = "xml")]
+    {
+        f.insert("xmlParse".into(), fn_xml_parse);
+        f.insert("xmlSearch".into(), fn_xml_search);
+        f.insert("isXML".into(), fn_is_xml);
+        f.insert("xmlTransform".into(), fn_xml_transform_stub);
+        f.insert("xmlValidate".into(), fn_xml_validate_stub);
+    }
 
     f
 }
@@ -1917,6 +1950,19 @@ fn fn_struct_equals(args: Vec<CfmlValue>) -> CfmlResult {
         }
     }
     Ok(CfmlValue::Bool(false))
+}
+
+fn fn_struct_key_translate(args: Vec<CfmlValue>) -> CfmlResult {
+    if let Some(CfmlValue::Struct(s)) = args.first() {
+        let retain = args.get(1).map(|v| v.is_true()).unwrap_or(false);
+        let mut result = HashMap::new();
+        for (k, v) in s {
+            let new_key = if retain { k.clone() } else { k.to_lowercase() };
+            result.insert(new_key, v.clone());
+        }
+        return Ok(CfmlValue::Struct(result));
+    }
+    Err(CfmlError::runtime("structKeyTranslate requires a struct argument".into()))
 }
 
 // ===============================================
@@ -3559,6 +3605,20 @@ fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
                         if let Some(ref rt) = f.return_type {
                             func_meta.insert("returnType".to_string(), CfmlValue::String(rt.clone()));
                         }
+                        // Parameter details
+                        let params: Vec<CfmlValue> = f.params.iter().map(|p| {
+                            let mut pm = HashMap::new();
+                            pm.insert("name".to_string(), CfmlValue::String(p.name.clone()));
+                            if let Some(ref t) = p.param_type {
+                                pm.insert("type".to_string(), CfmlValue::String(t.clone()));
+                            }
+                            pm.insert("required".to_string(), CfmlValue::Bool(p.required));
+                            if let Some(ref d) = p.default {
+                                pm.insert("default".to_string(), d.clone());
+                            }
+                            CfmlValue::Struct(pm)
+                        }).collect();
+                        func_meta.insert("parameters".to_string(), CfmlValue::Array(params));
                         // Check for function metadata (__funcmeta_<name>)
                         let meta_key = format!("__funcmeta_{}", k);
                         if let Some(CfmlValue::Struct(fm)) = s.get(&meta_key) {
@@ -3580,6 +3640,33 @@ fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
                     properties.push(CfmlValue::Struct(prop_meta));
                 }
                 meta.insert("properties".to_string(), CfmlValue::Array(properties));
+            }
+            CfmlValue::Function(f) => {
+                meta.insert("name".to_string(), CfmlValue::String(f.name.clone()));
+                meta.insert("access".to_string(), CfmlValue::String(
+                    match f.access {
+                        CfmlAccess::Public => "public",
+                        CfmlAccess::Private => "private",
+                        CfmlAccess::Package => "package",
+                        CfmlAccess::Remote => "remote",
+                    }.to_string()
+                ));
+                if let Some(ref rt) = f.return_type {
+                    meta.insert("returnType".to_string(), CfmlValue::String(rt.clone()));
+                }
+                let params: Vec<CfmlValue> = f.params.iter().map(|p| {
+                    let mut pm = HashMap::new();
+                    pm.insert("name".to_string(), CfmlValue::String(p.name.clone()));
+                    if let Some(ref t) = p.param_type {
+                        pm.insert("type".to_string(), CfmlValue::String(t.clone()));
+                    }
+                    pm.insert("required".to_string(), CfmlValue::Bool(p.required));
+                    if let Some(ref d) = p.default {
+                        pm.insert("default".to_string(), d.clone());
+                    }
+                    CfmlValue::Struct(pm)
+                }).collect();
+                meta.insert("parameters".to_string(), CfmlValue::Array(params));
             }
             _ => {
                 meta.insert("type".to_string(), CfmlValue::String(val.type_name().to_string()));
@@ -3908,6 +3995,34 @@ fn fn_expand_path(args: Vec<CfmlValue>) -> CfmlResult {
             Ok(CfmlValue::String(cwd.join(&path).to_string_lossy().to_string()))
         }
     }
+}
+
+fn fn_get_directory_from_path(args: Vec<CfmlValue>) -> CfmlResult {
+    let path = get_str(&args, 0);
+    if path.is_empty() {
+        return Ok(CfmlValue::String(String::new()));
+    }
+    let p = std::path::Path::new(&path);
+    match p.parent() {
+        Some(parent) => {
+            let mut dir = parent.to_string_lossy().to_string();
+            if !dir.is_empty() && !dir.ends_with(std::path::MAIN_SEPARATOR) {
+                dir.push(std::path::MAIN_SEPARATOR);
+            }
+            Ok(CfmlValue::String(dir))
+        }
+        None => Ok(CfmlValue::String(path)),
+    }
+}
+
+fn fn_get_current_template_path(_args: Vec<CfmlValue>) -> CfmlResult {
+    // Stub — VM intercepts this call to return the actual template path
+    Ok(CfmlValue::String(String::new()))
+}
+
+fn fn_get_component_metadata(_args: Vec<CfmlValue>) -> CfmlResult {
+    // Stub — VM intercepts this call to resolve component metadata
+    Ok(CfmlValue::Struct(HashMap::new()))
 }
 
 // ===============================================
@@ -4675,4 +4790,904 @@ fn build_mutation_result(affected: i64, last_id: i64) -> CfmlResult {
     result.insert("recordCount".to_string(), CfmlValue::Int(affected));
     result.insert("generatedKey".to_string(), CfmlValue::Int(last_id));
     Ok(CfmlValue::Struct(result))
+}
+
+// -----------------------------------------------
+// HTTP/Tag infrastructure stubs (VM-intercepted)
+// -----------------------------------------------
+
+fn fn_cfheader_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("__cfheader requires VM intercept".into()))
+}
+
+fn fn_cfcontent_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("__cfcontent requires VM intercept".into()))
+}
+
+fn fn_cflocation_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("__cflocation requires VM intercept".into()))
+}
+
+fn fn_get_http_request_data_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("getHTTPRequestData requires VM intercept".into()))
+}
+
+fn fn_cfinvoke_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("__cfinvoke requires VM intercept".into()))
+}
+
+fn fn_cfsavecontent_start_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("__cfsavecontent_start requires VM intercept".into()))
+}
+
+fn fn_cfsavecontent_end_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("__cfsavecontent_end requires VM intercept".into()))
+}
+
+fn fn_invoke_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("invoke requires VM intercept".into()))
+}
+
+// -----------------------------------------------
+// cfdirectory - Full builtin implementation
+// -----------------------------------------------
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fn_cfdirectory(args: Vec<CfmlValue>) -> CfmlResult {
+    use std::fs;
+    use std::path::Path;
+
+    let opts = match args.first() {
+        Some(CfmlValue::Struct(s)) => s,
+        _ => return Err(CfmlError::runtime("cfdirectory requires a struct argument".into())),
+    };
+
+    // Case-insensitive key lookup helper
+    fn get_ci<'a>(s: &'a HashMap<String, CfmlValue>, key: &str) -> Option<&'a CfmlValue> {
+        let key_lower = key.to_lowercase();
+        for (k, v) in s {
+            if k.to_lowercase() == key_lower {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    let action = get_ci(opts, "action")
+        .map(|v| v.as_string().to_lowercase())
+        .unwrap_or_else(|| "list".into());
+
+    let directory = get_ci(opts, "directory")
+        .map(|v| v.as_string())
+        .unwrap_or_default();
+
+    match action.as_str() {
+        "list" => {
+            let filter = get_ci(opts, "filter")
+                .map(|v| v.as_string())
+                .unwrap_or_else(|| "*".into());
+            let recurse = get_ci(opts, "recurse")
+                .map(|v| match v {
+                    CfmlValue::Bool(b) => *b,
+                    CfmlValue::String(s) => {
+                        let l = s.to_lowercase();
+                        l == "true" || l == "yes"
+                    }
+                    _ => false,
+                })
+                .unwrap_or(false);
+
+            let columns = vec![
+                "name".to_string(),
+                "directory".to_string(),
+                "type".to_string(),
+                "size".to_string(),
+                "datelastmodified".to_string(),
+            ];
+            let mut rows: Vec<HashMap<String, CfmlValue>> = Vec::new();
+
+            fn matches_glob(name: &str, pattern: &str) -> bool {
+                if pattern == "*" {
+                    return true;
+                }
+                if let Some(ext) = pattern.strip_prefix("*.") {
+                    name.to_lowercase().ends_with(&format!(".{}", ext.to_lowercase()))
+                } else {
+                    name.to_lowercase() == pattern.to_lowercase()
+                }
+            }
+
+            fn list_dir(
+                dir: &Path,
+                filter: &str,
+                recurse: bool,
+                rows: &mut Vec<HashMap<String, CfmlValue>>,
+            ) -> Result<(), CfmlError> {
+                let entries = fs::read_dir(dir).map_err(|e| {
+                    CfmlError::runtime(format!("cfdirectory: cannot read directory: {}", e))
+                })?;
+
+                for entry in entries {
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    let metadata = match entry.metadata() {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let is_dir = metadata.is_dir();
+
+                    if !is_dir && !matches_glob(&name, filter) {
+                        if recurse && is_dir {
+                            // still recurse into non-matching dirs
+                        } else if !is_dir {
+                            // skip non-matching files
+                            if recurse && metadata.is_dir() {
+                                // unreachable but safe
+                            }
+                            // actually skip
+                        }
+                    }
+
+                    let file_type = if is_dir { "Dir" } else { "File" };
+                    let size = if is_dir { 0i64 } else { metadata.len() as i64 };
+                    let modified = metadata
+                        .modified()
+                        .ok()
+                        .and_then(|t| {
+                            let dt: chrono::DateTime<chrono::Local> = t.into();
+                            Some(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        })
+                        .unwrap_or_default();
+
+                    let should_include = is_dir || matches_glob(&name, filter);
+
+                    if should_include {
+                        let mut row = HashMap::new();
+                        row.insert("name".into(), CfmlValue::String(name.clone()));
+                        row.insert(
+                            "directory".into(),
+                            CfmlValue::String(dir.to_string_lossy().to_string()),
+                        );
+                        row.insert("type".into(), CfmlValue::String(file_type.into()));
+                        row.insert("size".into(), CfmlValue::Int(size));
+                        row.insert("datelastmodified".into(), CfmlValue::String(modified));
+                        rows.push(row);
+                    }
+
+                    if recurse && is_dir {
+                        list_dir(&entry.path(), filter, recurse, rows)?;
+                    }
+                }
+                Ok(())
+            }
+
+            list_dir(Path::new(&directory), &filter, recurse, &mut rows)?;
+
+            let query = CfmlQuery {
+                columns,
+                rows,
+                sql: None,
+            };
+            Ok(CfmlValue::Query(query))
+        }
+        "create" => {
+            fs::create_dir_all(&directory).map_err(|e| {
+                CfmlError::runtime(format!("cfdirectory create failed: {}", e))
+            })?;
+            Ok(CfmlValue::Null)
+        }
+        "delete" => {
+            fs::remove_dir_all(&directory).map_err(|e| {
+                CfmlError::runtime(format!("cfdirectory delete failed: {}", e))
+            })?;
+            Ok(CfmlValue::Null)
+        }
+        "rename" => {
+            let new_dir = get_ci(opts, "newdirectory")
+                .map(|v| v.as_string())
+                .unwrap_or_default();
+            if new_dir.is_empty() {
+                return Err(CfmlError::runtime(
+                    "cfdirectory rename requires 'newdirectory' attribute".into(),
+                ));
+            }
+            fs::rename(&directory, &new_dir).map_err(|e| {
+                CfmlError::runtime(format!("cfdirectory rename failed: {}", e))
+            })?;
+            Ok(CfmlValue::Null)
+        }
+        _ => Err(CfmlError::runtime(format!(
+            "cfdirectory: unsupported action '{}'",
+            action
+        ))),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn fn_cfdirectory(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("cfdirectory is not supported in wasm".into()))
+}
+
+// ==== ENCODING HELPERS ====
+
+fn base64_encode_bytes(data: &[u8]) -> String {
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::new();
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        result.push(alphabet[((n >> 18) & 63) as usize] as char);
+        result.push(alphabet[((n >> 12) & 63) as usize] as char);
+        if chunk.len() > 1 {
+            result.push(alphabet[((n >> 6) & 63) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        if chunk.len() > 2 {
+            result.push(alphabet[(n & 63) as usize] as char);
+        } else {
+            result.push('=');
+        }
+    }
+    result
+}
+
+fn base64_decode_bytes(s: &str) -> Vec<u8> {
+    let table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut bytes = Vec::new();
+    let chars: Vec<u8> = s.bytes().filter(|&b| b != b'\n' && b != b'\r' && b != b' ').collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if i + 1 >= chars.len() { break; }
+        let b0 = table.iter().position(|&c| c == chars[i]).unwrap_or(0) as u32;
+        let b1 = table.iter().position(|&c| c == chars[i + 1]).unwrap_or(0) as u32;
+        let b2 = if i + 2 < chars.len() && chars[i + 2] != b'=' {
+            table.iter().position(|&c| c == chars[i + 2]).unwrap_or(0) as u32
+        } else {
+            0
+        };
+        let b3 = if i + 3 < chars.len() && chars[i + 3] != b'=' {
+            table.iter().position(|&c| c == chars[i + 3]).unwrap_or(0) as u32
+        } else {
+            0
+        };
+        let triple = (b0 << 18) | (b1 << 12) | (b2 << 6) | b3;
+        bytes.push(((triple >> 16) & 0xFF) as u8);
+        if i + 2 < chars.len() && chars[i + 2] != b'=' {
+            bytes.push(((triple >> 8) & 0xFF) as u8);
+        }
+        if i + 3 < chars.len() && chars[i + 3] != b'=' {
+            bytes.push((triple & 0xFF) as u8);
+        }
+        i += 4;
+    }
+    bytes
+}
+
+fn hex_encode(data: &[u8]) -> String {
+    data.iter().map(|b| format!("{:02X}", b)).collect()
+}
+
+fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
+    let s = s.trim();
+    if s.len() % 2 != 0 {
+        return Err("Invalid hex string length".to_string());
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| format!("Invalid hex: {}", e)))
+        .collect()
+}
+
+fn uu_encode(data: &[u8]) -> String {
+    let mut result = String::new();
+    for chunk in data.chunks(45) {
+        result.push((chunk.len() as u8 + 32) as char);
+        for triple in chunk.chunks(3) {
+            let b0 = triple[0] as u32;
+            let b1 = triple.get(1).copied().unwrap_or(0) as u32;
+            let b2 = triple.get(2).copied().unwrap_or(0) as u32;
+            let n = (b0 << 16) | (b1 << 8) | b2;
+            result.push((((n >> 18) & 63) as u8).wrapping_add(32) as char);
+            result.push((((n >> 12) & 63) as u8).wrapping_add(32) as char);
+            result.push((((n >> 6) & 63) as u8).wrapping_add(32) as char);
+            result.push(((n & 63) as u8).wrapping_add(32) as char);
+        }
+        result.push('\n');
+    }
+    result
+}
+
+fn uu_decode(s: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for line in s.lines() {
+        if line.is_empty() { continue; }
+        let line_bytes: Vec<u8> = line.bytes().collect();
+        if line_bytes.is_empty() { continue; }
+        let expected_len = (line_bytes[0].wrapping_sub(32) & 63) as usize;
+        let mut i = 1;
+        let mut decoded_in_line = Vec::new();
+        while i + 3 < line_bytes.len() {
+            let b0 = (line_bytes[i].wrapping_sub(32) & 63) as u32;
+            let b1 = (line_bytes[i + 1].wrapping_sub(32) & 63) as u32;
+            let b2 = (line_bytes[i + 2].wrapping_sub(32) & 63) as u32;
+            let b3 = (line_bytes[i + 3].wrapping_sub(32) & 63) as u32;
+            let n = (b0 << 18) | (b1 << 12) | (b2 << 6) | b3;
+            decoded_in_line.push(((n >> 16) & 0xFF) as u8);
+            decoded_in_line.push(((n >> 8) & 0xFF) as u8);
+            decoded_in_line.push((n & 0xFF) as u8);
+            i += 4;
+        }
+        decoded_in_line.truncate(expected_len);
+        bytes.extend_from_slice(&decoded_in_line);
+    }
+    bytes
+}
+
+// ==== CIPHER HELPERS ====
+
+fn cfmx_compat_encrypt(data: &[u8], key: &str) -> Vec<u8> {
+    // CFMX_COMPAT is a simple XOR cipher with a key-derived seed
+    let seed: u32 = key.bytes().fold(0u32, |acc, b| acc.wrapping_add(b as u32));
+    let mut rng = seed;
+    data.iter().map(|&b| {
+        rng = rng.wrapping_mul(214013).wrapping_add(2531011);
+        let keystream = ((rng >> 16) & 0xFF) as u8;
+        b ^ keystream
+    }).collect()
+}
+
+fn cfmx_compat_decrypt(data: &[u8], key: &str) -> Vec<u8> {
+    // XOR is symmetric, so decrypt = encrypt
+    cfmx_compat_encrypt(data, key)
+}
+
+fn aes_cbc_encrypt(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
+    use aes::Aes128;
+    use aes::Aes192;
+    use aes::Aes256;
+    use cbc::Encryptor;
+    use cbc::cipher::BlockEncryptMut;
+    use cbc::cipher::KeyIvInit;
+
+    let iv = vec![0u8; 16]; // Zero IV (CFML default)
+
+    match key.len() {
+        16 => {
+            let encryptor = Encryptor::<Aes128>::new_from_slices(key, &iv)
+                .map_err(|e| format!("AES-128 init error: {}", e))?;
+            Ok(encryptor.encrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(plaintext))
+        }
+        24 => {
+            let encryptor = Encryptor::<Aes192>::new_from_slices(key, &iv)
+                .map_err(|e| format!("AES-192 init error: {}", e))?;
+            Ok(encryptor.encrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(plaintext))
+        }
+        32 => {
+            let encryptor = Encryptor::<Aes256>::new_from_slices(key, &iv)
+                .map_err(|e| format!("AES-256 init error: {}", e))?;
+            Ok(encryptor.encrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(plaintext))
+        }
+        _ => Err(format!("Invalid AES key length: {} bytes (expected 16, 24, or 32)", key.len()))
+    }
+}
+
+fn aes_cbc_decrypt(ciphertext: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
+    use aes::Aes128;
+    use aes::Aes192;
+    use aes::Aes256;
+    use cbc::Decryptor;
+    use cbc::cipher::BlockDecryptMut;
+    use cbc::cipher::KeyIvInit;
+
+    let iv = vec![0u8; 16];
+
+    match key.len() {
+        16 => {
+            let decryptor = Decryptor::<Aes128>::new_from_slices(key, &iv)
+                .map_err(|e| format!("AES-128 init error: {}", e))?;
+            decryptor.decrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(ciphertext)
+                .map_err(|e| format!("AES decryption error: {}", e))
+        }
+        24 => {
+            let decryptor = Decryptor::<Aes192>::new_from_slices(key, &iv)
+                .map_err(|e| format!("AES-192 init error: {}", e))?;
+            decryptor.decrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(ciphertext)
+                .map_err(|e| format!("AES decryption error: {}", e))
+        }
+        32 => {
+            let decryptor = Decryptor::<Aes256>::new_from_slices(key, &iv)
+                .map_err(|e| format!("AES-256 init error: {}", e))?;
+            decryptor.decrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(ciphertext)
+                .map_err(|e| format!("AES decryption error: {}", e))
+        }
+        _ => Err(format!("Invalid AES key length: {} bytes", key.len()))
+    }
+}
+
+fn des_cbc_encrypt(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
+    use des::Des;
+    use cbc::Encryptor;
+    use cbc::cipher::BlockEncryptMut;
+    use cbc::cipher::KeyIvInit;
+
+    if key.len() != 8 {
+        return Err(format!("DES key must be 8 bytes, got {}", key.len()));
+    }
+    let iv = [0u8; 8];
+    let encryptor = Encryptor::<Des>::new_from_slices(key, &iv)
+        .map_err(|e| format!("DES init error: {}", e))?;
+    Ok(encryptor.encrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(plaintext))
+}
+
+fn des_cbc_decrypt(ciphertext: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
+    use des::Des;
+    use cbc::Decryptor;
+    use cbc::cipher::BlockDecryptMut;
+    use cbc::cipher::KeyIvInit;
+
+    if key.len() != 8 {
+        return Err(format!("DES key must be 8 bytes, got {}", key.len()));
+    }
+    let iv = [0u8; 8];
+    let decryptor = Decryptor::<Des>::new_from_slices(key, &iv)
+        .map_err(|e| format!("DES init error: {}", e))?;
+    decryptor.decrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(ciphertext)
+        .map_err(|e| format!("DES decryption error: {}", e))
+}
+
+fn desede_cbc_encrypt(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
+    use des::TdesEde3;
+    use cbc::Encryptor;
+    use cbc::cipher::BlockEncryptMut;
+    use cbc::cipher::KeyIvInit;
+
+    if key.len() != 24 {
+        return Err(format!("DESEDE key must be 24 bytes, got {}", key.len()));
+    }
+    let iv = [0u8; 8];
+    let encryptor = Encryptor::<TdesEde3>::new_from_slices(key, &iv)
+        .map_err(|e| format!("DESEDE init error: {}", e))?;
+    Ok(encryptor.encrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(plaintext))
+}
+
+fn desede_cbc_decrypt(ciphertext: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
+    use des::TdesEde3;
+    use cbc::Decryptor;
+    use cbc::cipher::BlockDecryptMut;
+    use cbc::cipher::KeyIvInit;
+
+    if key.len() != 24 {
+        return Err(format!("DESEDE key must be 24 bytes, got {}", key.len()));
+    }
+    let iv = [0u8; 8];
+    let decryptor = Decryptor::<TdesEde3>::new_from_slices(key, &iv)
+        .map_err(|e| format!("DESEDE init error: {}", e))?;
+    decryptor.decrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(ciphertext)
+        .map_err(|e| format!("DESEDE decryption error: {}", e))
+}
+
+fn blowfish_cbc_encrypt(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
+    use blowfish::Blowfish;
+    use cbc::Encryptor;
+    use cbc::cipher::BlockEncryptMut;
+    use cbc::cipher::KeyIvInit;
+
+    let iv = [0u8; 8];
+    let encryptor = Encryptor::<Blowfish>::new_from_slices(key, &iv)
+        .map_err(|e| format!("Blowfish init error: {}", e))?;
+    Ok(encryptor.encrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(plaintext))
+}
+
+fn blowfish_cbc_decrypt(ciphertext: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
+    use blowfish::Blowfish;
+    use cbc::Decryptor;
+    use cbc::cipher::BlockDecryptMut;
+    use cbc::cipher::KeyIvInit;
+
+    let iv = [0u8; 8];
+    let decryptor = Decryptor::<Blowfish>::new_from_slices(key, &iv)
+        .map_err(|e| format!("Blowfish init error: {}", e))?;
+    decryptor.decrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(ciphertext)
+        .map_err(|e| format!("Blowfish decryption error: {}", e))
+}
+
+// ==== SECURITY BUILTIN FUNCTIONS ====
+
+fn fn_hmac(args: Vec<CfmlValue>) -> CfmlResult {
+    use hmac::{Hmac, Mac};
+    use sha2::{Sha256, Sha384, Sha512};
+    use sha1::Sha1;
+    use md5::Md5;
+
+    let message = get_str(&args, 0);
+    let key = get_str(&args, 1);
+    let algorithm = if args.len() >= 3 {
+        get_str(&args, 2).to_uppercase()
+    } else {
+        "HMACSHA256".to_string()
+    };
+    // encoding param (4th) -- we always return hex, matching CFML default
+
+    let hex_result = match algorithm.as_str() {
+        "HMACMD5" | "HMAC-MD5" => {
+            let mut mac = Hmac::<Md5>::new_from_slice(key.as_bytes())
+                .map_err(|e| CfmlError::runtime(format!("HMAC init error: {}", e)))?;
+            mac.update(message.as_bytes());
+            hex_encode(&mac.finalize().into_bytes())
+        }
+        "HMACSHA1" | "HMAC-SHA1" => {
+            let mut mac = Hmac::<Sha1>::new_from_slice(key.as_bytes())
+                .map_err(|e| CfmlError::runtime(format!("HMAC init error: {}", e)))?;
+            mac.update(message.as_bytes());
+            hex_encode(&mac.finalize().into_bytes())
+        }
+        "HMACSHA256" | "HMAC-SHA256" | "" => {
+            let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes())
+                .map_err(|e| CfmlError::runtime(format!("HMAC init error: {}", e)))?;
+            mac.update(message.as_bytes());
+            hex_encode(&mac.finalize().into_bytes())
+        }
+        "HMACSHA384" | "HMAC-SHA384" => {
+            let mut mac = Hmac::<Sha384>::new_from_slice(key.as_bytes())
+                .map_err(|e| CfmlError::runtime(format!("HMAC init error: {}", e)))?;
+            mac.update(message.as_bytes());
+            hex_encode(&mac.finalize().into_bytes())
+        }
+        "HMACSHA512" | "HMAC-SHA512" => {
+            let mut mac = Hmac::<Sha512>::new_from_slice(key.as_bytes())
+                .map_err(|e| CfmlError::runtime(format!("HMAC init error: {}", e)))?;
+            mac.update(message.as_bytes());
+            hex_encode(&mac.finalize().into_bytes())
+        }
+        _ => return Err(CfmlError::runtime(format!("Unsupported HMAC algorithm: {}", algorithm)))
+    };
+
+    Ok(CfmlValue::String(hex_result))
+}
+
+fn fn_generate_secret_key(args: Vec<CfmlValue>) -> CfmlResult {
+    use rand::RngCore;
+
+    let algorithm = if args.is_empty() {
+        "AES".to_string()
+    } else {
+        get_str(&args, 0).to_uppercase()
+    };
+    let key_size = if args.len() >= 2 { get_int(&args, 1) as usize } else { 0 };
+
+    let num_bytes = match algorithm.as_str() {
+        "AES" => {
+            let bits = if key_size > 0 { key_size } else { 128 };
+            match bits {
+                128 | 192 | 256 => bits / 8,
+                _ => return Err(CfmlError::runtime(format!("Invalid AES key size: {}. Must be 128, 192, or 256", bits)))
+            }
+        }
+        "DES" => 8,
+        "DESEDE" | "DESEDE3" => 24,
+        "BLOWFISH" => {
+            let bits = if key_size > 0 { key_size } else { 128 };
+            bits / 8
+        }
+        _ => return Err(CfmlError::runtime(format!("Unsupported algorithm: {}", algorithm)))
+    };
+
+    let mut key_bytes = vec![0u8; num_bytes];
+    rand::thread_rng().fill_bytes(&mut key_bytes);
+    Ok(CfmlValue::String(base64_encode_bytes(&key_bytes)))
+}
+
+fn fn_encrypt(args: Vec<CfmlValue>) -> CfmlResult {
+    let plaintext = get_str(&args, 0);
+    let key_b64 = get_str(&args, 1);
+    let algorithm = if args.len() >= 3 {
+        get_str(&args, 2).to_uppercase()
+    } else {
+        "AES".to_string()
+    };
+    let encoding = if args.len() >= 4 {
+        get_str(&args, 3).to_uppercase()
+    } else {
+        "UU".to_string()
+    };
+
+    let ciphertext = if algorithm == "CFMX_COMPAT" {
+        cfmx_compat_encrypt(plaintext.as_bytes(), &key_b64)
+    } else {
+        let key_bytes = base64_decode_bytes(&key_b64);
+        let plaintext_bytes = plaintext.as_bytes();
+
+        match algorithm.as_str() {
+            "AES" | "AES/CBC/PKCS5PADDING" | "AES/CBC/PKCS7PADDING" => {
+                aes_cbc_encrypt(plaintext_bytes, &key_bytes)
+                    .map_err(|e| CfmlError::runtime(e))?
+            }
+            "DES" | "DES/CBC/PKCS5PADDING" => {
+                des_cbc_encrypt(plaintext_bytes, &key_bytes)
+                    .map_err(|e| CfmlError::runtime(e))?
+            }
+            "DESEDE" | "DESEDE/CBC/PKCS5PADDING" => {
+                desede_cbc_encrypt(plaintext_bytes, &key_bytes)
+                    .map_err(|e| CfmlError::runtime(e))?
+            }
+            "BLOWFISH" | "BLOWFISH/CBC/PKCS5PADDING" => {
+                blowfish_cbc_encrypt(plaintext_bytes, &key_bytes)
+                    .map_err(|e| CfmlError::runtime(e))?
+            }
+            _ => return Err(CfmlError::runtime(format!("Unsupported encryption algorithm: {}", algorithm)))
+        }
+    };
+
+    let encoded = match encoding.as_str() {
+        "UU" => uu_encode(&ciphertext),
+        "BASE64" => base64_encode_bytes(&ciphertext),
+        "HEX" => hex_encode(&ciphertext),
+        _ => return Err(CfmlError::runtime(format!("Unsupported encoding: {}", encoding)))
+    };
+
+    Ok(CfmlValue::String(encoded))
+}
+
+fn fn_decrypt(args: Vec<CfmlValue>) -> CfmlResult {
+    let encoded_str = get_str(&args, 0);
+    let key_b64 = get_str(&args, 1);
+    let algorithm = if args.len() >= 3 {
+        get_str(&args, 2).to_uppercase()
+    } else {
+        "AES".to_string()
+    };
+    let encoding = if args.len() >= 4 {
+        get_str(&args, 3).to_uppercase()
+    } else {
+        "UU".to_string()
+    };
+
+    let ciphertext = match encoding.as_str() {
+        "UU" => uu_decode(&encoded_str),
+        "BASE64" => base64_decode_bytes(&encoded_str),
+        "HEX" => hex_decode(&encoded_str).map_err(|e| CfmlError::runtime(e))?,
+        _ => return Err(CfmlError::runtime(format!("Unsupported encoding: {}", encoding)))
+    };
+
+    let plaintext_bytes = if algorithm == "CFMX_COMPAT" {
+        cfmx_compat_decrypt(&ciphertext, &key_b64)
+    } else {
+        let key_bytes = base64_decode_bytes(&key_b64);
+
+        match algorithm.as_str() {
+            "AES" | "AES/CBC/PKCS5PADDING" | "AES/CBC/PKCS7PADDING" => {
+                aes_cbc_decrypt(&ciphertext, &key_bytes)
+                    .map_err(|e| CfmlError::runtime(e))?
+            }
+            "DES" | "DES/CBC/PKCS5PADDING" => {
+                des_cbc_decrypt(&ciphertext, &key_bytes)
+                    .map_err(|e| CfmlError::runtime(e))?
+            }
+            "DESEDE" | "DESEDE/CBC/PKCS5PADDING" => {
+                desede_cbc_decrypt(&ciphertext, &key_bytes)
+                    .map_err(|e| CfmlError::runtime(e))?
+            }
+            "BLOWFISH" | "BLOWFISH/CBC/PKCS5PADDING" => {
+                blowfish_cbc_decrypt(&ciphertext, &key_bytes)
+                    .map_err(|e| CfmlError::runtime(e))?
+            }
+            _ => return Err(CfmlError::runtime(format!("Unsupported decryption algorithm: {}", algorithm)))
+        }
+    };
+
+    let result = String::from_utf8(plaintext_bytes)
+        .map_err(|e| CfmlError::runtime(format!("Decrypted data is not valid UTF-8: {}", e)))?;
+    Ok(CfmlValue::String(result))
+}
+
+// ==== SYSTEM FUNCTIONS ====
+
+fn fn_get_base_template_path(_args: Vec<CfmlValue>) -> CfmlResult {
+    // VM-intercepted — this stub only runs if VM intercept misses
+    Err(CfmlError::runtime("getBaseTemplatePath() requires VM context".to_string()))
+}
+
+fn fn_get_time_zone(_args: Vec<CfmlValue>) -> CfmlResult {
+    // VM-intercepted — this stub only runs if VM intercept misses
+    Err(CfmlError::runtime("getTimeZone() requires VM context".to_string()))
+}
+
+// ==== XML FUNCTIONS ====
+
+#[cfg(feature = "xml")]
+fn fn_xml_parse(args: Vec<CfmlValue>) -> CfmlResult {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+
+    let xml_str = get_str(&args, 0);
+    let mut reader = Reader::from_str(&xml_str);
+
+    let mut stack: Vec<HashMap<String, CfmlValue>> = Vec::new();
+    let mut root: Option<HashMap<String, CfmlValue>> = None;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let mut element = HashMap::new();
+                let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                element.insert("xmlName".to_string(), CfmlValue::String(tag_name));
+                element.insert("xmlType".to_string(), CfmlValue::String("ELEMENT".to_string()));
+                element.insert("xmlText".to_string(), CfmlValue::String(String::new()));
+                element.insert("xmlChildren".to_string(), CfmlValue::Array(Vec::new()));
+
+                let mut attrs = HashMap::new();
+                for attr in e.attributes().flatten() {
+                    let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                    let val = String::from_utf8_lossy(&attr.value).to_string();
+                    attrs.insert(key, CfmlValue::String(val));
+                }
+                element.insert("xmlAttributes".to_string(), CfmlValue::Struct(attrs));
+
+                stack.push(element);
+            }
+            Ok(Event::End(_)) => {
+                if let Some(completed) = stack.pop() {
+                    if let Some(parent) = stack.last_mut() {
+                        if let Some(CfmlValue::Array(ref mut children)) = parent.get_mut("xmlChildren") {
+                            children.push(CfmlValue::Struct(completed));
+                        }
+                    } else {
+                        root = Some(completed);
+                    }
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let mut element = HashMap::new();
+                let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                element.insert("xmlName".to_string(), CfmlValue::String(tag_name));
+                element.insert("xmlType".to_string(), CfmlValue::String("ELEMENT".to_string()));
+                element.insert("xmlText".to_string(), CfmlValue::String(String::new()));
+                element.insert("xmlChildren".to_string(), CfmlValue::Array(Vec::new()));
+
+                let mut attrs = HashMap::new();
+                for attr in e.attributes().flatten() {
+                    let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                    let val = String::from_utf8_lossy(&attr.value).to_string();
+                    attrs.insert(key, CfmlValue::String(val));
+                }
+                element.insert("xmlAttributes".to_string(), CfmlValue::Struct(attrs));
+
+                if let Some(parent) = stack.last_mut() {
+                    if let Some(CfmlValue::Array(ref mut children)) = parent.get_mut("xmlChildren") {
+                        children.push(CfmlValue::Struct(element));
+                    }
+                } else {
+                    root = Some(element);
+                }
+            }
+            Ok(Event::Text(ref e)) => {
+                let text = e.unescape().unwrap_or(std::borrow::Cow::Borrowed("")).to_string();
+                let trimmed = text.trim().to_string();
+                if !trimmed.is_empty() {
+                    if let Some(current) = stack.last_mut() {
+                        if let Some(CfmlValue::String(ref mut s)) = current.get_mut("xmlText") {
+                            if !s.is_empty() { s.push(' '); }
+                            s.push_str(&trimmed);
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(CfmlError::runtime(format!("XML parse error: {}", e))),
+            _ => {}
+        }
+    }
+
+    match root {
+        Some(root_element) => {
+            let mut doc = HashMap::new();
+            doc.insert("xmlRoot".to_string(), CfmlValue::Struct(root_element));
+            doc.insert("xmlType".to_string(), CfmlValue::String("DOCUMENT".to_string()));
+            Ok(CfmlValue::Struct(doc))
+        }
+        None => Err(CfmlError::runtime("Empty or invalid XML document".to_string()))
+    }
+}
+
+#[cfg(feature = "xml")]
+fn fn_xml_search(args: Vec<CfmlValue>) -> CfmlResult {
+    let doc = args.get(0).cloned().unwrap_or(CfmlValue::Null);
+    let path_expr = get_str(&args, 1);
+
+    let mut results = Vec::new();
+
+    let search_root = if let CfmlValue::Struct(ref s) = doc {
+        if let Some(root) = s.get("xmlRoot") {
+            root.clone()
+        } else {
+            doc.clone()
+        }
+    } else {
+        doc.clone()
+    };
+
+    if path_expr.starts_with("//") {
+        let tag_name = &path_expr[2..];
+        xml_search_descendants(&search_root, tag_name, &mut results);
+    } else {
+        let parts: Vec<&str> = path_expr.trim_start_matches('/').split('/').collect();
+        xml_search_path(&search_root, &parts, 0, &mut results);
+    }
+
+    Ok(CfmlValue::Array(results))
+}
+
+#[cfg(feature = "xml")]
+fn xml_search_descendants(node: &CfmlValue, tag_name: &str, results: &mut Vec<CfmlValue>) {
+    if let CfmlValue::Struct(ref s) = node {
+        if let Some(CfmlValue::String(ref name)) = s.get("xmlName") {
+            if name == tag_name || tag_name == "*" {
+                results.push(node.clone());
+            }
+        }
+        if let Some(CfmlValue::Array(ref children)) = s.get("xmlChildren") {
+            for child in children {
+                xml_search_descendants(child, tag_name, results);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "xml")]
+fn xml_search_path(node: &CfmlValue, parts: &[&str], depth: usize, results: &mut Vec<CfmlValue>) {
+    if depth >= parts.len() {
+        results.push(node.clone());
+        return;
+    }
+
+    let target = parts[depth];
+
+    if let CfmlValue::Struct(ref s) = node {
+        if let Some(CfmlValue::String(ref name)) = s.get("xmlName") {
+            if name == target || target == "*" {
+                if depth == parts.len() - 1 {
+                    results.push(node.clone());
+                } else if let Some(CfmlValue::Array(ref children)) = s.get("xmlChildren") {
+                    for child in children {
+                        xml_search_path(child, parts, depth + 1, results);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "xml")]
+fn fn_is_xml(args: Vec<CfmlValue>) -> CfmlResult {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+
+    let s = get_str(&args, 0);
+    let mut reader = Reader::from_str(&s);
+    let mut found_element = false;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(_)) | Ok(Event::Empty(_)) => { found_element = true; }
+            Ok(Event::Eof) => break,
+            Err(_) => return Ok(CfmlValue::Bool(false)),
+            _ => {}
+        }
+    }
+    Ok(CfmlValue::Bool(found_element))
+}
+
+#[cfg(feature = "xml")]
+fn fn_xml_transform_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("xmlTransform() is not supported (requires XSLT engine)".to_string()))
+}
+
+#[cfg(feature = "xml")]
+fn fn_xml_validate_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("xmlValidate() is not supported (requires schema validation engine)".to_string()))
 }

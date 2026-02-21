@@ -288,16 +288,21 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 ## ⚠️ PARTIALLY IMPLEMENTED / NEEDS WORK
 
 ### Components (.cfc)
-- [x] Component AST, parsing, compilation (struct-based), instantiation (`new Component()`)
-- [x] Init/constructor, `this` scope, .cfc file loading
-- [x] Inheritance, super, metadata, createObject (see Component Inheritance section above)
 - [ ] Interfaces (`implements`)
-- [ ] Property getters/setters (implicit accessors)
 
 ### Closures
-- [x] Closure definition and invocation
-- [x] Parent scope read access
 - [ ] Parent scope write access (closures get copy, can't mutate parent)
+
+### Standard Library (Remaining from Audit)
+- [ ] `isDefined()` — needs VM bytecode to do variable name lookup in scope chain
+- [ ] `evaluate()` / `iif()` — need embedded parser for runtime expression evaluation
+- [ ] `randomize()` — seed the PRNG (currently a stub)
+- [ ] `queryEach()`, `queryMap()`, `queryFilter()`, `queryReduce()` — higher-order query functions
+- [ ] `querySort()`, `querySlice()` — query manipulation
+- [ ] `arraySplice()` — remove and replace elements
+- [ ] `xmlTransform()` — needs XSLT engine
+- [ ] `xmlValidate()` — needs XML schema engine
+- [ ] Session scope
 
 ---
 
@@ -308,7 +313,6 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 - [ ] Custom tag support / tag libraries
 - [ ] Layouts and views
 - [ ] ORM support
-- [ ] Application/session/server scopes
 - [ ] Threading (`cfthread`)
 - [ ] Mail (`cfmail`)
 - [ ] Scheduled tasks
@@ -320,59 +324,17 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 - [ ] Hot reload
 - [ ] JIT compilation (future)
 
-### Standard Library (Missing)
-- [ ] Security: `encrypt()`, `decrypt()`, `generateSecretKey()`, `hmac()`
-- [ ] XML: `xmlParse()`, `xmlSearch()`, `xmlTransform()`, `xmlValidate()`
-- [ ] HTTP: `getHttpRequestData()`, `getHttpTimeString()`
+### Standard Library (Out of Scope for Now)
 - [ ] Image: `imageNew()`, `imageRead()`, `imageWrite()`, etc.
 - [ ] Spreadsheet: `spreadsheetNew()`, `spreadsheetAddRow()`, etc.
-- [ ] System: `getCurrentTemplatePath()`, `getBaseTemplatePath()`, `getTimeZone()`
 
 ---
 
-## 📋 TODO: Taffy Framework Support
+## 📋 Taffy Framework Support
 
-The following features are needed to run the [Taffy REST framework](https://github.com/atuttle/Taffy) on RustCFML. Ordered by implementation priority.
+Phases 1–6 complete. Remaining items:
 
-### Phase 1: Quick Wins
-- [x] `cfabort`/`abort` statement — `Statement::Exit` → `BytecodeOp::Halt` ✅
-- [ ] `getCurrentTemplatePath()` — return path of currently executing file
-- [ ] `getDirectoryFromPath()` — extract directory from file path
-- [ ] `getComponentMetadata("dot.path")` — introspect component without instantiation
-
-### Phase 2: Scopes & Lifecycle
-- [ ] `application` scope — persistent shared state across requests (struct in VM, keyed by app name)
-- [ ] `request` scope — per-request shared state (cleared each request)
-- [ ] `Application.cfc` lifecycle — `onApplicationStart()`, `onRequestStart()`, `onRequest()`, `onError()`
-- [ ] Scope cascading: `variables` → `local` → `arguments` → `application` → `request`
-
-### Phase 3: HTTP Infrastructure
-- [ ] Embedded HTTP server (e.g., `hyper` or `actix-web`) — listen, route, serve
-- [ ] `getHTTPRequestData()` — returns struct with `method`, `headers`, `content`, `protocol`
-- [ ] `cfheader` tag / `header()` function — set HTTP response headers
-- [ ] `cfcontent` tag — set response content type and body
-- [ ] URL/form scope population from HTTP requests
 - [ ] REST-style URL path parsing (`/users/{id}` → `url.id`)
-
-### Phase 4: Dynamic Invocation
-- [ ] `cfinvoke` tag — invoke component method by name with `argumentcollection` and `returnvariable`
-- [ ] `invoke(obj, "methodName", args)` — dynamic method invocation function
-- [ ] `argumentCollection` support — pass struct as named arguments to any function call
-
-### Phase 5: Component Enhancements
-- [ ] `onMissingMethod(missingMethodName, missingMethodArguments)` — fallback handler
-- [ ] Implicit property accessors (getters/setters from `<cfproperty>`)
-- [ ] `cfdirectory` tag — list/create/rename/delete directories (Taffy uses for resource discovery)
-- [ ] `cfsavecontent variable="x">...</cfsavecontent>` — capture output to variable
-
-### Phase 6: Utility Functions
-- [ ] `listFirst()` with multi-char delimiter support (verify existing impl)
-- [ ] `reReplaceNoCase()` improvements for Taffy's URI pattern matching
-- [ ] `serializeJSON()` — ensure proper Query-to-JSON serialization matches Taffy expectations
-- [ ] `structKeyTranslate()` — convert struct keys to specified case
-- [ ] `getMetadata()` — ensure function parameter metadata (hint, type, required) is preserved
-
-### Stretch Goals (Not Required for Basic Taffy)
 - [ ] `cfthread` — async task execution
 - [ ] `cflock` — named/scoped locking for thread safety
 - [ ] `cfcache` — response caching

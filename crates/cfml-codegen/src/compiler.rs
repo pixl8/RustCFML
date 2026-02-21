@@ -816,8 +816,21 @@ impl CfmlCompiler {
             }
         }
 
+        // Emit __properties array listing property names
+        if !component.properties.is_empty() {
+            let prop_count = component.properties.len();
+            for prop in &component.properties {
+                instructions.push(BytecodeOp::String(prop.name.clone()));
+            }
+            instructions.push(BytecodeOp::BuildArray(prop_count));
+            instructions.push(BytecodeOp::LoadLocal(component.name.clone()));
+            instructions.push(BytecodeOp::Swap);
+            instructions.push(BytecodeOp::SetProperty("__properties".to_string()));
+            instructions.push(BytecodeOp::StoreLocal(component.name.clone()));
+        }
+
         // Update global copy after methods and metadata are added
-        if !component.functions.is_empty() || !component.metadata.is_empty() {
+        if !component.functions.is_empty() || !component.metadata.is_empty() || !component.properties.is_empty() {
             instructions.push(BytecodeOp::LoadLocal(component.name.clone()));
             instructions.push(BytecodeOp::StoreGlobal(component.name.clone()));
         }

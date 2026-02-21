@@ -25,6 +25,11 @@
 //! - <cfproperty name="..." ...>
 //! - <cfhttp url="..." method="..." result="...">
 //! - <cfquery name="..." datasource="...">SQL</cfquery>
+//! - <cfheader statuscode="..." statustext="..." name="..." value="...">
+//! - <cfcontent reset="..." type="..." variable="...">
+//! - <cflocation url="..." statuscode="..." addtoken="...">
+//! - <cfdirectory action="..." directory="..." name="..." filter="..." recurse="...">
+//! - <cfinvoke component="..." method="..." returnvariable="...">
 
 /// Check if source contains CFML tags
 pub fn has_cfml_tags(source: &str) -> bool {
@@ -136,6 +141,7 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
             "cftry" => return (String::new(), close_end - start), // try block closed by catch
             "cfcatch" => return ("}\n".to_string(), close_end - start),
             "cfscript" => return (String::new(), close_end - start),
+            "cfsavecontent" => return (String::new(), close_end - start),
             _ => return (String::new(), close_end - start),
         }
     }
@@ -336,6 +342,154 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
                 (format!("{} = queryExecute(\"{}\", [], {});\n", name, sql, opts_str), close_end - start)
             } else {
                 (String::new(), tag_end - start)
+            }
+        }
+        "cfheader" => {
+            // <cfheader statuscode="200" statustext="OK">
+            // → __cfheader({statuscode: 200, statustext: "OK"});
+            let mut parts = Vec::new();
+            for (k, v) in &attrs {
+                let raw = v.trim();
+                if raw.starts_with('#') && raw.ends_with('#') && raw.len() > 2 {
+                    // Dynamic expression: strip hashes, emit bare
+                    parts.push(format!("{}: {}", k, strip_hashes(raw)));
+                } else if raw.parse::<f64>().is_ok() {
+                    parts.push(format!("{}: {}", k, raw));
+                } else {
+                    parts.push(format!("{}: \"{}\"", k, raw.replace('"', "\\\"")));
+                }
+            }
+            (format!("__cfheader({{ {} }});\n", parts.join(", ")), tag_end - start)
+        }
+        "cfcontent" => {
+            // <cfcontent reset="true" type="application/json">
+            // → __cfcontent({reset: true, type: "application/json"});
+            let mut parts = Vec::new();
+            for (k, v) in &attrs {
+                let val = strip_hashes(&v);
+                if k == "reset" {
+                    let lower = val.to_lowercase();
+                    if lower == "true" || lower == "yes" {
+                        parts.push(format!("{}: true", k));
+                    } else {
+                        parts.push(format!("{}: false", k));
+                    }
+                } else if k == "variable" {
+                    parts.push(format!("{}: {}", k, val));
+                } else {
+                    parts.push(format!("{}: \"{}\"", k, val.replace('"', "\\\"")));
+                }
+            }
+            (format!("__cfcontent({{ {} }});\n", parts.join(", ")), tag_end - start)
+        }
+        "cflocation" => {
+            // <cflocation url="/path" statuscode="302" addtoken="false">
+            // → __cflocation({url: "/path", statuscode: 302, addtoken: false});
+            let mut parts = Vec::new();
+            for (k, v) in &attrs {
+                let raw = v.trim();
+                if raw.starts_with('#') && raw.ends_with('#') && raw.len() > 2 {
+                    parts.push(format!("{}: {}", k, strip_hashes(raw)));
+                } else if raw.parse::<f64>().is_ok() {
+                    parts.push(format!("{}: {}", k, raw));
+                } else {
+                    let lower = raw.to_lowercase();
+                    if lower == "true" || lower == "yes" {
+                        parts.push(format!("{}: true", k));
+                    } else if lower == "false" || lower == "no" {
+                        parts.push(format!("{}: false", k));
+                    } else {
+                        parts.push(format!("{}: \"{}\"", k, raw.replace('"', "\\\"")));
+                    }
+                }
+            }
+            (format!("__cflocation({{ {} }});\n", parts.join(", ")), tag_end - start)
+        }
+        "cfdirectory" => {
+            // <cfdirectory action="list" directory="." name="qDir" recurse="true">
+            // → qDir = cfdirectory({action: "list", directory: ".", recurse: true});
+            let name = attrs.get("name").cloned();
+            let mut parts = Vec::new();
+            for (k, v) in &attrs {
+                if k == "name" {
+                    continue;
+                }
+                let raw = v.trim();
+                if raw.starts_with('#') && raw.ends_with('#') && raw.len() > 2 {
+                    parts.push(format!("{}: {}", k, strip_hashes(raw)));
+                } else {
+                    let lower = raw.to_lowercase();
+                    if lower == "true" || lower == "yes" {
+                        parts.push(format!("{}: true", k));
+                    } else if lower == "false" || lower == "no" {
+                        parts.push(format!("{}: false", k));
+                    } else if raw.parse::<f64>().is_ok() {
+                        parts.push(format!("{}: {}", k, raw));
+                    } else {
+                        parts.push(format!("{}: \"{}\"", k, raw.replace('"', "\\\"")));
+                    }
+                }
+            }
+            let call = format!("cfdirectory({{ {} }})", parts.join(", "));
+            if let Some(n) = name {
+                (format!("{} = {};\n", n, call), tag_end - start)
+            } else {
+                (format!("{};\n", call), tag_end - start)
+            }
+        }
+        "cfsavecontent" => {
+            let variable = attrs.get("variable").cloned().unwrap_or("__savecontent_result".to_string());
+            // Find closing tag — body between is processed by main loop
+            if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cfsavecontent") {
+                let body: String = chars[tag_end..end_tag_pos].iter().collect();
+                let close_end = find_tag_end(chars, end_tag_pos, len);
+                // Process body through main loop (handles hash expressions, nested tags, text)
+                let body_script = tags_to_script(&body);
+                (format!("__cfsavecontent_start();\n{}{} = __cfsavecontent_end();\n", body_script, variable), close_end - start)
+            } else {
+                (format!("__cfsavecontent_start();\n"), tag_end - start)
+            }
+        }
+        "cfinvoke" => {
+            // <cfinvoke component="MyComp" method="greet" name="World" returnvariable="msg">
+            // → msg = __cfinvoke(MyComp, "greet", {name: "World"});
+            let component = attrs.get("component").cloned().unwrap_or_default();
+            let method = attrs.get("method").cloned().unwrap_or_default();
+            let return_var = attrs.get("returnvariable").cloned();
+            let arg_collection = attrs.get("argumentcollection").cloned();
+
+            // Component: strip hashes for dynamic (#var#), quote for static name
+            let comp_expr = if component.starts_with('#') && component.ends_with('#') && component.len() > 2 {
+                strip_hashes(&component)
+            } else {
+                format!("\"{}\"", component)
+            };
+
+            // Method: always quoted
+            let method_expr = format!("\"{}\"", method);
+
+            // Third argument: argumentcollection or struct of remaining attrs
+            let third_arg = if let Some(ac) = arg_collection {
+                let ac = strip_hashes(&ac);
+                ac
+            } else {
+                let reserved = ["component", "method", "returnvariable", "argumentcollection"];
+                let mut extra_parts = Vec::new();
+                for (k, v) in &attrs {
+                    if reserved.contains(&k.as_str()) {
+                        continue;
+                    }
+                    let val = strip_hashes(&v);
+                    extra_parts.push(format!("{}: {}", k, quote_if_needed(&val)));
+                }
+                format!("{{ {} }}", extra_parts.join(", "))
+            };
+
+            let call = format!("__cfinvoke({}, {}, {})", comp_expr, method_expr, third_arg);
+            if let Some(rv) = return_var {
+                (format!("{} = {};\n", rv, call), tag_end - start)
+            } else {
+                (format!("{};\n", call), tag_end - start)
             }
         }
         _ => {
