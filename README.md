@@ -4,7 +4,9 @@
 
 A CFML (ColdFusion&reg; Markup Language) Interpreter written in Rust.
 
-![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)  
+ColdFusion is a registered trademark of Adobe Inc. This project is not affiliated with or endorsed by Adobe.
+
+![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)
 
 ## Usage
@@ -471,7 +473,3 @@ project:
 ## License
 
 This project is licensed under the MIT license.
-
----
-
-ColdFusion is a registered trademark of Adobe Inc. This project is not affiliated with or endorsed by Adobe.
