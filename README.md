@@ -2,7 +2,7 @@
 
 ![RustCFML Mascot](crab.svg)
 
-A CFML (ColdFusion Markup Language) Interpreter written in Rust.
+A CFML (ColdFusion&reg; Markup Language) Interpreter written in Rust.
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)  
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)
@@ -295,7 +295,6 @@ cargo run -- examples/08_builtins.cfm         # Built-in functions
 
 ### Planned / In Progress
 
-*   **Online WASM demo** — interactive browser-based playground (WASM crate exists, needs web frontend)
 *   **Component inheritance** — `extends`, `implements`
 *   **Proper call stack** — stack frames, stack traces on error
 *   **Closure mutation** — closures currently read but cannot write to parent scope
@@ -472,3 +471,7 @@ project:
 ## License
 
 This project is licensed under the MIT license.
+
+---
+
+ColdFusion is a registered trademark of Adobe Inc. This project is not affiliated with or endorsed by Adobe.
