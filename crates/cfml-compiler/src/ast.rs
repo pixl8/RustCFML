@@ -34,6 +34,7 @@ pub struct Component {
     pub functions: Vec<Function>,
     pub body: Vec<Statement>,
     pub location: SourceLocation,
+    pub metadata: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +56,7 @@ pub struct Function {
     pub is_abstract: bool,
     pub body: Vec<Statement>,
     pub location: SourceLocation,
+    pub metadata: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]

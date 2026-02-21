@@ -269,7 +269,13 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
             let extends = attrs.get("extends").cloned();
             let mut decl = format!("component {} ", name);
             if let Some(ext) = extends {
-                decl.push_str(&format!("extends=\"{}\" ", ext));
+                decl.push_str(&format!("extends {} ", ext));
+            }
+            // Pass through extra attributes as metadata key="value" pairs
+            for (k, v) in &attrs {
+                if k != "name" && k != "extends" {
+                    decl.push_str(&format!("{}=\"{}\" ", k, v));
+                }
             }
             decl.push_str("{\n");
             (decl, tag_end - start)

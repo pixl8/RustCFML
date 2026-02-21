@@ -217,6 +217,31 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 - [x] `sleep()`, `getTickCount()`
 - [x] `duplicate()`, `hash()`
 
+### HTTP Client
+- [x] `cfhttp` tag and function — GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS
+- [x] Request headers, body, timeout
+- [x] Response struct (statusCode, fileContent, headers)
+- [x] Via `ureq` v2 (sync)
+
+### Database Connectivity
+- [x] `queryExecute()` — SQLite (rusqlite), MySQL (mysql crate), PostgreSQL (postgres crate)
+- [x] Positional (`?`) and named (`:param`) parameters for all drivers
+- [x] SQLite: in-memory (`:memory:`) and file-based
+- [x] MySQL: `mysql://user:pass@host:port/db` datasource URL
+- [x] PostgreSQL: `postgres://user:pass@host:port/db` datasource URL (auto-rewrites `:name` → `$N`)
+- [x] Feature flags: `sqlite`, `mysql_db`, `postgres_db`, `all-databases`
+- [x] SELECT → CfmlQuery, INSERT/UPDATE/DELETE → struct with recordCount/generatedKey
+- [x] `<cfquery>` tag support with datasource attribute
+
+### Component Inheritance
+- [x] `extends` keyword with dot-path resolution (e.g., `extends taffy.core.resource`)
+- [x] Recursive parent→child merge with circular inheritance detection
+- [x] `super.method()` — calls parent method with child `this` binding
+- [x] `isInstanceOf(obj, typeName)` — walks `__extends_chain`, case-insensitive
+- [x] `getMetadata(component)` — name, extends, functions, properties, custom metadata
+- [x] `createObject("component", "name")` — VM-intercepted dynamic instantiation
+- [x] Component/function metadata attributes (`taffy_uri="/path"`, `taffy:mime="text/json"`)
+
 ### String Interpolation
 - [x] `#variable#` interpolation in double-quoted strings
 - [x] `#expression#` interpolation (e.g., `"2 + 2 = #2 + 2#"`)
@@ -263,17 +288,11 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 ## ⚠️ PARTIALLY IMPLEMENTED / NEEDS WORK
 
 ### Components (.cfc)
-- [x] Component AST definition
-- [x] Property AST
-- [x] Component parsing
-- [x] Component compilation (struct-based)
-- [x] Component instantiation (`new Component()`)
-- [x] Init/constructor pattern with args
-- [x] `this` scope within components
-- [x] .cfc file loading (`new Greeter()` loads `Greeter.cfc`)
-- [ ] Inheritance (`extends`)
+- [x] Component AST, parsing, compilation (struct-based), instantiation (`new Component()`)
+- [x] Init/constructor, `this` scope, .cfc file loading
+- [x] Inheritance, super, metadata, createObject (see Component Inheritance section above)
 - [ ] Interfaces (`implements`)
-- [ ] Property getters/setters
+- [ ] Property getters/setters (implicit accessors)
 
 ### Closures
 - [x] Closure definition and invocation
@@ -284,26 +303,15 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 
 ## ❌ NOT IMPLEMENTED
 
-### Advanced Features
+### Language Features
 - [ ] Spread operator
-- [ ] Custom tag support
+- [ ] Custom tag support / tag libraries
 - [ ] Layouts and views
 - [ ] ORM support
-- [ ] Web service support (WSDL, REST)
-- [x] Database connectivity (`queryExecute`) — SQLite (rusqlite), MySQL (mysql crate), PostgreSQL (postgres crate)
-  - Positional (`?`) and named (`:param`) parameters for all drivers
-  - SQLite: in-memory (`:memory:`) and file-based
-  - MySQL: `mysql://user:pass@host:port/db` datasource URL
-  - PostgreSQL: `postgres://user:pass@host:port/db` datasource URL (auto-rewrites `:name` → `$N`)
-  - Feature flags: `sqlite`, `mysql_db`, `postgres_db`, `all-databases`
-  - SELECT → CfmlQuery, INSERT/UPDATE/DELETE → struct with recordCount/generatedKey
-  - `<cfquery>` tag support with datasource attribute
-- [ ] Session/application/server scopes
+- [ ] Application/session/server scopes
 - [ ] Threading (`cfthread`)
-- [x] HTTP client (`cfhttp`) — GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS, headers, body, timeout, response struct
 - [ ] Mail (`cfmail`)
 - [ ] Scheduled tasks
-- [ ] Custom tags / tag libraries
 
 ### Runtime
 - [ ] Proper call stack frames (currently flat)
@@ -313,12 +321,63 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 - [ ] JIT compilation (future)
 
 ### Standard Library (Missing)
-- [ ] Security: `encrypt()`, `decrypt()`, `generateSecretKey()`, `hmac()` (beyond basic `hash()`)
+- [ ] Security: `encrypt()`, `decrypt()`, `generateSecretKey()`, `hmac()`
 - [ ] XML: `xmlParse()`, `xmlSearch()`, `xmlTransform()`, `xmlValidate()`
-- [ ] HTTP: `httpService`, `getHttpRequestData()`, `getHttpTimeString()`
+- [ ] HTTP: `getHttpRequestData()`, `getHttpTimeString()`
 - [ ] Image: `imageNew()`, `imageRead()`, `imageWrite()`, etc.
 - [ ] Spreadsheet: `spreadsheetNew()`, `spreadsheetAddRow()`, etc.
 - [ ] System: `getCurrentTemplatePath()`, `getBaseTemplatePath()`, `getTimeZone()`
+
+---
+
+## 📋 TODO: Taffy Framework Support
+
+The following features are needed to run the [Taffy REST framework](https://github.com/atuttle/Taffy) on RustCFML. Ordered by implementation priority.
+
+### Phase 1: Quick Wins
+- [x] `cfabort`/`abort` statement — `Statement::Exit` → `BytecodeOp::Halt` ✅
+- [ ] `getCurrentTemplatePath()` — return path of currently executing file
+- [ ] `getDirectoryFromPath()` — extract directory from file path
+- [ ] `getComponentMetadata("dot.path")` — introspect component without instantiation
+
+### Phase 2: Scopes & Lifecycle
+- [ ] `application` scope — persistent shared state across requests (struct in VM, keyed by app name)
+- [ ] `request` scope — per-request shared state (cleared each request)
+- [ ] `Application.cfc` lifecycle — `onApplicationStart()`, `onRequestStart()`, `onRequest()`, `onError()`
+- [ ] Scope cascading: `variables` → `local` → `arguments` → `application` → `request`
+
+### Phase 3: HTTP Infrastructure
+- [ ] Embedded HTTP server (e.g., `hyper` or `actix-web`) — listen, route, serve
+- [ ] `getHTTPRequestData()` — returns struct with `method`, `headers`, `content`, `protocol`
+- [ ] `cfheader` tag / `header()` function — set HTTP response headers
+- [ ] `cfcontent` tag — set response content type and body
+- [ ] URL/form scope population from HTTP requests
+- [ ] REST-style URL path parsing (`/users/{id}` → `url.id`)
+
+### Phase 4: Dynamic Invocation
+- [ ] `cfinvoke` tag — invoke component method by name with `argumentcollection` and `returnvariable`
+- [ ] `invoke(obj, "methodName", args)` — dynamic method invocation function
+- [ ] `argumentCollection` support — pass struct as named arguments to any function call
+
+### Phase 5: Component Enhancements
+- [ ] `onMissingMethod(missingMethodName, missingMethodArguments)` — fallback handler
+- [ ] Implicit property accessors (getters/setters from `<cfproperty>`)
+- [ ] `cfdirectory` tag — list/create/rename/delete directories (Taffy uses for resource discovery)
+- [ ] `cfsavecontent variable="x">...</cfsavecontent>` — capture output to variable
+
+### Phase 6: Utility Functions
+- [ ] `listFirst()` with multi-char delimiter support (verify existing impl)
+- [ ] `reReplaceNoCase()` improvements for Taffy's URI pattern matching
+- [ ] `serializeJSON()` — ensure proper Query-to-JSON serialization matches Taffy expectations
+- [ ] `structKeyTranslate()` — convert struct keys to specified case
+- [ ] `getMetadata()` — ensure function parameter metadata (hint, type, required) is preserved
+
+### Stretch Goals (Not Required for Basic Taffy)
+- [ ] `cfthread` — async task execution
+- [ ] `cflock` — named/scoped locking for thread safety
+- [ ] `cfcache` — response caching
+- [ ] Rate limiting middleware support
+- [ ] CORS header management
 
 ---
 
@@ -359,4 +418,4 @@ RustCFML/
 
 ---
 
-*Last Updated: 2026-02-21*
+*Last Updated: 2026-02-22*

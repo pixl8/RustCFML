@@ -138,6 +138,21 @@ impl CfmlCompiler {
         }
     }
 
+    /// Flatten a member-access chain like a.b.c into "a.b.c" for dotted new expressions.
+    fn flatten_member_access(expr: &Expression) -> Option<String> {
+        match expr {
+            Expression::Identifier(ident) => Some(ident.name.clone()),
+            Expression::MemberAccess(access) => {
+                if let Some(base) = Self::flatten_member_access(&access.object) {
+                    Some(format!("{}.{}", base, access.member))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Determine write-back target for a method call from the AST.
     /// Returns Some((var_name, Some(prop_name))) for obj.prop.method()
     /// or Some((var_name, None)) for var.method()
@@ -155,11 +170,14 @@ impl CfmlCompiler {
                     _ => None,
                 }
             }
-            // var.method() or this.method()
+            // var.method() or this.method() or super.method()
             Expression::Identifier(ident) => {
                 Some((ident.name.clone(), None))
             }
             Expression::This(_) => {
+                Some(("this".to_string(), None))
+            }
+            Expression::Super(_) => {
                 Some(("this".to_string(), None))
             }
             _ => None,
@@ -745,6 +763,24 @@ impl CfmlCompiler {
         instructions.push(BytecodeOp::String(component.name.clone()));
         prop_count += 1;
 
+        // Add __extends if component extends another
+        if let Some(ref ext) = component.extends {
+            instructions.push(BytecodeOp::String("__extends".to_string()));
+            instructions.push(BytecodeOp::String(ext.clone()));
+            prop_count += 1;
+        }
+
+        // Add __metadata sub-struct if component has metadata attributes
+        if !component.metadata.is_empty() {
+            instructions.push(BytecodeOp::String("__metadata".to_string()));
+            for (k, v) in &component.metadata {
+                instructions.push(BytecodeOp::String(k.clone()));
+                instructions.push(BytecodeOp::String(v.clone()));
+            }
+            instructions.push(BytecodeOp::BuildStruct(component.metadata.len()));
+            prop_count += 1;
+        }
+
         // Build the base struct
         instructions.push(BytecodeOp::BuildStruct(prop_count));
 
@@ -764,8 +800,24 @@ impl CfmlCompiler {
             instructions.push(BytecodeOp::StoreLocal(component.name.clone()));
         }
 
-        // Update global copy after methods are added
-        if !component.functions.is_empty() {
+        // Emit per-function metadata as __funcmeta_<name> keys
+        for func in &component.functions {
+            if !func.metadata.is_empty() {
+                let meta_key = format!("__funcmeta_{}", func.name);
+                for (k, v) in &func.metadata {
+                    instructions.push(BytecodeOp::String(k.clone()));
+                    instructions.push(BytecodeOp::String(v.clone()));
+                }
+                instructions.push(BytecodeOp::BuildStruct(func.metadata.len()));
+                instructions.push(BytecodeOp::LoadLocal(component.name.clone()));
+                instructions.push(BytecodeOp::Swap);
+                instructions.push(BytecodeOp::SetProperty(meta_key));
+                instructions.push(BytecodeOp::StoreLocal(component.name.clone()));
+            }
+        }
+
+        // Update global copy after methods and metadata are added
+        if !component.functions.is_empty() || !component.metadata.is_empty() {
             instructions.push(BytecodeOp::LoadLocal(component.name.clone()));
             instructions.push(BytecodeOp::StoreGlobal(component.name.clone()));
         }
@@ -988,8 +1040,10 @@ impl CfmlCompiler {
                 // Extract the class name and push it for VM resolution
                 match &*new_expr.class {
                     Expression::FunctionCall(call) => {
-                        // Push class name as string for VM to resolve
-                        if let Expression::Identifier(ident) = &*call.name {
+                        // Try flattening dot-path: new a.b.c(args) parses as FunctionCall(MemberAccess(a,b).c, args)
+                        if let Some(path) = Self::flatten_member_access(&call.name) {
+                            instructions.push(BytecodeOp::String(path));
+                        } else if let Expression::Identifier(ident) = &*call.name {
                             instructions.push(BytecodeOp::String(ident.name.clone()));
                         } else {
                             self.compile_expression(&call.name, instructions);
@@ -1002,6 +1056,18 @@ impl CfmlCompiler {
                     Expression::Identifier(ident) => {
                         // Push class name as string - VM will look up in locals, globals, or .cfc files
                         instructions.push(BytecodeOp::String(ident.name.clone()));
+                        for arg in &new_expr.arguments {
+                            self.compile_expression(arg, instructions);
+                        }
+                        instructions.push(BytecodeOp::NewObject(new_expr.arguments.len()));
+                    }
+                    Expression::MemberAccess(_) => {
+                        // Handle bare dotted path: new a.b.c without parens
+                        if let Some(path) = Self::flatten_member_access(&new_expr.class) {
+                            instructions.push(BytecodeOp::String(path));
+                        } else {
+                            self.compile_expression(&new_expr.class, instructions);
+                        }
                         for arg in &new_expr.arguments {
                             self.compile_expression(arg, instructions);
                         }
@@ -1056,7 +1122,8 @@ impl CfmlCompiler {
                 instructions.push(BytecodeOp::LoadLocal("this".to_string()));
             }
             Expression::Super(_) => {
-                instructions.push(BytecodeOp::LoadLocal("super".to_string()));
+                instructions.push(BytecodeOp::LoadLocal("this".to_string()));
+                instructions.push(BytecodeOp::GetProperty("__super".to_string()));
             }
             Expression::StringInterpolation(interp) => {
                 if interp.parts.is_empty() {

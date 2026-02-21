@@ -304,6 +304,8 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("duplicate".into(), fn_duplicate);
     f.insert("sleep".into(), fn_sleep);
     f.insert("getMetadata".into(), fn_get_metadata);
+    f.insert("isInstanceOf".into(), fn_is_instance_of);
+    f.insert("createObject".into(), fn_create_object);
     f.insert("createUUID".into(), fn_create_uuid);
     f.insert("createGUID".into(), fn_create_guid);
     f.insert("hash".into(), fn_hash);
@@ -3515,9 +3517,132 @@ fn fn_sleep(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
     let mut meta = HashMap::new();
     if let Some(val) = args.first() {
-        meta.insert("type".to_string(), CfmlValue::String(val.type_name().to_string()));
+        match val {
+            CfmlValue::Struct(s) => {
+                // Extract __name
+                if let Some(name) = s.get("__name") {
+                    meta.insert("name".to_string(), name.clone());
+                }
+                // Type
+                meta.insert("type".to_string(), CfmlValue::String("component".to_string()));
+
+                // Extract __extends info
+                if let Some(CfmlValue::Array(chain)) = s.get("__extends_chain") {
+                    if let Some(first) = chain.first() {
+                        let mut extends_meta = HashMap::new();
+                        extends_meta.insert("name".to_string(), first.clone());
+                        meta.insert("extends".to_string(), CfmlValue::Struct(extends_meta));
+                    }
+                    meta.insert("fullExtends".to_string(), CfmlValue::Array(chain.clone()));
+                }
+
+                // Extract __metadata (custom attributes)
+                if let Some(CfmlValue::Struct(md)) = s.get("__metadata") {
+                    meta.insert("metadata".to_string(), CfmlValue::Struct(md.clone()));
+                }
+
+                // Enumerate functions
+                let mut functions = Vec::new();
+                for (k, v) in s {
+                    if k.starts_with("__") { continue; }
+                    if let CfmlValue::Function(f) = v {
+                        let mut func_meta = HashMap::new();
+                        func_meta.insert("name".to_string(), CfmlValue::String(k.clone()));
+                        func_meta.insert("access".to_string(), CfmlValue::String(
+                            match f.access {
+                                CfmlAccess::Public => "public",
+                                CfmlAccess::Private => "private",
+                                CfmlAccess::Package => "package",
+                                CfmlAccess::Remote => "remote",
+                            }.to_string()
+                        ));
+                        if let Some(ref rt) = f.return_type {
+                            func_meta.insert("returnType".to_string(), CfmlValue::String(rt.clone()));
+                        }
+                        // Check for function metadata (__funcmeta_<name>)
+                        let meta_key = format!("__funcmeta_{}", k);
+                        if let Some(CfmlValue::Struct(fm)) = s.get(&meta_key) {
+                            func_meta.insert("metadata".to_string(), CfmlValue::Struct(fm.clone()));
+                        }
+                        functions.push(CfmlValue::Struct(func_meta));
+                    }
+                }
+                meta.insert("functions".to_string(), CfmlValue::Array(functions));
+
+                // Enumerate properties (non-function, non-internal keys)
+                let mut properties = Vec::new();
+                for (k, v) in s {
+                    if k.starts_with("__") { continue; }
+                    if matches!(v, CfmlValue::Function(_)) { continue; }
+                    let mut prop_meta = HashMap::new();
+                    prop_meta.insert("name".to_string(), CfmlValue::String(k.clone()));
+                    prop_meta.insert("type".to_string(), CfmlValue::String(v.type_name().to_string()));
+                    properties.push(CfmlValue::Struct(prop_meta));
+                }
+                meta.insert("properties".to_string(), CfmlValue::Array(properties));
+            }
+            _ => {
+                meta.insert("type".to_string(), CfmlValue::String(val.type_name().to_string()));
+            }
+        }
     }
     Ok(CfmlValue::Struct(meta))
+}
+
+fn fn_is_instance_of(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() < 2 {
+        return Ok(CfmlValue::Bool(false));
+    }
+    let obj = &args[0];
+    let type_name = args[1].as_string();
+    let type_lower = type_name.to_lowercase();
+
+    if let CfmlValue::Struct(s) = obj {
+        // Check direct name match
+        if let Some(CfmlValue::String(name)) = s.get("__name") {
+            if name.to_lowercase() == type_lower {
+                return Ok(CfmlValue::Bool(true));
+            }
+            // Also check last segment (e.g., "resource" matches "taffy.core.resource")
+            if let Some(last) = name.split('.').last() {
+                if last.to_lowercase() == type_lower {
+                    return Ok(CfmlValue::Bool(true));
+                }
+            }
+        }
+
+        // Walk extends chain
+        if let Some(CfmlValue::Array(chain)) = s.get("__extends_chain") {
+            for item in chain {
+                let item_str = item.as_string();
+                if item_str.to_lowercase() == type_lower {
+                    return Ok(CfmlValue::Bool(true));
+                }
+                // Check last segment
+                if let Some(last) = item_str.split('.').last() {
+                    if last.to_lowercase() == type_lower {
+                        return Ok(CfmlValue::Bool(true));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(CfmlValue::Bool(false))
+}
+
+fn fn_create_object(args: Vec<CfmlValue>) -> CfmlResult {
+    // Stub - VM intercepts this call before it reaches here
+    // If we get here, just return a struct with a marker
+    if args.len() >= 2 {
+        let obj_type = args[0].as_string().to_lowercase();
+        if obj_type == "component" {
+            let mut s = HashMap::new();
+            s.insert("__createObject".to_string(), CfmlValue::String(args[1].as_string()));
+            return Ok(CfmlValue::Struct(s));
+        }
+    }
+    Ok(CfmlValue::Null)
 }
 
 fn fn_create_uuid(_args: Vec<CfmlValue>) -> CfmlResult {

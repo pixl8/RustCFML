@@ -723,6 +723,23 @@ impl Parser {
         let params = self.parse_param_list()?;
         self.consume(&Token::RParen)?;
 
+        // Parse function metadata attributes (e.g., httpmethod="GET" restpath="/users")
+        let mut metadata = Vec::new();
+        while let Token::Identifier(_) = self.peek(0) {
+            if matches!(self.peek(1), Token::Equal) {
+                let key = self.extract_identifier()?;
+                self.consume(&Token::Equal)?;
+                if let Token::String(val) = self.peek(0).clone() {
+                    self.advance();
+                    metadata.push((key, val));
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
         let body = if self.check(&Token::LBrace) {
             self.parse_block()?
         } else {
@@ -738,6 +755,7 @@ impl Parser {
             is_abstract: false,
             body,
             location: SourceLocation::default(),
+            metadata,
         })
     }
 
@@ -750,7 +768,7 @@ impl Parser {
         let mut implements = Vec::new();
 
         if self.match_token(&Token::Extends) {
-            extends = self.extract_identifier().ok();
+            extends = self.extract_dotted_identifier().ok();
         }
 
         if self.match_token(&Token::Implements) {
@@ -761,6 +779,23 @@ impl Parser {
                 if !self.match_token(&Token::Comma) {
                     break;
                 }
+            }
+        }
+
+        // Parse component metadata attributes (e.g., taffy_uri="/users/{id}")
+        let mut metadata = Vec::new();
+        while let Token::Identifier(_) = self.peek(0) {
+            if matches!(self.peek(1), Token::Equal) {
+                let key = self.extract_identifier()?;
+                self.consume(&Token::Equal)?;
+                if let Token::String(val) = self.peek(0).clone() {
+                    self.advance();
+                    metadata.push((key, val));
+                } else {
+                    break;
+                }
+            } else {
+                break;
             }
         }
 
@@ -810,6 +845,7 @@ impl Parser {
             functions,
             body,
             location: SourceLocation::default(),
+            metadata,
         })
     }
 
@@ -923,6 +959,16 @@ impl Parser {
             }
             _ => Err(self.parse_error("Expected identifier")),
         }
+    }
+
+    fn extract_dotted_identifier(&mut self) -> Result<String, ParseError> {
+        let mut path = self.extract_identifier()?;
+        while self.match_token(&Token::Dot) {
+            let next = self.extract_identifier()?;
+            path.push('.');
+            path.push_str(&next);
+        }
+        Ok(path)
     }
 
     fn consume(&mut self, token: &Token) -> Result<(), ParseError> {
