@@ -43,6 +43,34 @@ impl CfmlError {
     }
 }
 
+impl std::fmt::Display for CfmlErrorType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CfmlErrorType::Runtime => write!(f, "Runtime"),
+            CfmlErrorType::Compile => write!(f, "Compile"),
+            CfmlErrorType::Expression => write!(f, "Expression"),
+            CfmlErrorType::Template => write!(f, "Template"),
+            CfmlErrorType::Application => write!(f, "Application"),
+            CfmlErrorType::Custom(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+impl std::fmt::Display for CfmlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} Error: {}", self.error_type, self.message)?;
+        if !self.stack_trace.is_empty() {
+            write!(f, "\n\nStack trace (most recent call first):")?;
+            for (i, frame) in self.stack_trace.iter().enumerate() {
+                let template = if frame.template.is_empty() { "<inline>" } else { &frame.template };
+                let func = if frame.function == "__main__" { "(main)" } else { &frame.function };
+                write!(f, "\n  {}: {} ({}:{})", i + 1, func, template, frame.line)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 pub struct CfmlContext {
     pub scopes: Vec<HashMap<String, CfmlValue>>,
     pub this: Option<CfmlValue>,

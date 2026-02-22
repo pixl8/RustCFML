@@ -16,6 +16,13 @@ pub struct ApplicationState {
     pub config: HashMap<String, CfmlValue>,
 }
 
+/// A CFML component mapping: virtual prefix → physical directory.
+#[derive(Debug, Clone)]
+pub struct CfmlMapping {
+    pub name: String, // Normalized: leading+trailing "/" e.g. "/taffy/"
+    pub path: String, // Absolute filesystem directory
+}
+
 /// Server-level state, persists across requests in --serve mode.
 #[derive(Clone)]
 pub struct ServerState {
@@ -40,13 +47,16 @@ pub struct CfmlVirtualMachine {
     /// Source file path (for include resolution)
     pub source_file: Option<String>,
     /// Call stack for tracking execution
-    #[allow(dead_code)]
     call_stack: Vec<CallFrame>,
     /// Try-catch handler stack
     try_stack: Vec<TryHandler>,
     /// Current exception (if any)
     #[allow(dead_code)]
     current_exception: Option<CfmlValue>,
+    /// Current source line being executed (updated by LineInfo op)
+    current_line: usize,
+    /// Current source column
+    current_column: usize,
     /// After a component method executes, holds the modified `this` for write-back
     /// to the caller's object variable. Set by execute_function_with_args.
     method_this_writeback: Option<CfmlValue>,
@@ -75,16 +85,18 @@ pub struct CfmlVirtualMachine {
     pub saved_output_buffers: Vec<String>,
     /// Base template path (original .cfm being served)
     pub base_template_path: Option<String>,
+    /// Component mappings: virtual prefix → physical directory (sorted longest-first)
+    pub mappings: Vec<CfmlMapping>,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct CallFrame {
     function_name: String,
-    return_ip: usize,
-    return_func_idx: usize,
-    locals: HashMap<String, CfmlValue>,
-    stack_base: usize,
+    template: String,
+    /// Current line within this function (updated by LineInfo)
+    line: usize,
+    /// Line in the caller where this function was invoked
+    caller_line: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +117,8 @@ impl CfmlVirtualMachine {
             call_stack: Vec::new(),
             try_stack: Vec::new(),
             current_exception: None,
+            current_line: 0,
+            current_column: 0,
             method_this_writeback: None,
             closure_parent_writeback: None,
             request_scope: HashMap::new(),
@@ -118,7 +132,52 @@ impl CfmlVirtualMachine {
             http_request_data: None,
             saved_output_buffers: Vec::new(),
             base_template_path: None,
+            mappings: Vec::new(),
         }
+    }
+
+    fn build_stack_trace(&self) -> Vec<cfml_common::vm::StackFrame> {
+        use cfml_common::vm::StackFrame;
+        let mut frames = Vec::new();
+        let template = self.source_file.clone().unwrap_or_default();
+
+        if self.call_stack.is_empty() {
+            // Error in __main__ — single frame
+            frames.push(StackFrame {
+                function: "__main__".to_string(),
+                template,
+                line: self.current_line,
+            });
+        } else {
+            // Innermost frame: the function currently executing, at the current line
+            frames.push(StackFrame {
+                function: self.call_stack.last().unwrap().function_name.clone(),
+                template: template.clone(),
+                line: self.current_line,
+            });
+            // Intermediate frames in reverse (skip the last/current)
+            for frame in self.call_stack.iter().rev().skip(1) {
+                frames.push(StackFrame {
+                    function: frame.function_name.clone(),
+                    template: frame.template.clone(),
+                    line: frame.line,
+                });
+            }
+            // Root frame: __main__ at the line where the outermost function was called
+            frames.push(StackFrame {
+                function: "__main__".to_string(),
+                template,
+                line: self.call_stack.first().unwrap().caller_line,
+            });
+        }
+        frames
+    }
+
+    fn wrap_error(&self, mut err: CfmlError) -> CfmlError {
+        if err.stack_trace.is_empty() {
+            err.stack_trace = self.build_stack_trace();
+        }
+        err
     }
 
     pub fn execute(&mut self) -> CfmlResult {
@@ -130,6 +189,7 @@ impl CfmlVirtualMachine {
             .ok_or_else(|| CfmlError::runtime("No main function found".to_string()))?;
 
         self.execute_function_by_index(main_idx, Vec::new())
+            .map_err(|e| self.wrap_error(e))
     }
 
     fn execute_function_by_index(
@@ -172,6 +232,18 @@ impl CfmlVirtualMachine {
             arguments_map.insert((i + 1).to_string(), args[i].clone());
         }
         locals.insert("arguments".to_string(), CfmlValue::Struct(arguments_map));
+
+        // Push call frame for stack trace tracking (skip __main__ — it's the root)
+        if func.name != "__main__" {
+            self.call_stack.push(CallFrame {
+                function_name: func.name.clone(),
+                template: func.source_file.clone()
+                    .or_else(|| self.source_file.clone())
+                    .unwrap_or_default(),
+                line: 0,
+                caller_line: self.current_line,
+            });
+        }
 
         loop {
             if ip >= func.instructions.len() {
@@ -987,6 +1059,14 @@ impl CfmlVirtualMachine {
                         path.clone()
                     };
 
+                    // If relative resolution fails and path starts with "/", try mappings
+                    let resolved = if !std::path::Path::new(&resolved).exists() && path.starts_with('/') {
+                        // Convert /taffy/core/foo.cfm → try mapping lookup
+                        self.resolve_include_with_mappings(&path).unwrap_or(resolved)
+                    } else {
+                        resolved
+                    };
+
                     // Read, parse, compile, and execute the included file
                     match std::fs::read_to_string(&resolved) {
                         Ok(source_code) => {
@@ -1075,9 +1155,22 @@ impl CfmlVirtualMachine {
                     stack.push(result);
                 }
 
+                BytecodeOp::LineInfo(line, col) => {
+                    self.current_line = line;
+                    self.current_column = col;
+                    // Update the current call frame's line so the stack trace
+                    // reflects where execution is within this function
+                    if let Some(frame) = self.call_stack.last_mut() {
+                        frame.line = line;
+                    }
+                }
+
                 BytecodeOp::Halt => break,
             }
         }
+
+        // Pop call frame on function exit
+        self.call_stack.pop();
 
         // Save modified 'this' for component method write-back
         if let Some(this_val) = locals.get("this") {
@@ -2678,6 +2771,66 @@ impl CfmlVirtualMachine {
         }
     }
 
+    /// Resolve a dot-path class name to a .cfc file path using component mappings.
+    /// Mappings are sorted longest-prefix-first for correct precedence.
+    fn resolve_path_with_mappings(&self, class_name: &str) -> Option<String> {
+        if self.mappings.is_empty() {
+            return None;
+        }
+        // Convert dot-path to slash-path: "taffy.core.api" → "/taffy/core/api"
+        let slash_path = format!("/{}", class_name.replace('.', "/"));
+        let slash_lower = slash_path.to_lowercase();
+
+        for mapping in &self.mappings {
+            let prefix_lower = mapping.name.to_lowercase();
+            if slash_lower.starts_with(&prefix_lower) || (mapping.name == "/" && slash_lower.starts_with('/')) {
+                let remainder = if mapping.name == "/" {
+                    &slash_path[1..] // Strip leading /
+                } else {
+                    &slash_path[mapping.name.len()..]
+                };
+                let remainder = remainder.trim_start_matches('/');
+                let cfc_path = format!(
+                    "{}/{}.cfc",
+                    mapping.path.trim_end_matches('/'),
+                    remainder.replace('/', std::path::MAIN_SEPARATOR_STR)
+                );
+                if std::path::Path::new(&cfc_path).exists() {
+                    return Some(cfc_path);
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolve an include path (e.g. "/taffy/core/foo.cfm") using component mappings.
+    fn resolve_include_with_mappings(&self, include_path: &str) -> Option<String> {
+        if self.mappings.is_empty() {
+            return None;
+        }
+        let path_lower = include_path.to_lowercase();
+        for mapping in &self.mappings {
+            let prefix_lower = mapping.name.to_lowercase();
+            if path_lower.starts_with(&prefix_lower) || (mapping.name == "/" && path_lower.starts_with('/')) {
+                let remainder = if mapping.name == "/" {
+                    &include_path[1..]
+                } else {
+                    &include_path[mapping.name.len()..]
+                };
+                let remainder = remainder.trim_start_matches('/');
+                let resolved = format!(
+                    "{}/{}",
+                    mapping.path.trim_end_matches('/'),
+                    remainder
+                );
+                if std::path::Path::new(&resolved).exists() {
+                    return Some(resolved);
+                }
+            }
+        }
+        None
+    }
+
     /// Resolve a component template by name: tries locals, globals (exact + CI),
     /// then loads from a .cfc file on disk.
     fn resolve_component_template(
@@ -2707,14 +2860,24 @@ impl CfmlVirtualMachine {
                 return Some(val);
             }
         }
-        // 4. Try loading .cfc file (convert dots to path separators)
-        let cfc_path = if let Some(ref source) = self.source_file {
-            let source_dir = std::path::Path::new(source).parent()
-                .unwrap_or_else(|| std::path::Path::new("."));
-            let file_name = class_name.replace('.', std::path::MAIN_SEPARATOR_STR);
-            source_dir.join(format!("{}.cfc", file_name)).to_string_lossy().to_string()
-        } else {
-            format!("{}.cfc", class_name.replace('.', std::path::MAIN_SEPARATOR_STR))
+        // 4. Try loading .cfc file — first relative, then via mappings
+        let cfc_path = {
+            // Try relative to source file first
+            let relative_path = if let Some(ref source) = self.source_file {
+                let source_dir = std::path::Path::new(source).parent()
+                    .unwrap_or_else(|| std::path::Path::new("."));
+                let file_name = class_name.replace('.', std::path::MAIN_SEPARATOR_STR);
+                source_dir.join(format!("{}.cfc", file_name)).to_string_lossy().to_string()
+            } else {
+                format!("{}.cfc", class_name.replace('.', std::path::MAIN_SEPARATOR_STR))
+            };
+            if std::path::Path::new(&relative_path).exists() {
+                relative_path
+            } else if let Some(mapped) = self.resolve_path_with_mappings(class_name) {
+                mapped
+            } else {
+                relative_path // Fall back to relative (will fail at read_to_string below)
+            }
         };
 
         if let Ok(source_code) = std::fs::read_to_string(&cfc_path) {
@@ -2949,10 +3112,10 @@ impl CfmlVirtualMachine {
     }
 
     /// Extract application config from a component struct
-    fn extract_app_config(template: &CfmlValue) -> (String, HashMap<String, CfmlValue>) {
+    fn extract_app_config(template: &CfmlValue) -> (String, HashMap<String, CfmlValue>, Vec<CfmlMapping>) {
         let s = match template {
             CfmlValue::Struct(s) => s,
-            _ => return ("default".to_string(), HashMap::new()),
+            _ => return ("default".to_string(), HashMap::new(), Vec::new()),
         };
 
         // Case-insensitive lookup for this.name
@@ -2971,7 +3134,43 @@ impl CfmlVirtualMachine {
             }
         }
 
-        (app_name, config)
+        // Extract mappings from this.mappings (case-insensitive key lookup)
+        let mut mappings = Vec::new();
+        if let Some(mappings_val) = s.iter()
+            .find(|(k, _)| k.to_lowercase() == "mappings")
+            .map(|(_, v)| v.clone())
+        {
+            if let CfmlValue::Struct(map_struct) = mappings_val {
+                for (key, val) in &map_struct {
+                    // Normalize mapping name: ensure leading+trailing "/"
+                    let mut name = key.clone();
+                    if !name.starts_with('/') {
+                        name = format!("/{}", name);
+                    }
+                    if !name.ends_with('/') {
+                        name = format!("{}/", name);
+                    }
+                    // Extract path: either a String directly or a Struct with a "path" key
+                    let path = match val {
+                        CfmlValue::String(p) => Some(p.clone()),
+                        CfmlValue::Struct(inner) => {
+                            inner.iter()
+                                .find(|(k, _)| k.to_lowercase() == "path")
+                                .and_then(|(_, v)| match v {
+                                    CfmlValue::String(p) => Some(p.clone()),
+                                    _ => None,
+                                })
+                        }
+                        _ => None,
+                    };
+                    if let Some(path) = path {
+                        mappings.push(CfmlMapping { name, path });
+                    }
+                }
+            }
+        }
+
+        (app_name, config, mappings)
     }
 
     /// Call a lifecycle method on the Application.cfc template
@@ -3020,8 +3219,36 @@ impl CfmlVirtualMachine {
             None => return self.execute(), // Failed to load, fall through
         };
 
-        // 3. Extract config
-        let (app_name, _config) = Self::extract_app_config(&template);
+        // 3. Extract config and mappings
+        let (app_name, _config, mut mappings) = Self::extract_app_config(&template);
+
+        // 3b. Expand mapping paths relative to Application.cfc directory
+        let app_cfc_dir = std::path::Path::new(&app_cfc_path).parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        for mapping in &mut mappings {
+            let expanded = if std::path::Path::new(&mapping.path).is_absolute() {
+                mapping.path.clone()
+            } else {
+                app_cfc_dir.join(&mapping.path).canonicalize()
+                    .unwrap_or_else(|_| app_cfc_dir.join(&mapping.path))
+                    .to_string_lossy().to_string()
+            };
+            mapping.path = expanded;
+        }
+        // Sort by name length descending (longest prefix first)
+        mappings.sort_by(|a, b| b.name.len().cmp(&a.name.len()));
+        // Add default "/" mapping if not already present
+        if !mappings.iter().any(|m| m.name == "/") {
+            let root_dir = if let Some(ref source) = self.source_file {
+                std::path::Path::new(source).parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .to_string_lossy().to_string()
+            } else {
+                std::env::current_dir().unwrap_or_default().to_string_lossy().to_string()
+            };
+            mappings.push(CfmlMapping { name: "/".to_string(), path: root_dir });
+        }
+        self.mappings = mappings;
 
         // 4. Wire up application scope
         if let Some(ref server_state) = self.server_state.clone() {

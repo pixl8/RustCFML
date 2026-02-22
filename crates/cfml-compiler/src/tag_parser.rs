@@ -31,10 +31,10 @@
 //! - <cfdirectory action="..." directory="..." name="..." filter="..." recurse="...">
 //! - <cfinvoke component="..." method="..." returnvariable="...">
 
-/// Check if source contains CFML tags
+/// Check if source contains CFML tags or CFML comments
 pub fn has_cfml_tags(source: &str) -> bool {
     let lower = source.to_lowercase();
-    lower.contains("<cf") || lower.contains("</cf")
+    lower.contains("<cf") || lower.contains("</cf") || source.contains("<!---")
 }
 
 /// Convert CFML tag-based source code to equivalent CFScript
@@ -45,6 +45,23 @@ pub fn tags_to_script(source: &str) -> String {
     let mut i = 0;
 
     while i < len {
+        // Strip CFML comments: <!--- ... --->
+        if i + 4 < len && chars[i] == '<' && chars[i + 1] == '!' && chars[i + 2] == '-' && chars[i + 3] == '-' && chars[i + 4] == '-' {
+            // Find closing --->
+            let mut j = i + 5;
+            while j + 2 < len {
+                if chars[j] == '-' && chars[j + 1] == '-' && chars[j + 2] == '>' {
+                    j += 3;
+                    break;
+                }
+                j += 1;
+            }
+            if j + 2 >= len && !(j >= 3 && chars[j - 1] == '>' && chars[j - 2] == '-' && chars[j - 3] == '-') {
+                j = len; // unclosed comment, skip to end
+            }
+            i = j;
+            continue;
+        }
         if i < len - 1 && chars[i] == '<' && is_cf_tag_start(&chars, i, len) {
             let (script, consumed) = parse_cf_tag(&chars, i, len);
             result.push_str(&script);
@@ -66,10 +83,11 @@ pub fn tags_to_script(source: &str) -> String {
             result.push_str("writeOutput(\"##\");");
             i += 2;
         } else {
-            // Plain text - collect until we hit a tag or hash expression
+            // Plain text - collect until we hit a tag, hash expression, or CFML comment
             let start = i;
             while i < len && !(chars[i] == '<' && is_cf_tag_start(&chars, i, len))
                 && !(chars[i] == '#' && i + 1 < len)
+                && !(i + 4 < len && chars[i] == '<' && chars[i + 1] == '!' && chars[i + 2] == '-' && chars[i + 3] == '-' && chars[i + 4] == '-')
             {
                 i += 1;
             }
@@ -146,36 +164,39 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
         }
     }
 
-    // Parse attributes
+    // Tags with freeform expression bodies (not key=value attributes) —
+    // use find_tag_end directly to avoid misparsing expressions containing quotes/equals
+    match tag_lower.as_str() {
+        "cfset" | "cfif" | "cfelseif" | "cfreturn" => {
+            let tag_end = find_tag_end(chars, name_end, len);
+            let raw: String = chars[name_end..tag_end - 1].iter().collect();
+            let body = raw.trim();
+            let body = if body.ends_with('/') {
+                body[..body.len() - 1].trim()
+            } else {
+                body
+            };
+            let body = strip_hashes(body);
+            let result = match tag_lower.as_str() {
+                "cfset" => format!("{};\n", body),
+                "cfif" => format!("if ({}) {{\n", body),
+                "cfelseif" => format!("}} else if ({}) {{\n", body),
+                "cfreturn" => format!("return {};\n", body),
+                _ => unreachable!(),
+            };
+            return (result, tag_end - start);
+        }
+        _ => {}
+    }
+
+    // Parse attributes for all other tags
     let (attrs, tag_end) = parse_tag_attributes(chars, name_end, len);
 
     match tag_lower.as_str() {
-        "cfset" => {
-            // <cfset expression>
-            // The "expression" is everything after cfset until >
-            let expr: String = chars[name_end..tag_end - 1]
-                .iter()
-                .collect::<String>()
-                .trim()
-                .to_string();
-            // Handle #...# in expressions
-            let expr = strip_hashes(&expr);
-            (format!("{};\n", expr), tag_end - start)
-        }
         "cfoutput" => {
             // <cfoutput> just marks a region where # expressions are evaluated
             // The content between cfoutput tags is handled by the main loop
             (String::new(), tag_end - start)
-        }
-        "cfif" => {
-            let condition = get_attr_or_body(&attrs, chars, name_end, tag_end);
-            let condition = strip_hashes(&condition);
-            (format!("if ({}) {{\n", condition), tag_end - start)
-        }
-        "cfelseif" => {
-            let condition = get_attr_or_body(&attrs, chars, name_end, tag_end);
-            let condition = strip_hashes(&condition);
-            (format!("}} else if ({}) {{\n", condition), tag_end - start)
         }
         "cfelse" => {
             ("} else {\n".to_string(), tag_end - start)
@@ -229,11 +250,6 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
                 (String::new(), tag_end - start)
             }
         }
-        "cfreturn" => {
-            let expr = get_attr_or_body(&attrs, chars, name_end, tag_end);
-            let expr = strip_hashes(&expr);
-            (format!("return {};\n", expr), tag_end - start)
-        }
         "cfinclude" => {
             let template = attrs.get("template").cloned().unwrap_or_default();
             (format!("include \"{}\";\n", template), tag_end - start)
@@ -246,8 +262,9 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
         "cfthrow" => {
             let message = attrs.get("message").cloned().unwrap_or("An error occurred".to_string());
             let message = strip_hashes(&message);
-            let message_val = quote_if_needed(&message);
-            (format!("throw({});\n", message_val), tag_end - start)
+            // message is always a string — quote it directly (escape internal quotes)
+            let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
+            (format!("throw(\"{}\");\n", escaped), tag_end - start)
         }
         "cftry" => {
             ("try {\n".to_string(), tag_end - start)
@@ -263,17 +280,21 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
             let name = attrs.get("name").cloned().unwrap_or_default();
             let default = attrs.get("default").cloned().unwrap_or("\"\"".to_string());
             let default = strip_hashes(&default);
-            // Clean name - remove scope prefix quotes
-            let clean_name = name.replace('"', "").replace('\'', "");
+            // Clean name - remove scope prefix quotes and strip hash expressions
+            let clean_name = strip_hashes(&name.replace('"', "").replace('\'', ""));
             (
                 format!("if (isNull({})) {{ {} = {}; }}\n", clean_name, clean_name, default),
                 tag_end - start,
             )
         }
         "cfcomponent" => {
-            let name = attrs.get("name").cloned().unwrap_or("Component".to_string());
+            let name = attrs.get("name").cloned();
             let extends = attrs.get("extends").cloned();
-            let mut decl = format!("component {} ", name);
+            let mut decl = if let Some(ref n) = name {
+                format!("component {} ", n)
+            } else {
+                "component ".to_string()
+            };
             if let Some(ext) = extends {
                 decl.push_str(&format!("extends {} ", ext));
             }
@@ -587,29 +608,6 @@ fn parse_tag_attributes(
     (attrs, tag_end)
 }
 
-fn get_attr_or_body(
-    attrs: &std::collections::HashMap<String, String>,
-    chars: &[char],
-    name_end: usize,
-    tag_end: usize,
-) -> String {
-    // For tags like <cfif condition> where the condition is not in an attribute
-    // It's everything between the tag name and >
-    if attrs.is_empty() {
-        return chars[name_end..tag_end - 1]
-            .iter()
-            .collect::<String>()
-            .trim()
-            .to_string();
-    }
-    // If there are "real" attributes, return the body part
-    chars[name_end..tag_end - 1]
-        .iter()
-        .collect::<String>()
-        .trim()
-        .to_string()
-}
-
 /// Quote a string value if it's not already a number, boolean, expression, or quoted
 fn quote_if_needed(s: &str) -> String {
     let s = s.trim();
@@ -638,11 +636,38 @@ fn quote_if_needed(s: &str) -> String {
 
 fn strip_hashes(s: &str) -> String {
     let s = s.trim();
-    if s.starts_with('#') && s.ends_with('#') && s.len() > 2 {
-        s[1..s.len() - 1].to_string()
-    } else {
-        s.to_string()
+    // If the entire string is wrapped in #...#, just strip outer hashes
+    if s.starts_with('#') && s.ends_with('#') && s.len() > 2 && s[1..s.len()-1].find('#').is_none() {
+        return s[1..s.len() - 1].to_string();
     }
+    // Handle embedded #expr# within larger expressions
+    // Replace #expr# with just expr (strip the hash delimiters)
+    if !s.contains('#') {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut result = String::new();
+    let mut i = 0;
+    while i < len {
+        if chars[i] == '#' {
+            // Look for closing #
+            if let Some(end) = chars[i + 1..].iter().position(|&c| c == '#') {
+                let end = i + 1 + end;
+                // Extract expression between hashes
+                let expr: String = chars[i + 1..end].iter().collect();
+                result.push_str(&expr);
+                i = end + 1;
+            } else {
+                result.push(chars[i]);
+                i += 1;
+            }
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+    result
 }
 
 fn find_closing_tag(chars: &[char], start: usize, len: usize, tag_name: &str) -> Option<usize> {

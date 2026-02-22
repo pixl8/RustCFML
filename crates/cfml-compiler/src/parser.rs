@@ -33,7 +33,7 @@ impl Parser {
 
         Ok(Program {
             statements,
-            location: SourceLocation::default(),
+            location: self.current_location(),
         })
     }
 
@@ -106,12 +106,18 @@ impl Parser {
     // ---- Statement Parsing ----
 
     fn parse_statement(&mut self) -> Result<CfmlNode, ParseError> {
+        let stmt_loc = self.current_location();
+
         // Check for access modifiers before function
         if matches!(
             self.peek(0),
             Token::Public | Token::Private | Token::Remote | Token::Package
         ) {
             let access = self.parse_access_modifier();
+            // Skip optional return type annotation (e.g. "private array function ...")
+            if matches!(self.peek(0), Token::Identifier(_)) && matches!(self.peek(1), Token::Function) {
+                self.advance(); // skip return type
+            }
             if self.match_token(&Token::Function) {
                 let mut func = self.parse_function()?;
                 func.access = access;
@@ -120,6 +126,10 @@ impl Parser {
                 })));
             }
             if self.match_token(&Token::Static) {
+                // Skip optional return type after static
+                if matches!(self.peek(0), Token::Identifier(_)) && matches!(self.peek(1), Token::Function) {
+                    self.advance();
+                }
                 if self.match_token(&Token::Function) {
                     let mut func = self.parse_function()?;
                     func.access = access;
@@ -171,7 +181,7 @@ impl Parser {
             self.match_token(&Token::Semicolon);
             return Ok(CfmlNode::Statement(Statement::Break(Break {
                 label: None,
-                location: SourceLocation::default(),
+                location: stmt_loc,
             })));
         }
 
@@ -179,7 +189,7 @@ impl Parser {
             self.match_token(&Token::Semicolon);
             return Ok(CfmlNode::Statement(Statement::Continue(Continue {
                 label: None,
-                location: SourceLocation::default(),
+                location: stmt_loc,
             })));
         }
 
@@ -202,7 +212,7 @@ impl Parser {
             self.match_token(&Token::Semicolon);
             return Ok(CfmlNode::Statement(Statement::Include(Include {
                 path,
-                location: SourceLocation::default(),
+                location: stmt_loc,
             })));
         }
 
@@ -217,7 +227,7 @@ impl Parser {
             return Ok(CfmlNode::Statement(Statement::Import(Import {
                 path,
                 alias,
-                location: SourceLocation::default(),
+                location: stmt_loc,
             })));
         }
 
@@ -235,7 +245,7 @@ impl Parser {
                 target,
                 value,
                 operator: assign_op,
-                location: SourceLocation::default(),
+                location: stmt_loc,
             })));
         }
 
@@ -251,9 +261,9 @@ impl Parser {
                     expr: Expression::PostfixOp(Box::new(PostfixOp {
                         operand: Box::new(expr),
                         operator: op,
-                        location: SourceLocation::default(),
+                        location: stmt_loc,
                     })),
-                    location: SourceLocation::default(),
+                    location: stmt_loc,
                 },
             )));
         }
@@ -263,7 +273,7 @@ impl Parser {
         Ok(CfmlNode::Statement(Statement::Expression(
             ExpressionStatement {
                 expr,
-                location: SourceLocation::default(),
+                location: stmt_loc,
             },
         )))
     }
@@ -305,7 +315,14 @@ impl Parser {
     }
 
     fn parse_var(&mut self) -> Result<Var, ParseError> {
-        let name = self.extract_identifier()?;
+        let loc = self.current_location();
+        let mut name = self.extract_identifier()?;
+        // CFML allows dotted var declarations like: var local.x = 1
+        while self.match_token(&Token::Dot) {
+            let part = self.extract_identifier()?;
+            name.push('.');
+            name.push_str(&part);
+        }
         let value = if self.match_token(&Token::Equal) {
             Some(self.parse_expression()?)
         } else {
@@ -317,11 +334,12 @@ impl Parser {
         Ok(Var {
             name,
             value,
-            location: SourceLocation::default(),
+            location: loc,
         })
     }
 
     fn parse_if(&mut self) -> Result<If, ParseError> {
+        let loc = self.current_location();
         self.consume(&Token::LParen)?;
         let condition = self.parse_expression()?;
         self.consume(&Token::RParen)?;
@@ -423,30 +441,53 @@ impl Parser {
             then_branch,
             else_if,
             else_branch,
-            location: SourceLocation::default(),
+            location: loc,
         })
     }
 
     fn parse_for_statement(&mut self) -> Result<CfmlNode, ParseError> {
+        let loc = self.current_location();
         self.consume(&Token::LParen)?;
 
         // Check for for-in: for (var x in collection) or for (x in collection)
         let has_var = self.match_token(&Token::Var);
 
-        if let Token::Identifier(name) = self.peek(0).clone() {
-            if matches!(self.peek(1), Token::In) {
-                // for-in loop
-                self.advance(); // consume identifier
-                self.advance(); // consume 'in'
-                let iterable = self.parse_expression()?;
-                self.consume(&Token::RParen)?;
-                let body = self.parse_block()?;
-                return Ok(CfmlNode::Statement(Statement::ForIn(ForIn {
-                    variable: name,
-                    iterable,
-                    body,
-                    location: SourceLocation::default(),
-                })));
+        // Lookahead to detect for-in: scan past a (possibly dotted) identifier to find 'in'
+        {
+            let mut la = 0;
+            // First token must be an identifier or soft keyword
+            let is_ident_start = matches!(self.peek(la), Token::Identifier(_) | Token::Local
+                | Token::Param | Token::Output | Token::Required | Token::Default
+                | Token::Include | Token::Import | Token::Property | Token::Abstract
+                | Token::Final | Token::Static);
+            if is_ident_start {
+                la += 1;
+                // Skip dotted parts: .ident .ident ...
+                while matches!(self.peek(la), Token::Dot) && matches!(self.peek(la + 1), Token::Identifier(_) | Token::Local
+                    | Token::Param | Token::Output | Token::Required | Token::Default
+                    | Token::Include | Token::Import | Token::Property | Token::Abstract
+                    | Token::Final | Token::Static) {
+                    la += 2;
+                }
+                if matches!(self.peek(la), Token::In) {
+                    // It's a for-in loop — consume the dotted name
+                    let mut name = self.extract_identifier()?;
+                    while self.match_token(&Token::Dot) {
+                        let part = self.extract_identifier()?;
+                        name.push('.');
+                        name.push_str(&part);
+                    }
+                    self.advance(); // consume 'in'
+                    let iterable = self.parse_expression()?;
+                    self.consume(&Token::RParen)?;
+                    let body = self.parse_block()?;
+                    return Ok(CfmlNode::Statement(Statement::ForIn(ForIn {
+                        variable: name,
+                        iterable,
+                        body,
+                        location: loc,
+                    })));
+                }
             }
         }
 
@@ -462,18 +503,18 @@ impl Parser {
                     Some(Box::new(Statement::Var(Var {
                         name: ident.name.clone(),
                         value: Some(value),
-                        location: SourceLocation::default(),
+                        location: self.current_location(),
                     })))
                 } else {
                     Some(Box::new(Statement::Expression(ExpressionStatement {
                         expr,
-                        location: SourceLocation::default(),
+                        location: self.current_location(),
                     })))
                 }
             } else {
                 Some(Box::new(Statement::Expression(ExpressionStatement {
                     expr,
-                    location: SourceLocation::default(),
+                    location: self.current_location(),
                 })))
             }
         } else {
@@ -514,12 +555,19 @@ impl Parser {
             condition,
             increment,
             body,
-            location: SourceLocation::default(),
+            location: loc,
         })))
     }
 
     fn parse_var_no_semicolon(&mut self) -> Result<Var, ParseError> {
-        let name = self.extract_identifier()?;
+        let loc = self.current_location();
+        let mut name = self.extract_identifier()?;
+        // CFML allows dotted var declarations like: var local.i = 1
+        while self.match_token(&Token::Dot) {
+            let part = self.extract_identifier()?;
+            name.push('.');
+            name.push_str(&part);
+        }
         let value = if self.match_token(&Token::Equal) {
             Some(self.parse_expression()?)
         } else {
@@ -529,11 +577,12 @@ impl Parser {
         Ok(Var {
             name,
             value,
-            location: SourceLocation::default(),
+            location: loc,
         })
     }
 
     fn parse_while(&mut self) -> Result<While, ParseError> {
+        let loc = self.current_location();
         self.consume(&Token::LParen)?;
         let condition = self.parse_expression()?;
         self.consume(&Token::RParen)?;
@@ -552,11 +601,12 @@ impl Parser {
         Ok(While {
             condition,
             body,
-            location: SourceLocation::default(),
+            location: loc,
         })
     }
 
     fn parse_do(&mut self) -> Result<Do, ParseError> {
+        let loc = self.current_location();
         let body = self.parse_block()?;
         self.consume(&Token::While)?;
         self.consume(&Token::LParen)?;
@@ -567,11 +617,12 @@ impl Parser {
         Ok(Do {
             body,
             condition,
-            location: SourceLocation::default(),
+            location: loc,
         })
     }
 
     fn parse_switch(&mut self) -> Result<Switch, ParseError> {
+        let loc = self.current_location();
         self.consume(&Token::LParen)?;
         let expression = self.parse_expression()?;
         self.consume(&Token::RParen)?;
@@ -627,11 +678,12 @@ impl Parser {
             expression,
             cases,
             default_case,
-            location: SourceLocation::default(),
+            location: loc,
         })
     }
 
     fn parse_try(&mut self) -> Result<Try, ParseError> {
+        let loc = self.current_location();
         let body = self.parse_block()?;
         let mut catches = Vec::new();
         let mut finally_body = None;
@@ -667,11 +719,12 @@ impl Parser {
             body,
             catches,
             finally_body,
-            location: SourceLocation::default(),
+            location: loc,
         })
     }
 
     fn parse_throw(&mut self) -> Result<Throw, ParseError> {
+        let loc = self.current_location();
         let message = if !self.check(&Token::Semicolon) && !self.is_at_end() {
             Some(self.parse_expression()?)
         } else {
@@ -682,11 +735,12 @@ impl Parser {
         Ok(Throw {
             message,
             type_: None,
-            location: SourceLocation::default(),
+            location: loc,
         })
     }
 
     fn parse_return(&mut self) -> Result<Return, ParseError> {
+        let loc = self.current_location();
         let value = if !self.check(&Token::Semicolon)
             && !self.check(&Token::RBrace)
             && !self.is_at_end()
@@ -700,11 +754,12 @@ impl Parser {
 
         Ok(Return {
             value,
-            location: SourceLocation::default(),
+            location: loc,
         })
     }
 
     fn parse_function(&mut self) -> Result<Function, ParseError> {
+        let loc = self.current_location();
         // Optional return type before function name
         let mut return_type = None;
         let name;
@@ -754,15 +809,23 @@ impl Parser {
             is_static: false,
             is_abstract: false,
             body,
-            location: SourceLocation::default(),
+            location: loc,
             metadata,
         })
     }
 
     fn parse_component(&mut self) -> Result<Component, ParseError> {
-        let name = self
-            .extract_identifier()
-            .unwrap_or_else(|_| "Anonymous".to_string());
+        let loc = self.current_location();
+        // Only consume an identifier as the name if it's NOT followed by '=' (which
+        // would indicate a metadata attribute like output="false" or hint="...").
+        let name = if matches!(self.peek(0), Token::Identifier(_))
+            && !matches!(self.peek(1), Token::Equal)
+            && !matches!(self.peek(0), Token::Extends | Token::Implements)
+        {
+            self.extract_identifier().unwrap_or_else(|_| "Anonymous".to_string())
+        } else {
+            "Anonymous".to_string()
+        };
 
         let mut extends = None;
         let mut implements = Vec::new();
@@ -782,18 +845,30 @@ impl Parser {
             }
         }
 
-        // Parse component metadata attributes (e.g., taffy_uri="/users/{id}")
+        // Parse component metadata attributes (e.g., taffy_uri="/users/{id}", output="false", hint="...")
+        // Accepts both identifiers and keyword tokens as attribute keys.
         let mut metadata = Vec::new();
-        while let Token::Identifier(_) = self.peek(0) {
-            if matches!(self.peek(1), Token::Equal) {
-                let key = self.extract_identifier()?;
-                self.consume(&Token::Equal)?;
-                if let Token::String(val) = self.peek(0).clone() {
-                    self.advance();
-                    metadata.push((key, val));
-                } else {
-                    break;
-                }
+        loop {
+            let is_attr_key = matches!(self.peek(1), Token::Equal)
+                && (matches!(self.peek(0), Token::Identifier(_))
+                    || self.token_as_string(&self.peek(0).clone()).is_some());
+            if !is_attr_key {
+                break;
+            }
+            let key = if let Token::Identifier(ref s) = self.peek(0) {
+                let s = s.clone();
+                self.advance();
+                s
+            } else if let Some(s) = self.token_as_string(&self.peek(0).clone()) {
+                self.advance();
+                s
+            } else {
+                break;
+            };
+            self.consume(&Token::Equal)?;
+            if let Token::String(val) = self.peek(0).clone() {
+                self.advance();
+                metadata.push((key, val));
             } else {
                 break;
             }
@@ -817,6 +892,11 @@ impl Parser {
             };
 
             let is_static = self.match_token(&Token::Static);
+
+            // Skip optional return type annotation (e.g. "array function ...")
+            if matches!(self.peek(0), Token::Identifier(_)) && matches!(self.peek(1), Token::Function) {
+                self.advance(); // skip return type
+            }
 
             if self.match_token(&Token::Property) {
                 properties.push(self.parse_property()?);
@@ -844,12 +924,13 @@ impl Parser {
             properties,
             functions,
             body,
-            location: SourceLocation::default(),
+            location: loc,
             metadata,
         })
     }
 
     fn parse_property(&mut self) -> Result<Property, ParseError> {
+        let loc = self.current_location();
         let mut prop_type = None;
         let mut required = false;
 
@@ -884,7 +965,7 @@ impl Parser {
             prop_type,
             default,
             required,
-            location: SourceLocation::default(),
+            location: loc,
         })
     }
 
@@ -957,14 +1038,75 @@ impl Parser {
                     unreachable!()
                 }
             }
+            // CFML soft keywords — can be used as identifiers in most contexts
+            Token::Local => { self.advance(); Ok("local".to_string()) }
+            Token::Param => { self.advance(); Ok("param".to_string()) }
+            Token::Output => { self.advance(); Ok("output".to_string()) }
+            Token::Required => { self.advance(); Ok("required".to_string()) }
+            Token::Default => { self.advance(); Ok("default".to_string()) }
+            Token::Include => { self.advance(); Ok("include".to_string()) }
+            Token::Import => { self.advance(); Ok("import".to_string()) }
+            Token::Property => { self.advance(); Ok("property".to_string()) }
+            Token::Abstract => { self.advance(); Ok("abstract".to_string()) }
+            Token::Final => { self.advance(); Ok("final".to_string()) }
+            Token::Static => { self.advance(); Ok("static".to_string()) }
             _ => Err(self.parse_error("Expected identifier")),
+        }
+    }
+
+    /// Extract a property name after a dot — any keyword or identifier is valid in CFML.
+    fn extract_property_name(&mut self) -> Result<String, ParseError> {
+        // First try normal identifier extraction (handles identifiers + soft keywords)
+        if let Ok(name) = self.extract_identifier() {
+            return Ok(name);
+        }
+        // After a dot, any keyword can be used as a property name in CFML
+        let name = match self.peek(0) {
+            Token::If => "if", Token::Else => "else", Token::ElseIf => "elseif",
+            Token::For => "for", Token::In => "in", Token::While => "while",
+            Token::Do => "do", Token::Break => "break", Token::Continue => "continue",
+            Token::Return => "return", Token::Switch => "switch", Token::Case => "case",
+            Token::Try => "try", Token::Catch => "catch", Token::Finally => "finally",
+            Token::Throw => "throw", Token::Function => "function", Token::Var => "var",
+            Token::New => "new", Token::This => "this", Token::Super => "super",
+            Token::Component => "component", Token::Extends => "extends",
+            Token::Implements => "implements", Token::Interface => "interface",
+            Token::Public => "public", Token::Private => "private",
+            Token::Remote => "remote", Token::Package => "package",
+            Token::True => "true", Token::False => "false", Token::Null => "null",
+            Token::Contains => "contains", Token::NotKeyword => "not",
+            Token::AndKeyword => "and", Token::OrKeyword => "or",
+            Token::EqKeyword => "eq", Token::NeqKeyword => "neq",
+            Token::GtKeyword => "gt", Token::GteKeyword => "gte",
+            Token::LtKeyword => "lt", Token::LteKeyword => "lte",
+            Token::ModKeyword => "mod", Token::IsKeyword => "is",
+            _ => return Err(self.parse_error("Expected property name")),
+        };
+        self.advance();
+        Ok(name.to_string())
+    }
+
+    /// Convert a keyword token to its string representation for use as metadata keys.
+    fn token_as_string(&self, token: &Token) -> Option<String> {
+        match token {
+            Token::Output => Some("output".to_string()),
+            Token::Public => Some("public".to_string()),
+            Token::Private => Some("private".to_string()),
+            Token::Remote => Some("remote".to_string()),
+            Token::Package => Some("package".to_string()),
+            Token::Static => Some("static".to_string()),
+            Token::Abstract => Some("abstract".to_string()),
+            Token::Final => Some("final".to_string()),
+            Token::Required => Some("required".to_string()),
+            Token::Default => Some("default".to_string()),
+            _ => None,
         }
     }
 
     fn extract_dotted_identifier(&mut self) -> Result<String, ParseError> {
         let mut path = self.extract_identifier()?;
         while self.match_token(&Token::Dot) {
-            let next = self.extract_identifier()?;
+            let next = self.extract_property_name()?;
             path.push('.');
             path.push_str(&next);
         }
@@ -1001,11 +1143,11 @@ impl Parser {
                 return Ok(Expression::BinaryOp(Box::new(BinaryOp {
                     left: Box::new(Expression::Identifier(Identifier {
                         name,
-                        location: SourceLocation::default(),
+                        location: self.current_location(),
                     })),
                     operator: BinaryOpType::Assign,
                     right: Box::new(value),
-                    location: SourceLocation::default(),
+                    location: self.current_location(),
                 })));
             } else if let Expression::MemberAccess(_) | Expression::ArrayAccess(_) = &expr {
                 self.advance(); // consume =
@@ -1014,7 +1156,7 @@ impl Parser {
                     left: Box::new(expr),
                     operator: BinaryOpType::Assign,
                     right: Box::new(value),
-                    location: SourceLocation::default(),
+                    location: self.current_location(),
                 })));
             }
         }
@@ -1034,7 +1176,7 @@ impl Parser {
                 condition: Box::new(expr),
                 then_expr,
                 else_expr,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             })));
         }
 
@@ -1044,7 +1186,7 @@ impl Parser {
             return Ok(Expression::Elvis(Box::new(Elvis {
                 left: Box::new(expr),
                 right,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             })));
         }
 
@@ -1060,7 +1202,7 @@ impl Parser {
                 left: Box::new(left),
                 operator: BinaryOpType::Imp,
                 right,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             }));
         }
 
@@ -1076,7 +1218,7 @@ impl Parser {
                 left: Box::new(left),
                 operator: BinaryOpType::Eqv,
                 right,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             }));
         }
 
@@ -1092,7 +1234,7 @@ impl Parser {
                 left: Box::new(left),
                 operator: BinaryOpType::Xor,
                 right,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             }));
         }
 
@@ -1108,7 +1250,7 @@ impl Parser {
                 left: Box::new(left),
                 operator: BinaryOpType::Or,
                 right,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             }));
         }
 
@@ -1124,7 +1266,7 @@ impl Parser {
                 left: Box::new(left),
                 operator: BinaryOpType::And,
                 right,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             }));
         }
 
@@ -1137,7 +1279,7 @@ impl Parser {
             return Ok(Expression::UnaryOp(Box::new(UnaryOp {
                 operator: UnaryOpType::Not,
                 operand,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             })));
         }
 
@@ -1154,7 +1296,7 @@ impl Parser {
                     left: Box::new(left),
                     operator: BinaryOpType::Equal,
                     right,
-                    location: SourceLocation::default(),
+                    location: self.current_location(),
                 }));
             } else if self.match_token(&Token::BangEqual) || self.match_token(&Token::NeqKeyword) {
                 let right = Box::new(self.parse_comparison()?);
@@ -1162,7 +1304,7 @@ impl Parser {
                     left: Box::new(left),
                     operator: BinaryOpType::NotEqual,
                     right,
-                    location: SourceLocation::default(),
+                    location: self.current_location(),
                 }));
             } else {
                 break;
@@ -1182,7 +1324,7 @@ impl Parser {
                     left: Box::new(left),
                     operator: BinaryOpType::Greater,
                     right,
-                    location: SourceLocation::default(),
+                    location: self.current_location(),
                 }));
             } else if self.match_token(&Token::GreaterEqual) || self.match_token(&Token::GteKeyword) {
                 let right = Box::new(self.parse_contains()?);
@@ -1190,7 +1332,7 @@ impl Parser {
                     left: Box::new(left),
                     operator: BinaryOpType::GreaterEqual,
                     right,
-                    location: SourceLocation::default(),
+                    location: self.current_location(),
                 }));
             } else if self.match_token(&Token::Less) || self.match_token(&Token::LtKeyword) {
                 let right = Box::new(self.parse_contains()?);
@@ -1198,7 +1340,7 @@ impl Parser {
                     left: Box::new(left),
                     operator: BinaryOpType::Less,
                     right,
-                    location: SourceLocation::default(),
+                    location: self.current_location(),
                 }));
             } else if self.match_token(&Token::LessEqual) || self.match_token(&Token::LteKeyword) {
                 let right = Box::new(self.parse_contains()?);
@@ -1206,7 +1348,7 @@ impl Parser {
                     left: Box::new(left),
                     operator: BinaryOpType::LessEqual,
                     right,
-                    location: SourceLocation::default(),
+                    location: self.current_location(),
                 }));
             } else {
                 break;
@@ -1225,7 +1367,7 @@ impl Parser {
                 left: Box::new(left),
                 operator: BinaryOpType::Contains,
                 right,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             }));
         } else if self.match_token(&Token::NotKeyword) {
             // "NOT CONTAINS" as two-word operator
@@ -1235,7 +1377,7 @@ impl Parser {
                     left: Box::new(left),
                     operator: BinaryOpType::DoesNotContain,
                     right,
-                    location: SourceLocation::default(),
+                    location: self.current_location(),
                 }));
             } else {
                 // It was just NOT used as unary, put it back
@@ -1255,7 +1397,7 @@ impl Parser {
                 left: Box::new(left),
                 operator: BinaryOpType::Concat,
                 right,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             }));
         }
 
@@ -1275,7 +1417,7 @@ impl Parser {
                 left: Box::new(left),
                 operator,
                 right,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             }));
         }
 
@@ -1302,7 +1444,7 @@ impl Parser {
                 left: Box::new(left),
                 operator,
                 right,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             }));
         }
 
@@ -1318,7 +1460,7 @@ impl Parser {
                 left: Box::new(left),
                 operator: BinaryOpType::Pow,
                 right,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             })));
         }
 
@@ -1331,7 +1473,7 @@ impl Parser {
             return Ok(Expression::UnaryOp(Box::new(UnaryOp {
                 operator: UnaryOpType::Minus,
                 operand,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             })));
         }
 
@@ -1341,7 +1483,7 @@ impl Parser {
             return Ok(Expression::UnaryOp(Box::new(UnaryOp {
                 operator: UnaryOpType::Minus, // We'll handle prefix increment at compile time
                 operand,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             })));
         }
 
@@ -1356,13 +1498,13 @@ impl Parser {
             expr = Expression::PostfixOp(Box::new(PostfixOp {
                 operand: Box::new(expr),
                 operator: PostfixOpType::Increment,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             }));
         } else if self.match_token(&Token::MinusMinus) {
             expr = Expression::PostfixOp(Box::new(PostfixOp {
                 operand: Box::new(expr),
                 operator: PostfixOpType::Decrement,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             }));
         }
 
@@ -1374,7 +1516,7 @@ impl Parser {
 
         loop {
             if self.match_token(&Token::Dot) {
-                let method = self.extract_identifier().unwrap_or_default();
+                let method = self.extract_property_name().unwrap_or_default();
                 if self.match_token(&Token::LParen) {
                     let args = self.parse_arguments()?;
                     self.consume(&Token::RParen)?;
@@ -1383,14 +1525,14 @@ impl Parser {
                         method,
                         arguments: args,
                         null_safe: false,
-                        location: SourceLocation::default(),
+                        location: self.current_location(),
                     }));
                 } else {
                     expr = Expression::MemberAccess(Box::new(MemberAccess {
                         object: Box::new(expr),
                         member: method,
                         null_safe: false,
-                        location: SourceLocation::default(),
+                        location: self.current_location(),
                     }));
                 }
             } else if self.match_token(&Token::LParen) {
@@ -1399,7 +1541,7 @@ impl Parser {
                 expr = Expression::FunctionCall(Box::new(FunctionCall {
                     name: Box::new(expr),
                     arguments: args,
-                    location: SourceLocation::default(),
+                    location: self.current_location(),
                 }));
             } else if self.match_token(&Token::LBracket) {
                 let index = Box::new(self.parse_expression()?);
@@ -1407,11 +1549,11 @@ impl Parser {
                 expr = Expression::ArrayAccess(Box::new(ArrayAccess {
                     array: Box::new(expr),
                     index,
-                    location: SourceLocation::default(),
+                    location: self.current_location(),
                 }));
             } else if self.match_token(&Token::QuestionDot) {
                 // Null-safe navigation: obj?.method() or obj?.property
-                let member = self.extract_identifier().unwrap_or_default();
+                let member = self.extract_property_name().unwrap_or_default();
                 if self.match_token(&Token::LParen) {
                     let args = self.parse_arguments()?;
                     self.consume(&Token::RParen)?;
@@ -1420,14 +1562,14 @@ impl Parser {
                         method: member,
                         arguments: args,
                         null_safe: true,
-                        location: SourceLocation::default(),
+                        location: self.current_location(),
                     }));
                 } else {
                     expr = Expression::MemberAccess(Box::new(MemberAccess {
                         object: Box::new(expr),
                         member,
                         null_safe: true,
-                        location: SourceLocation::default(),
+                        location: self.current_location(),
                     }));
                 }
             } else {
@@ -1466,27 +1608,27 @@ impl Parser {
         match token {
             Token::True => Ok(Expression::Literal(Literal {
                 value: LiteralValue::Bool(true),
-                location: SourceLocation::default(),
+                location: self.current_location(),
             })),
             Token::False => Ok(Expression::Literal(Literal {
                 value: LiteralValue::Bool(false),
-                location: SourceLocation::default(),
+                location: self.current_location(),
             })),
             Token::Null => Ok(Expression::Literal(Literal {
                 value: LiteralValue::Null,
-                location: SourceLocation::default(),
+                location: self.current_location(),
             })),
             Token::Integer(i) => Ok(Expression::Literal(Literal {
                 value: LiteralValue::Int(i),
-                location: SourceLocation::default(),
+                location: self.current_location(),
             })),
             Token::Double(d) => Ok(Expression::Literal(Literal {
                 value: LiteralValue::Double(d),
-                location: SourceLocation::default(),
+                location: self.current_location(),
             })),
             Token::String(s) => Ok(Expression::Literal(Literal {
                 value: LiteralValue::String(s),
-                location: SourceLocation::default(),
+                location: self.current_location(),
             })),
             Token::InterpolatedStringStart => {
                 let mut parts: Vec<Expression> = Vec::new();
@@ -1496,7 +1638,7 @@ impl Parser {
                         Token::String(s) => {
                             parts.push(Expression::Literal(Literal {
                                 value: LiteralValue::String(s),
-                                location: SourceLocation::default(),
+                                location: self.current_location(),
                             }));
                         }
                         Token::InterpolatedExpr(expr_str) => {
@@ -1515,7 +1657,7 @@ impl Parser {
                                 // Fallback: treat as identifier
                                 parts.push(Expression::Identifier(Identifier {
                                     name: expr_str.trim().to_string(),
-                                    location: SourceLocation::default(),
+                                    location: self.current_location(),
                                 }));
                             }
                         }
@@ -1525,18 +1667,63 @@ impl Parser {
                 self.match_token(&Token::InterpolatedStringEnd);
                 Ok(Expression::StringInterpolation(StringInterpolation {
                     parts,
-                    location: SourceLocation::default(),
+                    location: self.current_location(),
                 }))
             }
             Token::Identifier(id) => Ok(Expression::Identifier(Identifier {
                 name: id,
-                location: SourceLocation::default(),
+                location: self.current_location(),
+            })),
+            // CFML soft keywords used as variables in expressions
+            Token::Local => Ok(Expression::Identifier(Identifier {
+                name: "local".to_string(),
+                location: self.current_location(),
+            })),
+            Token::Param => Ok(Expression::Identifier(Identifier {
+                name: "param".to_string(),
+                location: self.current_location(),
+            })),
+            Token::Output => Ok(Expression::Identifier(Identifier {
+                name: "output".to_string(),
+                location: self.current_location(),
+            })),
+            Token::Required => Ok(Expression::Identifier(Identifier {
+                name: "required".to_string(),
+                location: self.current_location(),
+            })),
+            Token::Default => Ok(Expression::Identifier(Identifier {
+                name: "default".to_string(),
+                location: self.current_location(),
+            })),
+            Token::Include => Ok(Expression::Identifier(Identifier {
+                name: "include".to_string(),
+                location: self.current_location(),
+            })),
+            Token::Import => Ok(Expression::Identifier(Identifier {
+                name: "import".to_string(),
+                location: self.current_location(),
+            })),
+            Token::Property => Ok(Expression::Identifier(Identifier {
+                name: "property".to_string(),
+                location: self.current_location(),
+            })),
+            Token::Abstract => Ok(Expression::Identifier(Identifier {
+                name: "abstract".to_string(),
+                location: self.current_location(),
+            })),
+            Token::Final => Ok(Expression::Identifier(Identifier {
+                name: "final".to_string(),
+                location: self.current_location(),
+            })),
+            Token::Static => Ok(Expression::Identifier(Identifier {
+                name: "static".to_string(),
+                location: self.current_location(),
             })),
             Token::This => Ok(Expression::This(This {
-                location: SourceLocation::default(),
+                location: self.current_location(),
             })),
             Token::Super => Ok(Expression::Super(Super {
-                location: SourceLocation::default(),
+                location: self.current_location(),
             })),
             Token::New => {
                 let class = Box::new(self.parse_call()?);
@@ -1552,7 +1739,7 @@ impl Parser {
                 Ok(Expression::New(Box::new(NewExpression {
                     class,
                     arguments: args,
-                    location: SourceLocation::default(),
+                    location: self.current_location(),
                 })))
             }
             Token::Function => self.parse_closure(),
@@ -1578,7 +1765,7 @@ impl Parser {
                     return Ok(Expression::ArrowFunction(Box::new(ArrowFunction {
                         params,
                         body: Box::new(body),
-                        location: SourceLocation::default(),
+                        location: self.current_location(),
                     })));
                 }
 
@@ -1607,7 +1794,7 @@ impl Parser {
         Ok(Expression::Closure(Box::new(Closure {
             params,
             body,
-            location: SourceLocation::default(),
+            location: self.current_location(),
         })))
     }
 
@@ -1635,7 +1822,7 @@ impl Parser {
 
         Ok(Expression::Array(Array {
             elements,
-            location: SourceLocation::default(),
+            location: self.current_location(),
         }))
     }
 
@@ -1676,7 +1863,7 @@ impl Parser {
         Ok(Expression::Struct(Struct {
             pairs,
             ordered: false,
-            location: SourceLocation::default(),
+            location: self.current_location(),
         }))
     }
 }

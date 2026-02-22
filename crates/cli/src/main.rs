@@ -1,3 +1,5 @@
+mod rewrite;
+
 use clap::Parser;
 use std::collections::HashMap;
 use std::fs;
@@ -202,7 +204,14 @@ fn compile_and_run(
         for func in &program.functions {
             println!("Function: {} (params: {:?})", func.name, func.params);
             for (i, instr) in func.instructions.iter().enumerate() {
-                println!("  {:3}: {:?}", i, instr);
+                match instr {
+                    cfml_codegen::BytecodeOp::LineInfo(line, col) => {
+                        println!("        ; line {}:{}", line, col);
+                    }
+                    _ => {
+                        println!("  {:3}: {:?}", i, instr);
+                    }
+                }
             }
         }
         println!();
@@ -260,7 +269,7 @@ fn compile_and_run(
                 redirect_url: vm.redirect_url,
             })
         }
-        Err(e) => Err(format!("Runtime Error: {}", e.message)),
+        Err(e) => Err(format!("{}", e)),
     }
 }
 
@@ -277,16 +286,33 @@ fn run_server(doc_root: &Path, port: u16, debug: bool) {
 
     let server_state = ServerState::new();
 
+    // Load URL rewrite rules if urlrewrite.xml exists
+    let rewrite_xml = doc_root.join("urlrewrite.xml");
+    let rewrite_rules = if rewrite_xml.is_file() {
+        let rules = rewrite::parse_urlrewrite_xml(&rewrite_xml);
+        println!("Loaded {} URL rewrite rule(s) from urlrewrite.xml", rules.len());
+        rules
+    } else {
+        Vec::new()
+    };
+
     println!("RustCFML server running on http://127.0.0.1:{}", port);
     println!("Document root: {}", fs::canonicalize(doc_root).unwrap_or_else(|_| doc_root.to_path_buf()).display());
     println!("Press Ctrl+C to stop\n");
 
     for request in server.incoming_requests() {
-        handle_request(request, doc_root, port, debug, &server_state);
+        handle_request(request, doc_root, port, debug, &server_state, &rewrite_rules);
     }
 }
 
-fn handle_request(mut request: tiny_http::Request, doc_root: &Path, port: u16, debug: bool, server_state: &ServerState) {
+fn handle_request(
+    mut request: tiny_http::Request,
+    doc_root: &Path,
+    port: u16,
+    debug: bool,
+    server_state: &ServerState,
+    rewrite_rules: &[rewrite::RewriteRule],
+) {
     let method = request.method().to_string();
     let url = request.url().to_string();
 
@@ -295,10 +321,72 @@ fn handle_request(mut request: tiny_http::Request, doc_root: &Path, port: u16, d
     }
 
     // Split URL into path and query string
-    let (path, query_string) = match url.find('?') {
+    let (raw_path, original_qs) = match url.find('?') {
         Some(pos) => (&url[..pos], &url[pos + 1..]),
         None => (url.as_str(), ""),
     };
+
+    // Apply URL rewrite rules before file resolution
+    let mut path = raw_path.to_string();
+    let mut query_string = original_qs.to_string();
+    if !rewrite_rules.is_empty() {
+        let mut headers = HashMap::new();
+        for header in request.headers() {
+            headers.insert(
+                header.field.as_str().as_str().to_string(),
+                header.value.as_str().to_string(),
+            );
+        }
+
+        if let Some(result) = rewrite::apply_rewrite_rules(rewrite_rules, &path, &method, port, &headers) {
+            match result.rewrite_type {
+                rewrite::RewriteType::PermanentRedirect => {
+                    if debug {
+                        println!("  -> 301 redirect to {}", result.new_path);
+                    }
+                    let response = tiny_http::Response::from_string("")
+                        .with_status_code(tiny_http::StatusCode(301))
+                        .with_header(
+                            tiny_http::Header::from_bytes(b"Location", result.new_path.as_bytes()).unwrap(),
+                        );
+                    let _ = request.respond(response);
+                    return;
+                }
+                rewrite::RewriteType::Redirect => {
+                    if debug {
+                        println!("  -> 302 redirect to {}", result.new_path);
+                    }
+                    let response = tiny_http::Response::from_string("")
+                        .with_status_code(tiny_http::StatusCode(302))
+                        .with_header(
+                            tiny_http::Header::from_bytes(b"Location", result.new_path.as_bytes()).unwrap(),
+                        );
+                    let _ = request.respond(response);
+                    return;
+                }
+                rewrite::RewriteType::Forward => {
+                    if debug && result.new_path != path {
+                        println!("  -> rewrite to {}", result.new_path);
+                    }
+                    // Split rewritten path from its query string
+                    if let Some(qpos) = result.new_path.find('?') {
+                        let rewritten_qs = &result.new_path[qpos + 1..];
+                        // Merge: rewritten QS params, then original QS params
+                        if !rewritten_qs.is_empty() && !query_string.is_empty() {
+                            query_string = format!("{}&{}", rewritten_qs, query_string);
+                        } else if !rewritten_qs.is_empty() {
+                            query_string = rewritten_qs.to_string();
+                        }
+                        path = result.new_path[..qpos].to_string();
+                    } else {
+                        path = result.new_path;
+                    }
+                }
+            }
+        }
+    }
+    let path = path.as_str();
+    let query_string = query_string.as_str();
 
     // Resolve file path from URL
     let resolved = resolve_file(doc_root, path);

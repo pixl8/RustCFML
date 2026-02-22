@@ -9,6 +9,9 @@ pub struct Lexer {
     line: usize,
     column: usize,
     tokens: Vec<TokenWithLoc>,
+    /// Start position of the current token being scanned
+    token_start_line: usize,
+    token_start_column: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +28,8 @@ impl Lexer {
             line: 1,
             column: 1,
             tokens: Vec::new(),
+            token_start_line: 1,
+            token_start_column: 1,
         }
     }
 
@@ -77,13 +82,15 @@ impl Lexer {
 
     fn add_token(&mut self, token: Token) {
         let location = SourceLocation::new(
-            Position::new(self.line, self.column),
+            Position::new(self.token_start_line, self.token_start_column),
             Position::new(self.line, self.column),
         );
         self.tokens.push(TokenWithLoc { token, location });
     }
 
     fn scan_token(&mut self) {
+        self.token_start_line = self.line;
+        self.token_start_column = self.column;
         let c = self.advance();
 
         match c {

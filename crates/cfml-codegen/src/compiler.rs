@@ -18,6 +18,7 @@ pub struct BytecodeFunction {
     pub name: String,
     pub params: Vec<String>,
     pub instructions: Vec<BytecodeOp>,
+    pub source_file: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +131,9 @@ pub enum BytecodeOp {
     ConcatArrays,
     MergeStructs,
     CallSpread,
+
+    // Source location tracking
+    LineInfo(usize, usize),  // (line, column) — emitted before statements for stack traces
 }
 
 impl CfmlCompiler {
@@ -140,6 +144,7 @@ impl CfmlCompiler {
                     name: "__main__".to_string(),
                     params: Vec::new(),
                     instructions: Vec::new(),
+                    source_file: None,
                 }],
             },
             loop_stack: Vec::new(),
@@ -217,7 +222,37 @@ impl CfmlCompiler {
         }
     }
 
+    fn stmt_line(stmt: &Statement) -> Option<usize> {
+        match stmt {
+            Statement::Expression(e) => Some(e.location.start.line),
+            Statement::Var(v) => Some(v.location.start.line),
+            Statement::Assignment(a) => Some(a.location.start.line),
+            Statement::If(i) => Some(i.location.start.line),
+            Statement::For(f) => Some(f.location.start.line),
+            Statement::ForIn(f) => Some(f.location.start.line),
+            Statement::While(w) => Some(w.location.start.line),
+            Statement::Do(d) => Some(d.location.start.line),
+            Statement::Switch(s) => Some(s.location.start.line),
+            Statement::Return(r) => Some(r.location.start.line),
+            Statement::FunctionDecl(f) => Some(f.func.location.start.line),
+            Statement::Try(t) => Some(t.location.start.line),
+            Statement::Throw(t) => Some(t.location.start.line),
+            Statement::ComponentDecl(c) => Some(c.component.location.start.line),
+            Statement::Include(i) => Some(i.location.start.line),
+            Statement::Break(b) => Some(b.location.start.line),
+            Statement::Continue(c) => Some(c.location.start.line),
+            Statement::Import(i) => Some(i.location.start.line),
+            Statement::Output(o) => Some(o.location.start.line),
+            Statement::PropertyDecl(p) => Some(p.prop.location.start.line),
+            Statement::Exit => None,
+        }
+    }
+
     fn compile_statement(&mut self, stmt: &Statement, instructions: &mut Vec<BytecodeOp>) {
+        if let Some(line) = Self::stmt_line(stmt) {
+            instructions.push(BytecodeOp::LineInfo(line, 0));
+        }
+
         match stmt {
             Statement::Expression(expr_stmt) => {
                 self.compile_expression(&expr_stmt.expr, instructions);
@@ -739,6 +774,7 @@ impl CfmlCompiler {
             name: func.name.clone(),
             params: func.params.iter().map(|p| p.name.clone()).collect(),
             instructions: func_instructions,
+            source_file: None,
         };
 
         let func_idx = self.program.functions.len();
@@ -839,6 +875,24 @@ impl CfmlCompiler {
 
         // Update global copy after methods and metadata are added
         if !component.functions.is_empty() || !component.metadata.is_empty() || !component.properties.is_empty() {
+            instructions.push(BytecodeOp::LoadLocal(component.name.clone()));
+            instructions.push(BytecodeOp::StoreGlobal(component.name.clone()));
+        }
+
+        // Compile component body statements (e.g., this.name = "xxx", this.mappings = {...})
+        // These execute as init code that modifies the component struct via `this`
+        if !component.body.is_empty() {
+            // Bind `this` to the component struct so `this.xxx = val` works
+            instructions.push(BytecodeOp::LoadLocal(component.name.clone()));
+            instructions.push(BytecodeOp::StoreLocal("this".to_string()));
+
+            for stmt in &component.body {
+                self.compile_statement(stmt, instructions);
+            }
+
+            // Copy modified `this` back to component name and global
+            instructions.push(BytecodeOp::LoadLocal("this".to_string()));
+            instructions.push(BytecodeOp::StoreLocal(component.name.clone()));
             instructions.push(BytecodeOp::LoadLocal(component.name.clone()));
             instructions.push(BytecodeOp::StoreGlobal(component.name.clone()));
         }
@@ -1192,6 +1246,7 @@ impl CfmlCompiler {
                     name: func_name.clone(),
                     params: closure.params.iter().map(|p| p.name.clone()).collect(),
                     instructions: func_instructions,
+                    source_file: None,
                 };
 
                 let func_idx = self.program.functions.len();
@@ -1208,6 +1263,7 @@ impl CfmlCompiler {
                     name: func_name.clone(),
                     params: arrow.params.iter().map(|p| p.name.clone()).collect(),
                     instructions: func_instructions,
+                    source_file: None,
                 };
 
                 let func_idx = self.program.functions.len();

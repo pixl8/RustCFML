@@ -100,12 +100,16 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 - [x] `structSome()` / `.some()` - true if any entry matches
 - [x] `structEvery()` / `.every()` - true if all entries match
 - [x] `listMap()`, `listFilter()`, `listEach()`, `listReduce()` - list higher-order functions
+- [x] `queryEach()` / `.each()`, `queryMap()` / `.map()`, `queryFilter()` / `.filter()` - query iteration
+- [x] `queryReduce()` / `.reduce()`, `querySort()` / `.sort()` - query manipulation
+- [x] `querySome()` / `.some()`, `queryEvery()` / `.every()` - query predicates
 
 ### Scopes
 - [x] Local scope (`var x`, `local.x`)
 - [x] Variables scope (`variables.x`)
 - [x] Arguments scope (`arguments.name`, `arguments[1]`)
 - [x] Parent scope inheritance (closures see parent variables)
+- [x] Parent scope write-back (closures can mutate parent variables via `closure_parent_writeback`)
 - [x] Case-insensitive variable lookup
 
 ### CFML Tag Syntax
@@ -196,7 +200,7 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 - [x] `listEach()`, `listMap()`, `listFilter()`, `listReduce()` — higher-order (VM-level closure dispatch)
 
 **Type Checking Functions (12)**
-- [x] `isNull()`, `isDefined()` (stub — needs VM bytecode), `isNumeric()`, `isBoolean()` (accepts numeric strings)
+- [x] `isNull()`, `isDefined()` (VM bytecode for literals + runtime intercept for dynamic args), `isNumeric()`, `isBoolean()` (accepts numeric strings)
 - [x] `isDate()`, `isArray()`, `isStruct()`, `isQuery()`
 - [x] `isSimpleValue()` (excludes Null), `isBinary()`, `isValid()` (see Hashing & Validation), `isCustomFunction()`
 
@@ -242,10 +246,25 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 - [x] `createObject("component", "name")` — VM-intercepted dynamic instantiation
 - [x] Component/function metadata attributes (`taffy_uri="/path"`, `taffy:mime="text/json"`)
 
+### Component Mappings
+- [x] `this.mappings` in Application.cfc — virtual prefix → physical directory
+- [x] Longest-prefix-first matching (e.g., `/taffy/core/` before `/taffy/` before `/`)
+- [x] Case-insensitive mapping lookup
+- [x] Relative mapping paths expanded relative to Application.cfc directory
+- [x] Default `/` mapping (CWD or source file's directory) as fallback
+- [x] Include path resolution via mappings (for paths starting with `/`)
+- [x] Component body `this.xxx = val` statements now compiled and executed (enables Application.cfc config)
+- **Limitation**: Mapping values must use struct literal syntax (`this.mappings = {"/taffy": "../Taffy"}`) — bracket assignment (`this.mappings["/taffy"] = "..."`) not yet supported due to nested SetIndex write-back limitation
+
 ### String Interpolation
 - [x] `#variable#` interpolation in double-quoted strings
 - [x] `#expression#` interpolation (e.g., `"2 + 2 = #2 + 2#"`)
 - [x] Single-quoted strings remain literal (no interpolation)
+
+### Spread Operator
+- [x] Array spread: `[0, ...arr, 3]`
+- [x] Struct spread: `{...defaults, key: override}`
+- [x] Function argument spread: `func(...args)`
 
 ### Elvis Operator & Null-Safe Navigation
 - [x] Elvis operator `?:` — null coalescing (`value ?: "default"`)
@@ -290,15 +309,9 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 ### Components (.cfc)
 - [ ] Interfaces (`implements`)
 
-### Closures
-- [ ] Parent scope write access (closures get copy, can't mutate parent)
-
 ### Standard Library (Remaining from Audit)
-- [ ] `isDefined()` — needs VM bytecode to do variable name lookup in scope chain
 - [ ] `evaluate()` / `iif()` — need embedded parser for runtime expression evaluation
-- [ ] `randomize()` — seed the PRNG (currently a stub)
-- [ ] `queryEach()`, `queryMap()`, `queryFilter()`, `queryReduce()` — higher-order query functions
-- [ ] `querySort()`, `querySlice()` — query manipulation
+- [ ] `querySlice()` — query sub-range
 - [ ] `arraySplice()` — remove and replace elements
 - [ ] `xmlTransform()` — needs XSLT engine
 - [ ] `xmlValidate()` — needs XML schema engine
@@ -309,7 +322,6 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 ## ❌ NOT IMPLEMENTED
 
 ### Language Features
-- [ ] Spread operator
 - [ ] Custom tag support / tag libraries
 - [ ] Layouts and views
 - [ ] ORM support
@@ -334,7 +346,6 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 
 Phases 1–6 complete. Remaining items:
 
-- [ ] REST-style URL path parsing (`/users/{id}` → `url.id`)
 - [ ] `cfthread` — async task execution
 - [ ] `cflock` — named/scoped locking for thread safety
 - [ ] `cfcache` — response caching
