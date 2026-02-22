@@ -134,6 +134,9 @@ pub enum BytecodeOp {
 
     // Source location tracking
     LineInfo(usize, usize),  // (line, column) — emitted before statements for stack traces
+
+    // Safe variable load: returns Null for undefined vars (used by Elvis, null-safe, isNull)
+    TryLoadLocal(String),
 }
 
 impl CfmlCompiler {
@@ -1007,7 +1010,16 @@ impl CfmlCompiler {
                 }
             }
             Expression::MemberAccess(access) => {
-                self.compile_expression(&access.object, instructions);
+                // For null-safe access, use TryLoadLocal for simple identifiers
+                if access.null_safe {
+                    if let Expression::Identifier(ref ident) = *access.object {
+                        instructions.push(BytecodeOp::TryLoadLocal(ident.name.clone()));
+                    } else {
+                        self.compile_expression(&access.object, instructions);
+                    }
+                } else {
+                    self.compile_expression(&access.object, instructions);
+                }
                 if access.null_safe {
                     // Null-safe: if object is null, skip property access (null stays on stack)
                     // JumpIfNotNull peeks without popping, so no Dup needed
@@ -1035,6 +1047,15 @@ impl CfmlCompiler {
                     if ident.name.to_lowercase() == "isdefined" && call.arguments.len() == 1 {
                         if let Expression::Literal(Literal { value: LiteralValue::String(ref var_name), .. }) = call.arguments[0] {
                             instructions.push(BytecodeOp::IsDefined(var_name.clone()));
+                            return;
+                        }
+                    }
+                    // Special-case: isNull(varName) -> TryLoadLocal + IsNull
+                    // Uses TryLoadLocal so undefined vars return Null (true) rather than erroring
+                    if ident.name.to_lowercase() == "isnull" && call.arguments.len() == 1 {
+                        if let Expression::Identifier(ref arg_ident) = call.arguments[0] {
+                            instructions.push(BytecodeOp::TryLoadLocal(arg_ident.name.clone()));
+                            instructions.push(BytecodeOp::IsNull);
                             return;
                         }
                     }
@@ -1081,7 +1102,16 @@ impl CfmlCompiler {
                 // dog.method(x)        → write_back = Some(("dog", None))
                 let write_back = Self::method_call_write_back(&call.object);
 
-                self.compile_expression(&call.object, instructions);
+                // For null-safe method calls, use TryLoadLocal for simple identifiers
+                if call.null_safe {
+                    if let Expression::Identifier(ref ident) = *call.object {
+                        instructions.push(BytecodeOp::TryLoadLocal(ident.name.clone()));
+                    } else {
+                        self.compile_expression(&call.object, instructions);
+                    }
+                } else {
+                    self.compile_expression(&call.object, instructions);
+                }
                 if call.null_safe {
                     let jump_idx = instructions.len();
                     instructions.push(BytecodeOp::JumpIfNotNull(0));
@@ -1299,7 +1329,12 @@ impl CfmlCompiler {
                 // Elvis operator: left ?: right
                 // Eval left, if not null use it, otherwise eval right
                 // JumpIfNotNull peeks without popping, so no Dup needed
-                self.compile_expression(&elvis.left, instructions);
+                // Use TryLoadLocal for simple identifiers (undefined vars → Null, not error)
+                if let Expression::Identifier(ref ident) = *elvis.left {
+                    instructions.push(BytecodeOp::TryLoadLocal(ident.name.clone()));
+                } else {
+                    self.compile_expression(&elvis.left, instructions);
+                }
                 let jump_idx = instructions.len();
                 instructions.push(BytecodeOp::JumpIfNotNull(0)); // placeholder
                 // Left is null, pop the null and eval right

@@ -56,7 +56,7 @@ impl CfmlEngine {
                 self.output = vm.get_output();
                 Ok(self.output.clone())
             }
-            Err(e) => Err(JsValue::from_str(&format!("Runtime Error: {}", e.message))),
+            Err(e) => Err(JsValue::from_str(&format!("{}", e))),
         }
     }
 

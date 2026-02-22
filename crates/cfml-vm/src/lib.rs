@@ -300,6 +300,43 @@ impl CfmlVirtualMachine {
                         val.clone()
                     } else {
                         // Case-insensitive local lookup
+                        if let Some(val) = locals
+                            .iter()
+                            .find(|(k, _)| k.to_lowercase() == name_lower)
+                            .map(|(_, v)| v.clone()) {
+                            val
+                        } else {
+                            return Err(self.wrap_error(CfmlError::runtime(
+                                format!("Variable '{}' is undefined", name)
+                            )));
+                        }
+                    };
+                    stack.push(val);
+                }
+                BytecodeOp::TryLoadLocal(name) => {
+                    // Safe load: returns Null for undefined vars (used by Elvis, null-safe, isNull)
+                    let name_lower = name.to_lowercase();
+                    let val = if name_lower == "local" || name_lower == "variables" {
+                        CfmlValue::Struct(locals.clone())
+                    } else if name_lower == "request" {
+                        CfmlValue::Struct(self.request_scope.clone())
+                    } else if name_lower == "application" {
+                        if let Some(ref app_scope) = self.application_scope {
+                            if let Ok(scope) = app_scope.lock() {
+                                CfmlValue::Struct(scope.clone())
+                            } else {
+                                CfmlValue::Null
+                            }
+                        } else {
+                            CfmlValue::Null
+                        }
+                    } else if name_lower == "server" {
+                        CfmlValue::Null // server scope handled by LoadLocal
+                    } else if let Some(val) = locals.get(&name) {
+                        val.clone()
+                    } else if let Some(val) = self.globals.get(&name) {
+                        val.clone()
+                    } else {
                         locals
                             .iter()
                             .find(|(k, _)| k.to_lowercase() == name_lower)
@@ -373,7 +410,9 @@ impl CfmlVirtualMachine {
                             access: cfml_common::dynamic::CfmlAccess::Public,
                         }));
                     } else {
-                        stack.push(CfmlValue::Null);
+                        return Err(self.wrap_error(CfmlError::runtime(
+                            format!("Variable '{}' is undefined", name)
+                        )));
                     }
                 }
                 BytecodeOp::StoreGlobal(name) => {
@@ -2135,7 +2174,10 @@ impl CfmlVirtualMachine {
             }
         }
 
-        Ok(CfmlValue::Null)
+        Err(self.wrap_error(CfmlError::runtime(
+            format!("Variable is not a function or function '{}' is not defined",
+                if let CfmlValue::Function(f) = func_ref { &f.name } else { "<unknown>" })
+        )))
     }
 
     /// Handle member function calls like "hello".ucase(), [1,2,3].len(), etc.
