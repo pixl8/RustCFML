@@ -1152,7 +1152,8 @@ impl CfmlVirtualMachine {
                 | "__cfheader" | "__cfcontent" | "__cflocation"
                 | "gethttprequestdata" | "__cfinvoke"
                 | "__cfsavecontent_start" | "__cfsavecontent_end" | "invoke"
-                | "getbasetemplatepath" | "gettimezone" => {
+                | "getbasetemplatepath" | "gettimezone"
+                | "isdefined" => {
                     // Will be handled at the end of this function (needs VM access)
                 }
                 _ => {
@@ -1664,6 +1665,12 @@ impl CfmlVirtualMachine {
                         return Ok(CfmlValue::String(source.clone()));
                     }
                     return Ok(CfmlValue::String(String::new()));
+                }
+                "isdefined" => {
+                    // Runtime isDefined: argument is a string variable name
+                    let var_name = args.get(0).map(|v| v.as_string()).unwrap_or_default();
+                    let defined = self.is_variable_defined(&var_name, parent_locals);
+                    return Ok(CfmlValue::Bool(defined));
                 }
                 "gettimezone" => {
                     // Return the system timezone name
