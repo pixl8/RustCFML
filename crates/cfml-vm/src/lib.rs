@@ -50,6 +50,9 @@ pub struct CfmlVirtualMachine {
     /// After a component method executes, holds the modified `this` for write-back
     /// to the caller's object variable. Set by execute_function_with_args.
     method_this_writeback: Option<CfmlValue>,
+    /// After a closure executes, holds modified parent-scope variables for write-back
+    /// to the caller's locals. Enables closures to mutate parent scope.
+    closure_parent_writeback: Option<HashMap<String, CfmlValue>>,
     /// Request scope — lives for the duration of one request
     pub request_scope: HashMap<String, CfmlValue>,
     /// Application scope — shared across requests (Arc<Mutex> for thread safety)
@@ -103,6 +106,7 @@ impl CfmlVirtualMachine {
             try_stack: Vec::new(),
             current_exception: None,
             method_this_writeback: None,
+            closure_parent_writeback: None,
             request_scope: HashMap::new(),
             application_scope: None,
             server_state: None,
@@ -504,7 +508,14 @@ impl CfmlVirtualMachine {
                         (0..arg_count).filter_map(|_| stack.pop()).collect::<Vec<_>>().into_iter().rev().collect();
 
                     if let Some(func_ref) = stack.pop() {
+                        self.closure_parent_writeback = None;
                         let result = self.call_function(&func_ref, args, &locals)?;
+                        // Merge closure write-back into caller's locals
+                        if let Some(writeback) = self.closure_parent_writeback.take() {
+                            for (k, v) in writeback {
+                                locals.insert(k, v);
+                            }
+                        }
                         stack.push(result);
                     } else {
                         stack.push(CfmlValue::Null);
@@ -515,6 +526,25 @@ impl CfmlVirtualMachine {
                     // Save modified 'this' for component method write-back
                     if let Some(this_val) = locals.get("this") {
                         self.method_this_writeback = Some(this_val.clone());
+                    }
+                    // Closure parent scope write-back on early return
+                    if let Some(parent) = parent_scope {
+                        let mut writeback = HashMap::new();
+                        for (k, v) in &locals {
+                            if k == "arguments" || func.params.contains(k) {
+                                continue;
+                            }
+                            if let Some(parent_val) = parent.get(k) {
+                                if format!("{:?}", v) != format!("{:?}", parent_val) {
+                                    writeback.insert(k.clone(), v.clone());
+                                }
+                            } else {
+                                writeback.insert(k.clone(), v.clone());
+                            }
+                        }
+                        if !writeback.is_empty() {
+                            self.closure_parent_writeback = Some(writeback);
+                        }
                     }
                     return Ok(stack.pop().unwrap_or(CfmlValue::Null));
                 }
@@ -1003,6 +1033,48 @@ impl CfmlVirtualMachine {
                         self.output_buffer.push('\n');
                     }
                 }
+                BytecodeOp::IsDefined(var_name) => {
+                    let defined = self.is_variable_defined(&var_name, &locals);
+                    stack.push(CfmlValue::Bool(defined));
+                }
+
+                BytecodeOp::ConcatArrays => {
+                    let right = stack.pop().unwrap_or(CfmlValue::Array(Vec::new()));
+                    let left = stack.pop().unwrap_or(CfmlValue::Array(Vec::new()));
+                    if let (CfmlValue::Array(mut a), CfmlValue::Array(b)) = (left, right) {
+                        a.extend(b);
+                        stack.push(CfmlValue::Array(a));
+                    } else {
+                        stack.push(CfmlValue::Array(Vec::new()));
+                    }
+                }
+
+                BytecodeOp::MergeStructs => {
+                    let right = stack.pop().unwrap_or(CfmlValue::Struct(HashMap::new()));
+                    let left = stack.pop().unwrap_or(CfmlValue::Struct(HashMap::new()));
+                    if let (CfmlValue::Struct(mut a), CfmlValue::Struct(b)) = (left, right) {
+                        for (k, v) in b {
+                            a.insert(k, v);
+                        }
+                        stack.push(CfmlValue::Struct(a));
+                    } else {
+                        stack.push(CfmlValue::Struct(HashMap::new()));
+                    }
+                }
+
+                BytecodeOp::CallSpread => {
+                    // Stack: [func_ref, args_array]
+                    let args_val = stack.pop().unwrap_or(CfmlValue::Array(Vec::new()));
+                    let func_ref = stack.pop().unwrap_or(CfmlValue::Null);
+                    let args = if let CfmlValue::Array(a) = args_val {
+                        a
+                    } else {
+                        vec![args_val]
+                    };
+                    let result = self.call_function(&func_ref, args, &locals)?;
+                    stack.push(result);
+                }
+
                 BytecodeOp::Halt => break,
             }
         }
@@ -1011,6 +1083,31 @@ impl CfmlVirtualMachine {
         if let Some(this_val) = locals.get("this") {
             self.method_this_writeback = Some(this_val.clone());
         }
+
+        // Closure parent scope write-back: compute diff of parent-scope vars
+        if let Some(parent) = parent_scope {
+            let mut writeback = HashMap::new();
+            for (k, v) in &locals {
+                // Skip function params and arguments scope
+                if k == "arguments" || func.params.contains(k) {
+                    continue;
+                }
+                // Only write back vars that existed in parent scope OR are new
+                if let Some(parent_val) = parent.get(k) {
+                    // Only include if changed
+                    if format!("{:?}", v) != format!("{:?}", parent_val) {
+                        writeback.insert(k.clone(), v.clone());
+                    }
+                } else {
+                    // New variable created in closure - propagate to parent
+                    writeback.insert(k.clone(), v.clone());
+                }
+            }
+            if !writeback.is_empty() {
+                self.closure_parent_writeback = Some(writeback);
+            }
+        }
+
         Ok(stack.pop().unwrap_or(CfmlValue::Null))
     }
 
@@ -1047,6 +1144,8 @@ impl CfmlVirtualMachine {
                 | "structeach" | "structmap" | "structfilter"
                 | "structreduce" | "structsome" | "structevery"
                 | "listeach" | "listmap" | "listfilter" | "listreduce"
+                | "queryeach" | "querymap" | "queryfilter" | "queryreduce"
+                | "querysort" | "querysome" | "queryevery"
                 | "createobject"
                 | "getcurrenttemplatepath"
                 | "getcomponentmetadata"
@@ -1112,11 +1211,18 @@ impl CfmlVirtualMachine {
                         if let CfmlValue::Array(arr) = arr_val {
                             let mut result = Vec::new();
                             let callback = callback.clone();
+                            let mut pl = parent_locals.clone();
                             for (i, item) in arr.iter().enumerate() {
                                 let cb_args = vec![item.clone(), CfmlValue::Int((i + 1) as i64), arr_val.clone()];
-                                let mapped = self.call_function(&callback, cb_args, parent_locals)?;
+                                self.closure_parent_writeback = None;
+                                let mapped = self.call_function(&callback, cb_args, &pl)?;
+                                if let Some(wb) = self.closure_parent_writeback.take() {
+                                    for (k, v) in &wb { pl.insert(k.clone(), v.clone()); }
+                                    self.closure_parent_writeback = Some(wb);
+                                }
                                 result.push(mapped);
                             }
+                            self.set_ho_final_writeback(&pl, parent_locals);
                             return Ok(CfmlValue::Array(result));
                         }
                     }
@@ -1127,13 +1233,20 @@ impl CfmlVirtualMachine {
                         if let CfmlValue::Array(arr) = arr_val {
                             let mut result = Vec::new();
                             let callback = callback.clone();
+                            let mut pl = parent_locals.clone();
                             for (i, item) in arr.iter().enumerate() {
                                 let cb_args = vec![item.clone(), CfmlValue::Int((i + 1) as i64), arr_val.clone()];
-                                let keep = self.call_function(&callback, cb_args, parent_locals)?;
+                                self.closure_parent_writeback = None;
+                                let keep = self.call_function(&callback, cb_args, &pl)?;
+                                if let Some(wb) = self.closure_parent_writeback.take() {
+                                    for (k, v) in &wb { pl.insert(k.clone(), v.clone()); }
+                                    self.closure_parent_writeback = Some(wb);
+                                }
                                 if keep.is_true() {
                                     result.push(item.clone());
                                 }
                             }
+                            self.set_ho_final_writeback(&pl, parent_locals);
                             return Ok(CfmlValue::Array(result));
                         }
                     }
@@ -1144,10 +1257,17 @@ impl CfmlVirtualMachine {
                         if let CfmlValue::Array(arr) = arr_val {
                             let mut acc = args.get(2).cloned().unwrap_or(CfmlValue::Null);
                             let callback = callback.clone();
+                            let mut pl = parent_locals.clone();
                             for (i, item) in arr.iter().enumerate() {
                                 let cb_args = vec![acc.clone(), item.clone(), CfmlValue::Int((i + 1) as i64), arr_val.clone()];
-                                acc = self.call_function(&callback, cb_args, parent_locals)?;
+                                self.closure_parent_writeback = None;
+                                acc = self.call_function(&callback, cb_args, &pl)?;
+                                if let Some(wb) = self.closure_parent_writeback.take() {
+                                    for (k, v) in &wb { pl.insert(k.clone(), v.clone()); }
+                                    self.closure_parent_writeback = Some(wb);
+                                }
                             }
+                            self.set_ho_final_writeback(&pl, parent_locals);
                             return Ok(acc);
                         }
                     }
@@ -1157,10 +1277,17 @@ impl CfmlVirtualMachine {
                     if let (Some(arr_val), Some(callback)) = (args.get(0), args.get(1)) {
                         if let CfmlValue::Array(arr) = arr_val {
                             let callback = callback.clone();
+                            let mut pl = parent_locals.clone();
                             for (i, item) in arr.iter().enumerate() {
                                 let cb_args = vec![item.clone(), CfmlValue::Int((i + 1) as i64), arr_val.clone()];
-                                self.call_function(&callback, cb_args, parent_locals)?;
+                                self.closure_parent_writeback = None;
+                                self.call_function(&callback, cb_args, &pl)?;
+                                if let Some(wb) = self.closure_parent_writeback.take() {
+                                    for (k, v) in &wb { pl.insert(k.clone(), v.clone()); }
+                                    self.closure_parent_writeback = Some(wb);
+                                }
                             }
+                            self.set_ho_final_writeback(&pl, parent_locals);
                         }
                     }
                     return Ok(CfmlValue::Null);
@@ -1169,10 +1296,17 @@ impl CfmlVirtualMachine {
                     if let (Some(struct_val), Some(callback)) = (args.get(0), args.get(1)) {
                         if let CfmlValue::Struct(s) = struct_val {
                             let callback = callback.clone();
+                            let mut pl = parent_locals.clone();
                             for (k, v) in s {
                                 let cb_args = vec![CfmlValue::String(k.clone()), v.clone(), struct_val.clone()];
-                                self.call_function(&callback, cb_args, parent_locals)?;
+                                self.closure_parent_writeback = None;
+                                self.call_function(&callback, cb_args, &pl)?;
+                                if let Some(wb) = self.closure_parent_writeback.take() {
+                                    for (k, v) in &wb { pl.insert(k.clone(), v.clone()); }
+                                    self.closure_parent_writeback = Some(wb);
+                                }
                             }
+                            self.set_ho_final_writeback(&pl, parent_locals);
                         }
                     }
                     return Ok(CfmlValue::Null);
@@ -1182,11 +1316,18 @@ impl CfmlVirtualMachine {
                         if let CfmlValue::Struct(s) = struct_val {
                             let mut result = HashMap::new();
                             let callback = callback.clone();
+                            let mut pl = parent_locals.clone();
                             for (k, v) in s {
                                 let cb_args = vec![CfmlValue::String(k.clone()), v.clone(), struct_val.clone()];
-                                let mapped = self.call_function(&callback, cb_args, parent_locals)?;
+                                self.closure_parent_writeback = None;
+                                let mapped = self.call_function(&callback, cb_args, &pl)?;
+                                if let Some(wb) = self.closure_parent_writeback.take() {
+                                    for (k2, v2) in &wb { pl.insert(k2.clone(), v2.clone()); }
+                                    self.closure_parent_writeback = Some(wb);
+                                }
                                 result.insert(k.clone(), mapped);
                             }
+                            self.set_ho_final_writeback(&pl, parent_locals);
                             return Ok(CfmlValue::Struct(result));
                         }
                     }
@@ -1197,13 +1338,20 @@ impl CfmlVirtualMachine {
                         if let CfmlValue::Struct(s) = struct_val {
                             let mut result = HashMap::new();
                             let callback = callback.clone();
+                            let mut pl = parent_locals.clone();
                             for (k, v) in s {
                                 let cb_args = vec![CfmlValue::String(k.clone()), v.clone(), struct_val.clone()];
-                                let keep = self.call_function(&callback, cb_args, parent_locals)?;
+                                self.closure_parent_writeback = None;
+                                let keep = self.call_function(&callback, cb_args, &pl)?;
+                                if let Some(wb) = self.closure_parent_writeback.take() {
+                                    for (k2, v2) in &wb { pl.insert(k2.clone(), v2.clone()); }
+                                    self.closure_parent_writeback = Some(wb);
+                                }
                                 if keep.is_true() {
                                     result.insert(k.clone(), v.clone());
                                 }
                             }
+                            self.set_ho_final_writeback(&pl, parent_locals);
                             return Ok(CfmlValue::Struct(result));
                         }
                     }
@@ -1350,6 +1498,140 @@ impl CfmlVirtualMachine {
                         return Ok(acc);
                     }
                     return Ok(CfmlValue::Null);
+                }
+                "queryeach" => {
+                    if let (Some(q_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        if let CfmlValue::Query(q) = q_val {
+                            let callback = callback.clone();
+                            for (i, row) in q.rows.iter().enumerate() {
+                                let row_struct = CfmlValue::Struct(row.clone());
+                                let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), q_val.clone()];
+                                self.call_function(&callback, cb_args, parent_locals)?;
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "querymap" => {
+                    if let (Some(q_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        if let CfmlValue::Query(q) = q_val {
+                            let callback = callback.clone();
+                            let mut new_rows = Vec::new();
+                            for (i, row) in q.rows.iter().enumerate() {
+                                let row_struct = CfmlValue::Struct(row.clone());
+                                let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), q_val.clone()];
+                                let mapped = self.call_function(&callback, cb_args, parent_locals)?;
+                                if let CfmlValue::Struct(s) = mapped {
+                                    new_rows.push(s);
+                                } else {
+                                    new_rows.push(row.clone());
+                                }
+                            }
+                            let mut result = q.clone();
+                            result.rows = new_rows;
+                            return Ok(CfmlValue::Query(result));
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "queryfilter" => {
+                    if let (Some(q_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        if let CfmlValue::Query(q) = q_val {
+                            let callback = callback.clone();
+                            let mut new_rows = Vec::new();
+                            for (i, row) in q.rows.iter().enumerate() {
+                                let row_struct = CfmlValue::Struct(row.clone());
+                                let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), q_val.clone()];
+                                let keep = self.call_function(&callback, cb_args, parent_locals)?;
+                                if keep.is_true() {
+                                    new_rows.push(row.clone());
+                                }
+                            }
+                            let mut result = q.clone();
+                            result.rows = new_rows;
+                            return Ok(CfmlValue::Query(result));
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "queryreduce" => {
+                    if let (Some(q_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        if let CfmlValue::Query(q) = q_val {
+                            let mut acc = args.get(2).cloned().unwrap_or(CfmlValue::Null);
+                            let callback = callback.clone();
+                            for (i, row) in q.rows.iter().enumerate() {
+                                let row_struct = CfmlValue::Struct(row.clone());
+                                let cb_args = vec![acc.clone(), row_struct, CfmlValue::Int((i + 1) as i64), q_val.clone()];
+                                acc = self.call_function(&callback, cb_args, parent_locals)?;
+                            }
+                            return Ok(acc);
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "querysort" => {
+                    if let (Some(q_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        if let CfmlValue::Query(q) = q_val {
+                            let callback = callback.clone();
+                            let mut rows = q.rows.clone();
+                            // Bubble sort (closure calls can't be used with sort_by)
+                            let n = rows.len();
+                            for i in 0..n {
+                                for j in 0..n - 1 - i {
+                                    let a = CfmlValue::Struct(rows[j].clone());
+                                    let b = CfmlValue::Struct(rows[j + 1].clone());
+                                    let cb_args = vec![a, b];
+                                    let cmp = self.call_function(&callback, cb_args, parent_locals)?;
+                                    let cmp_val = match &cmp {
+                                        CfmlValue::Int(n) => *n,
+                                        CfmlValue::Double(d) => *d as i64,
+                                        _ => 0,
+                                    };
+                                    if cmp_val > 0 {
+                                        rows.swap(j, j + 1);
+                                    }
+                                }
+                            }
+                            let mut result = q.clone();
+                            result.rows = rows;
+                            return Ok(CfmlValue::Query(result));
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "querysome" => {
+                    if let (Some(q_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        if let CfmlValue::Query(q) = q_val {
+                            let callback = callback.clone();
+                            for (i, row) in q.rows.iter().enumerate() {
+                                let row_struct = CfmlValue::Struct(row.clone());
+                                let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), q_val.clone()];
+                                let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                if result.is_true() {
+                                    return Ok(CfmlValue::Bool(true));
+                                }
+                            }
+                            return Ok(CfmlValue::Bool(false));
+                        }
+                    }
+                    return Ok(CfmlValue::Bool(false));
+                }
+                "queryevery" => {
+                    if let (Some(q_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        if let CfmlValue::Query(q) = q_val {
+                            let callback = callback.clone();
+                            for (i, row) in q.rows.iter().enumerate() {
+                                let row_struct = CfmlValue::Struct(row.clone());
+                                let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), q_val.clone()];
+                                let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                if !result.is_true() {
+                                    return Ok(CfmlValue::Bool(false));
+                                }
+                            }
+                            return Ok(CfmlValue::Bool(true));
+                        }
+                    }
+                    return Ok(CfmlValue::Bool(true));
                 }
                 "getcurrenttemplatepath" => {
                     if let Some(ref source) = self.source_file {
@@ -2061,6 +2343,125 @@ impl CfmlVirtualMachine {
                 "tojson" | "serializejson" => Some("serializeJSON"),
                 _ => None,
             },
+            CfmlValue::Query(q) => match method_lower.as_str() {
+                "recordcount" | "len" | "size" => {
+                    return Ok(CfmlValue::Int(q.rows.len() as i64));
+                }
+                "columnlist" => {
+                    return Ok(CfmlValue::String(q.columns.join(",")));
+                }
+                "addrow" => Some("queryAddRow"),
+                "getrow" => Some("queryGetRow"),
+                "each" => {
+                    if let Some(callback) = extra_args.first().cloned() {
+                        for (i, row) in q.rows.iter().enumerate() {
+                            let row_struct = CfmlValue::Struct(row.clone());
+                            let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), object.clone()];
+                            self.call_function(&callback, cb_args, &HashMap::new())?;
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "map" => {
+                    if let Some(callback) = extra_args.first().cloned() {
+                        let mut new_rows = Vec::new();
+                        for (i, row) in q.rows.iter().enumerate() {
+                            let row_struct = CfmlValue::Struct(row.clone());
+                            let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), object.clone()];
+                            let mapped = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let CfmlValue::Struct(s) = mapped {
+                                new_rows.push(s);
+                            } else {
+                                new_rows.push(row.clone());
+                            }
+                        }
+                        let mut result = q.clone();
+                        result.rows = new_rows;
+                        return Ok(CfmlValue::Query(result));
+                    }
+                    return Ok(object.clone());
+                }
+                "filter" => {
+                    if let Some(callback) = extra_args.first().cloned() {
+                        let mut new_rows = Vec::new();
+                        for (i, row) in q.rows.iter().enumerate() {
+                            let row_struct = CfmlValue::Struct(row.clone());
+                            let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), object.clone()];
+                            let keep = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if keep.is_true() {
+                                new_rows.push(row.clone());
+                            }
+                        }
+                        let mut result = q.clone();
+                        result.rows = new_rows;
+                        return Ok(CfmlValue::Query(result));
+                    }
+                    return Ok(object.clone());
+                }
+                "reduce" => {
+                    if let Some(callback) = extra_args.first().cloned() {
+                        let mut acc = extra_args.get(1).cloned().unwrap_or(CfmlValue::Null);
+                        for (i, row) in q.rows.iter().enumerate() {
+                            let row_struct = CfmlValue::Struct(row.clone());
+                            let cb_args = vec![acc.clone(), row_struct, CfmlValue::Int((i + 1) as i64), object.clone()];
+                            acc = self.call_function(&callback, cb_args, &HashMap::new())?;
+                        }
+                        return Ok(acc);
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "sort" => {
+                    if let Some(callback) = extra_args.first().cloned() {
+                        let mut rows = q.rows.clone();
+                        let n = rows.len();
+                        for i in 0..n {
+                            for j in 0..n.saturating_sub(1 + i) {
+                                let a = CfmlValue::Struct(rows[j].clone());
+                                let b = CfmlValue::Struct(rows[j + 1].clone());
+                                let cb_args = vec![a, b];
+                                let cmp = self.call_function(&callback, cb_args, &HashMap::new())?;
+                                let cmp_val = match &cmp {
+                                    CfmlValue::Int(n) => *n,
+                                    CfmlValue::Double(d) => *d as i64,
+                                    _ => 0,
+                                };
+                                if cmp_val > 0 {
+                                    rows.swap(j, j + 1);
+                                }
+                            }
+                        }
+                        let mut result = q.clone();
+                        result.rows = rows;
+                        return Ok(CfmlValue::Query(result));
+                    }
+                    return Ok(object.clone());
+                }
+                "some" => {
+                    if let Some(callback) = extra_args.first().cloned() {
+                        for (i, row) in q.rows.iter().enumerate() {
+                            let row_struct = CfmlValue::Struct(row.clone());
+                            let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), object.clone()];
+                            let result = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if result.is_true() { return Ok(CfmlValue::Bool(true)); }
+                        }
+                        return Ok(CfmlValue::Bool(false));
+                    }
+                    return Ok(CfmlValue::Bool(false));
+                }
+                "every" => {
+                    if let Some(callback) = extra_args.first().cloned() {
+                        for (i, row) in q.rows.iter().enumerate() {
+                            let row_struct = CfmlValue::Struct(row.clone());
+                            let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), object.clone()];
+                            let result = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if !result.is_true() { return Ok(CfmlValue::Bool(false)); }
+                        }
+                        return Ok(CfmlValue::Bool(true));
+                    }
+                    return Ok(CfmlValue::Bool(true));
+                }
+                _ => None,
+            },
             CfmlValue::Int(_) | CfmlValue::Double(_) => match method_lower.as_str() {
                 "tostring" => {
                     return Ok(CfmlValue::String(object.as_string()));
@@ -2167,6 +2568,107 @@ impl CfmlVirtualMachine {
         }
 
         Ok(CfmlValue::Null)
+    }
+
+    /// Check if a variable name (possibly dotted like "request.data.name") is defined
+    /// by walking the scope chain: locals → request → application → server → globals
+    fn is_variable_defined(&self, var_name: &str, locals: &HashMap<String, CfmlValue>) -> bool {
+        let parts: Vec<&str> = var_name.split('.').collect();
+        if parts.is_empty() {
+            return false;
+        }
+
+        let root = parts[0].to_lowercase();
+
+        // Try to resolve the root variable from scope chain
+        let root_val = if root == "local" || root == "variables" {
+            Some(CfmlValue::Struct(locals.clone()))
+        } else if root == "request" {
+            Some(CfmlValue::Struct(self.request_scope.clone()))
+        } else if root == "application" {
+            if let Some(ref app_scope) = self.application_scope {
+                if let Ok(scope) = app_scope.lock() {
+                    Some(CfmlValue::Struct(scope.clone()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else if root == "server" {
+            Some(CfmlValue::Struct(HashMap::new())) // server scope always exists
+        } else {
+            // Check locals (exact then CI)
+            locals.get(parts[0]).cloned()
+                .or_else(|| locals.iter()
+                    .find(|(k, _)| k.to_lowercase() == root)
+                    .map(|(_, v)| v.clone()))
+                // Check request scope
+                .or_else(|| self.request_scope.iter()
+                    .find(|(k, _)| k.to_lowercase() == root)
+                    .map(|(_, v)| v.clone()))
+                // Check globals
+                .or_else(|| self.globals.get(parts[0]).cloned())
+                .or_else(|| self.globals.iter()
+                    .find(|(k, _)| k.to_lowercase() == root)
+                    .map(|(_, v)| v.clone()))
+        };
+
+        let root_val = match root_val {
+            Some(v) => v,
+            None => return false,
+        };
+
+        if parts.len() == 1 {
+            return true;
+        }
+
+        // Walk the dotted path segments
+        let mut current = root_val;
+        // For scope-named roots (request, local, etc.), start resolving from parts[1]
+        // For regular vars, start from parts[1] too
+        for &segment in &parts[1..] {
+            let seg_lower = segment.to_lowercase();
+            match &current {
+                CfmlValue::Struct(s) => {
+                    if let Some(v) = s.iter()
+                        .find(|(k, _)| k.to_lowercase() == seg_lower)
+                        .map(|(_, v)| v.clone())
+                    {
+                        current = v;
+                    } else {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    /// Compute final closure write-back after a higher-order function loop.
+    /// Compares modified locals against original parent_locals and sets closure_parent_writeback.
+    fn set_ho_final_writeback(
+        &mut self,
+        modified: &HashMap<String, CfmlValue>,
+        original: &HashMap<String, CfmlValue>,
+    ) {
+        let mut final_wb = HashMap::new();
+        for (k, v) in modified {
+            match original.get(k) {
+                Some(pv) => {
+                    if format!("{:?}", v) != format!("{:?}", pv) {
+                        final_wb.insert(k.clone(), v.clone());
+                    }
+                }
+                None => {
+                    final_wb.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        if !final_wb.is_empty() {
+            self.closure_parent_writeback = Some(final_wb);
+        }
     }
 
     /// Resolve a component template by name: tries locals, globals (exact + CI),

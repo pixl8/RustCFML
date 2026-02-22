@@ -94,7 +94,15 @@ impl Lexer {
             '[' => self.add_token(Token::LBracket),
             ']' => self.add_token(Token::RBracket),
             ',' => self.add_token(Token::Comma),
-            '.' => self.add_token(Token::Dot),
+            '.' => {
+                if self.peek(0) == '.' && self.peek(1) == '.' {
+                    self.advance(); // consume second dot
+                    self.advance(); // consume third dot
+                    self.add_token(Token::DotDotDot);
+                } else {
+                    self.add_token(Token::Dot);
+                }
+            }
             ';' => self.add_token(Token::Semicolon),
             ':' => self.add_token(Token::Colon),
             '^' => self.add_token(Token::Caret),

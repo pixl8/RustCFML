@@ -130,6 +130,9 @@ pub enum Token {
     Param,    // param keyword
     Required, // required keyword
 
+    // Spread operator
+    DotDotDot,  // ... (spread)
+
     // String interpolation
     InterpolatedStringStart,       // Beginning of interpolated string
     InterpolatedStringEnd,         // End of interpolated string

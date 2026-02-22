@@ -294,6 +294,7 @@ pub enum Expression {
     PostfixOp(Box<PostfixOp>),
     StringInterpolation(StringInterpolation),
     Elvis(Box<Elvis>),
+    Spread(Box<Expression>),
     Empty,
 }
 

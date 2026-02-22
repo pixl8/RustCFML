@@ -1446,7 +1446,12 @@ impl Parser {
         }
 
         loop {
-            args.push(self.parse_expression()?);
+            if self.match_token(&Token::DotDotDot) {
+                let expr = self.parse_expression()?;
+                args.push(Expression::Spread(Box::new(expr)));
+            } else {
+                args.push(self.parse_expression()?);
+            }
             if !self.match_token(&Token::Comma) {
                 break;
             }
@@ -1614,7 +1619,12 @@ impl Parser {
                 if self.check(&Token::RBracket) {
                     break; // trailing comma
                 }
-                elements.push(self.parse_expression()?);
+                if self.match_token(&Token::DotDotDot) {
+                    let expr = self.parse_expression()?;
+                    elements.push(Expression::Spread(Box::new(expr)));
+                } else {
+                    elements.push(self.parse_expression()?);
+                }
                 if !self.match_token(&Token::Comma) {
                     break;
                 }
@@ -1637,15 +1647,22 @@ impl Parser {
                 if self.check(&Token::RBrace) {
                     break; // trailing comma
                 }
-                let key = self.parse_expression()?;
-
-                // Support both : and = for struct initialization
-                if self.match_token(&Token::Colon) || self.match_token(&Token::Equal) {
-                    let value = self.parse_expression()?;
-                    pairs.push((key, value));
+                if self.match_token(&Token::DotDotDot) {
+                    // Spread: ...expr merges another struct
+                    let expr = self.parse_expression()?;
+                    // Use a sentinel key to mark this as a spread entry
+                    pairs.push((Expression::Spread(Box::new(expr.clone())), expr));
                 } else {
-                    // Shorthand {x} means {x: x}
-                    pairs.push((key.clone(), key));
+                    let key = self.parse_expression()?;
+
+                    // Support both : and = for struct initialization
+                    if self.match_token(&Token::Colon) || self.match_token(&Token::Equal) {
+                        let value = self.parse_expression()?;
+                        pairs.push((key, value));
+                    } else {
+                        // Shorthand {x} means {x: x}
+                        pairs.push((key.clone(), key));
+                    }
                 }
 
                 if !self.match_token(&Token::Comma) {

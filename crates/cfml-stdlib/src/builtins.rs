@@ -298,6 +298,14 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("queryColumnList".into(), fn_query_column_list as BuiltinFunction);
     f.insert("queryDeleteRow".into(), fn_query_delete_row as BuiltinFunction);
     f.insert("queryDeleteColumn".into(), fn_query_delete_column as BuiltinFunction);
+    // Higher-order query functions (VM-intercepted stubs)
+    f.insert("queryEach".into(), fn_query_ho_stub as BuiltinFunction);
+    f.insert("queryMap".into(), fn_query_ho_stub as BuiltinFunction);
+    f.insert("queryFilter".into(), fn_query_ho_stub as BuiltinFunction);
+    f.insert("queryReduce".into(), fn_query_ho_stub as BuiltinFunction);
+    f.insert("querySort".into(), fn_query_ho_stub as BuiltinFunction);
+    f.insert("querySome".into(), fn_query_ho_stub as BuiltinFunction);
+    f.insert("queryEvery".into(), fn_query_ho_stub as BuiltinFunction);
 
     // ---- Utility functions ----
     f.insert("evaluate".into(), fn_evaluate);
@@ -458,15 +466,39 @@ fn cfml_list_split_keep_empty<'a>(list: &'a str, delimiters: &str) -> Vec<&'a st
     list.split(|c: char| delimiters.contains(c)).collect()
 }
 
-fn pseudo_random() -> f64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    // Simple LCG
-    let x = (seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)) as u64;
-    (x >> 11) as f64 / (1u64 << 53) as f64
+// Thread-local xorshift64 PRNG state for deterministic randomize()/rand() support
+thread_local! {
+    static PRNG_STATE: std::cell::Cell<u64> = std::cell::Cell::new(0);
+    static PRNG_SEEDED: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
+fn xorshift64(state: u64) -> u64 {
+    let mut x = state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    x
+}
+
+fn cfml_random() -> f64 {
+    PRNG_SEEDED.with(|seeded| {
+        if seeded.get() {
+            PRNG_STATE.with(|state| {
+                let next = xorshift64(state.get());
+                state.set(next);
+                (next >> 11) as f64 / (1u64 << 53) as f64
+            })
+        } else {
+            // Fallback: time-based pseudo-random (non-deterministic)
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let seed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let x = (seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)) as u64;
+            (x >> 11) as f64 / (1u64 << 53) as f64
+        }
+    })
 }
 
 // ===============================================
@@ -2241,22 +2273,24 @@ fn fn_round(args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn fn_rand(_args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(CfmlValue::Double(pseudo_random()))
+    Ok(CfmlValue::Double(cfml_random()))
 }
 
 fn fn_rand_range(args: Vec<CfmlValue>) -> CfmlResult {
     let min = get_int(&args, 0);
     let max = get_int(&args, 1);
     let range = (max - min + 1) as f64;
-    let result = min + (pseudo_random() * range).floor() as i64;
+    let result = min + (cfml_random() * range).floor() as i64;
     Ok(CfmlValue::Int(result.min(max)))
 }
 
 fn fn_randomize(args: Vec<CfmlValue>) -> CfmlResult {
     let seed = get_float(&args, 0);
-    // Use the seed to generate a deterministic value
-    let val = ((seed * 1103515245.0 + 12345.0) / 65536.0) % 32768.0;
-    Ok(CfmlValue::Double((val.abs() / 32768.0).fract()))
+    // Seed the thread-local PRNG for deterministic rand() output
+    let seed_bits = (seed.to_bits()).max(1); // ensure non-zero
+    PRNG_STATE.with(|state| state.set(seed_bits));
+    PRNG_SEEDED.with(|seeded| seeded.set(true));
+    Ok(CfmlValue::Double(0.0))
 }
 
 fn fn_max(args: Vec<CfmlValue>) -> CfmlResult {
@@ -3535,6 +3569,11 @@ fn fn_query_delete_column(args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::Null)
 }
 
+fn fn_query_ho_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    // Stub — VM intercepts these before reaching here
+    Ok(CfmlValue::Null)
+}
+
 // ===============================================
 // UTILITY FUNCTIONS
 // ===============================================
@@ -3737,8 +3776,8 @@ fn fn_create_uuid(_args: Vec<CfmlValue>) -> CfmlResult {
     use std::time::{SystemTime, UNIX_EPOCH};
     let time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let nanos = time.as_nanos() as u64;
-    let random_bits = ((pseudo_random() * u32::MAX as f64) as u64) << 32
-                    | (pseudo_random() * u32::MAX as f64) as u64;
+    let random_bits = ((cfml_random() * u32::MAX as f64) as u64) << 32
+                    | (cfml_random() * u32::MAX as f64) as u64;
     let mixed = nanos ^ random_bits;
     // CFML UUID format: 8-4-4-16
     Ok(CfmlValue::String(format!(
@@ -3754,8 +3793,8 @@ fn fn_create_guid(_args: Vec<CfmlValue>) -> CfmlResult {
     use std::time::{SystemTime, UNIX_EPOCH};
     let time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let nanos = time.as_nanos() as u64;
-    let random_bits = ((pseudo_random() * u32::MAX as f64) as u64) << 32
-                    | (pseudo_random() * u32::MAX as f64) as u64;
+    let random_bits = ((cfml_random() * u32::MAX as f64) as u64) << 32
+                    | (cfml_random() * u32::MAX as f64) as u64;
     let mixed = nanos ^ random_bits;
     let extra = nanos.wrapping_mul(6364136223846793005).wrapping_add(random_bits);
     // Standard GUID format: 8-4-4-4-12

@@ -122,6 +122,14 @@ pub enum BytecodeOp {
     // Output
     Print,
     Halt,
+
+    // Variable existence check
+    IsDefined(String),
+
+    // Spread operator support
+    ConcatArrays,
+    MergeStructs,
+    CallSpread,
 }
 
 impl CfmlCompiler {
@@ -968,17 +976,50 @@ impl CfmlCompiler {
                 instructions.push(BytecodeOp::GetIndex);
             }
             Expression::FunctionCall(call) => {
-                // Push function reference first
+                // Special-case: isDefined("varName") -> IsDefined bytecode
                 if let Expression::Identifier(ident) = &*call.name {
-                    instructions.push(BytecodeOp::LoadGlobal(ident.name.clone()));
+                    if ident.name.to_lowercase() == "isdefined" && call.arguments.len() == 1 {
+                        if let Expression::Literal(Literal { value: LiteralValue::String(ref var_name), .. }) = call.arguments[0] {
+                            instructions.push(BytecodeOp::IsDefined(var_name.clone()));
+                            return;
+                        }
+                    }
+                }
+
+                let has_spread = call.arguments.iter().any(|a| matches!(a, Expression::Spread(_)));
+                if has_spread {
+                    // Push function reference first
+                    if let Expression::Identifier(ident) = &*call.name {
+                        instructions.push(BytecodeOp::LoadGlobal(ident.name.clone()));
+                    } else {
+                        self.compile_expression(&call.name, instructions);
+                    }
+                    // Build args array using concat pattern
+                    instructions.push(BytecodeOp::BuildArray(0));
+                    for arg in &call.arguments {
+                        if let Expression::Spread(inner) = arg {
+                            self.compile_expression(inner, instructions);
+                            instructions.push(BytecodeOp::ConcatArrays);
+                        } else {
+                            self.compile_expression(arg, instructions);
+                            instructions.push(BytecodeOp::BuildArray(1));
+                            instructions.push(BytecodeOp::ConcatArrays);
+                        }
+                    }
+                    instructions.push(BytecodeOp::CallSpread);
                 } else {
-                    self.compile_expression(&call.name, instructions);
+                    // Push function reference first
+                    if let Expression::Identifier(ident) = &*call.name {
+                        instructions.push(BytecodeOp::LoadGlobal(ident.name.clone()));
+                    } else {
+                        self.compile_expression(&call.name, instructions);
+                    }
+                    // Push arguments
+                    for arg in &call.arguments {
+                        self.compile_expression(arg, instructions);
+                    }
+                    instructions.push(BytecodeOp::Call(call.arguments.len()));
                 }
-                // Push arguments
-                for arg in &call.arguments {
-                    self.compile_expression(arg, instructions);
-                }
-                instructions.push(BytecodeOp::Call(call.arguments.len()));
             }
             Expression::MethodCall(call) => {
                 // Determine write-back target from the AST.
@@ -1014,26 +1055,68 @@ impl CfmlCompiler {
                 }
             }
             Expression::Array(arr) => {
-                for elem in &arr.elements {
-                    self.compile_expression(elem, instructions);
-                }
-                instructions.push(BytecodeOp::BuildArray(arr.elements.len()));
-            }
-            Expression::Struct(st) => {
-                for (key, value) in &st.pairs {
-                    // Struct literal keys: identifiers should be treated as string keys,
-                    // not variable lookups (e.g., {name: "Alex"} -> key is string "name")
-                    match key {
-                        Expression::Identifier(ident) => {
-                            instructions.push(BytecodeOp::String(ident.name.clone()));
-                        }
-                        _ => {
-                            self.compile_expression(key, instructions);
+                let has_spread = arr.elements.iter().any(|e| matches!(e, Expression::Spread(_)));
+                if has_spread {
+                    // Start with empty array
+                    instructions.push(BytecodeOp::BuildArray(0));
+                    for elem in &arr.elements {
+                        if let Expression::Spread(inner) = elem {
+                            // Compile spread expr (should be array), concat
+                            self.compile_expression(inner, instructions);
+                            instructions.push(BytecodeOp::ConcatArrays);
+                        } else {
+                            // Compile single element, wrap in 1-element array, concat
+                            self.compile_expression(elem, instructions);
+                            instructions.push(BytecodeOp::BuildArray(1));
+                            instructions.push(BytecodeOp::ConcatArrays);
                         }
                     }
-                    self.compile_expression(value, instructions);
+                } else {
+                    for elem in &arr.elements {
+                        self.compile_expression(elem, instructions);
+                    }
+                    instructions.push(BytecodeOp::BuildArray(arr.elements.len()));
                 }
-                instructions.push(BytecodeOp::BuildStruct(st.pairs.len()));
+            }
+            Expression::Struct(st) => {
+                let has_spread = st.pairs.iter().any(|(k, _)| matches!(k, Expression::Spread(_)));
+                if has_spread {
+                    // Start with empty struct
+                    instructions.push(BytecodeOp::BuildStruct(0));
+                    for (key, value) in &st.pairs {
+                        if let Expression::Spread(_inner) = key {
+                            // Spread: compile the value (which is the spread expr), merge
+                            self.compile_expression(value, instructions);
+                            instructions.push(BytecodeOp::MergeStructs);
+                        } else {
+                            // Normal pair: compile key/value, build 1-pair struct, merge
+                            match key {
+                                Expression::Identifier(ident) => {
+                                    instructions.push(BytecodeOp::String(ident.name.clone()));
+                                }
+                                _ => {
+                                    self.compile_expression(key, instructions);
+                                }
+                            }
+                            self.compile_expression(value, instructions);
+                            instructions.push(BytecodeOp::BuildStruct(1));
+                            instructions.push(BytecodeOp::MergeStructs);
+                        }
+                    }
+                } else {
+                    for (key, value) in &st.pairs {
+                        match key {
+                            Expression::Identifier(ident) => {
+                                instructions.push(BytecodeOp::String(ident.name.clone()));
+                            }
+                            _ => {
+                                self.compile_expression(key, instructions);
+                            }
+                        }
+                        self.compile_expression(value, instructions);
+                    }
+                    instructions.push(BytecodeOp::BuildStruct(st.pairs.len()));
+                }
             }
             Expression::Ternary(tern) => {
                 self.compile_expression(&tern.condition, instructions);
@@ -1167,6 +1250,10 @@ impl CfmlCompiler {
                 instructions.push(BytecodeOp::Pop);
                 self.compile_expression(&elvis.right, instructions);
                 instructions[jump_idx] = BytecodeOp::JumpIfNotNull(instructions.len());
+            }
+            Expression::Spread(inner) => {
+                // Spread in a general context just compiles the inner expression
+                self.compile_expression(inner, instructions);
             }
             Expression::Empty => {
                 instructions.push(BytecodeOp::Null);
