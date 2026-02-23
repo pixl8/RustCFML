@@ -67,7 +67,7 @@ cfml&gt; exit
 
 ### Web Server Mode
 
-Serve `.cfm` files over HTTP with built-in CGI, URL, and Form scopes:
+Serve `.cfm` files over HTTP with built-in CGI, URL, Form, Request, and Application scopes:
 
 ```plaintext
 # Serve the current directory on port 8500 (default)
@@ -75,15 +75,18 @@ cargo run --release -- --serve
 
 # Serve a specific directory on a custom port
 cargo run --release -- --serve examples/miniapp --port 3000
+
+# Use single-threaded mode for lower memory usage
+cargo run --release -- --serve --single-threaded
 ```
 
 ```plaintext
-RustCFML server running on http://127.0.0.1:3000
+RustCFML server running on http://127.0.0.1:3000 (multi-threaded)
 Document root: /path/to/examples/miniapp
 Press Ctrl+C to stop
 ```
 
-The server serves `.cfm` files and static assets from the document root. URLs must include the full file path (e.g. `/about.cfm`, not `/about`). Directory requests serve `index.cfm` if present (`/` → `index.cfm`, `/admin/` → `admin/index.cfm`). CFML web scopes are injected so pages can read request data:
+The server is built on [Axum](https://github.com/tokio-rs/axum) and handles concurrent requests. It serves `.cfm` files and static assets from the document root. Directory requests serve `index.cfm` if present (`/` → `index.cfm`, `/admin/` → `admin/index.cfm`). Path info routing is supported (`/index.cfm/users/123` resolves to `index.cfm` with path info `/users/123`). CFML web scopes are injected so pages can read request data:
 
 ```javascript
 // URL params: /?name=World
@@ -96,7 +99,49 @@ writeOutput(cgi.query_string);      // name=World
 
 // POST form data
 writeOutput(form.username);
+
+// Application scope (persists across requests)
+application.hitCount = (application.hitCount ?: 0) + 1;
+
+// Request scope (per-request, shared across includes)
+request.startTime = getTickCount();
 ```
+
+#### URL Rewriting
+
+Place a `urlrewrite.xml` file in your document root for Tuckey-compatible URL rewriting. This enables clean URLs and REST-style routing:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<urlrewrite>
+    <rule>
+        <from>^/([a-zA-Z][a-zA-Z0-9_/-]*)$</from>
+        <to>/index.cfm/$1</to>
+    </rule>
+    <rule>
+        <from>^/old-page$</from>
+        <to type="permanent-redirect">/new-page</to>
+    </rule>
+</urlrewrite>
+```
+
+Supported features:
+- **Regex and wildcard patterns** with backreference substitution (`$1`, `$2`)
+- **Forward**, **redirect** (302), and **permanent-redirect** (301) actions
+- **Conditions** on HTTP method, port, and headers
+- **Rule chaining** with `last="true"` to stop processing
+
+#### Application.cfc Lifecycle
+
+If an `Application.cfc` file exists in the document root (or any parent directory), it is automatically loaded and its lifecycle methods are called:
+
+- `onApplicationStart()` — runs once when the application is first accessed
+- `onRequestStart(targetPage)` — runs before each request
+- `onRequest(targetPage)` — handles the request (replaces default page execution)
+- `onRequestEnd(targetPage)` — runs after each request
+- `onError(exception, eventName)` — handles uncaught errors
+
+Application state (`application` scope) persists across requests in serve mode. Component mappings defined via `this.mappings` in Application.cfc are supported for virtual path resolution.
 
 ### Installing Globally
 
@@ -207,18 +252,24 @@ fileWrite("/tmp/hello.txt", "Hello!");
 var content = fileRead("/tmp/hello.txt");     // Hello!
 writeOutput(fileExists("/tmp/hello.txt"));    // true
 
-// Components with constructors
-component Dog {
+// Components with inheritance
+component Animal {
     function init(name) {
         this.name = name;
         return this;
     }
+    function speak() {
+        return this.name &amp; " makes a sound";
+    }
+}
+component Dog extends Animal {
     function speak() {
         return this.name &amp; " says Woof!";
     }
 }
 var dog = new Dog("Rex");
 writeOutput(dog.speak());                     // Rex says Woof!
+writeOutput(isInstanceOf(dog, "Animal"));     // true
 
 // Error handling
 try {
@@ -290,7 +341,6 @@ cargo run -- examples/08_builtins.cfm         # Built-in functions
 *   **Control flow** — `for`, `for-in`, `while`, `do/while`, `switch/case`, `break`, `continue`
 *   **For-in with structs** — `for (var key in myStruct)` iterates over struct keys
 *   **Functions** — user-defined, closures, arrow functions, recursion
-*   **Scopes** — `local`, `variables`, `arguments`
 *   **Error handling** — `try/catch/finally`, `throw`
 *   **Data types** — null, boolean, integer, double, string, array (1-based), struct (case-insensitive), function, query
 *   **String interpolation** — `"Hello #name#!"` with expression support in double-quoted strings
@@ -301,19 +351,31 @@ cargo run -- examples/08_builtins.cfm         # Built-in functions
 *   **Hashing** — `hash()` with MD5, SHA-1, SHA-256, SHA-384, SHA-512 support
 *   **Include** — `include "file.cfm"` executes in current scope
 *   **Components** — `component Name { }` with `init()` constructor, `this` scope, and method calls
-*   **CFML tags** — `<cfset>`, `<cfoutput>`, `<cfif>`, `<cfloop>`, `<cffunction>`, `<cfscript>`, `<cftry>`, `<cfthrow>`, `<cfinclude>`, `<cfdump>`, `<cfparam>`, `<cfabort>`, and more
+*   **Component inheritance** — `extends` with dot-path resolution, `super.method()` calls, `isInstanceOf()`, `createObject()`
+*   **Component metadata** — `getMetadata()` returns name, extends, functions, properties, and custom `@annotations`
+*   **Implicit property accessors** — `getXxx()`/`setXxx()` auto-generated for component properties
+*   **onMissingMethod** — fallback handler for undefined method calls on components
+*   **Application.cfc lifecycle** — `onApplicationStart`, `onRequestStart`, `onRequest`, `onRequestEnd`, `onError`
+*   **Scopes** — `local`, `variables`, `arguments`, `request` (per-request), `application` (persistent), `server` (read-only)
+*   **Component mappings** — virtual path resolution via `this.mappings` in Application.cfc
+*   **CFML tags** — `<cfset>`, `<cfoutput>`, `<cfif>`, `<cfloop>`, `<cffunction>`, `<cfscript>`, `<cftry>`, `<cfthrow>`, `<cfinclude>`, `<cfdump>`, `<cfparam>`, `<cfabort>`, `<cfhttp>`, `<cflocation>`, `<cfheader>`, `<cfcontent>`, `<cfinvoke>`, `<cfsavecontent>`, and more
 *   **HTTP client** — `cfhttp` tag and function for GET/POST/PUT/DELETE/PATCH requests
 *   **Database connectivity** — `queryExecute()` with SQLite, MySQL, and PostgreSQL support
-*   **Web server** — `--serve` mode with CGI, URL, and Form scope injection
+*   **Query higher-order functions** — `queryEach`, `queryMap`, `queryFilter`, `queryReduce`, `querySort`, `querySome`, `queryEvery`
+*   **Security** — `encrypt()`/`decrypt()` (AES, DES, DESEDE, Blowfish), `hmac()`, `generateSecretKey()`, Base64/Hex/UU encoding
+*   **XML** — `xmlParse()`, `xmlSearch()`, `isXML()` via quick-xml
+*   **Stack traces** — runtime errors include file, line, column, and full call stack
+*   **Closure mutation** — closures can read and write to parent scope variables
+*   **Spread operator** — `[...arr, 3]`, `{...defaults, key: value}`, `func(...args)`
+*   **URL rewriting** — Tuckey-compatible `urlrewrite.xml` with regex/wildcard patterns, conditions, and redirect support
+*   **Web server** — Axum-based `--serve` mode with concurrent request handling, configurable single/multi-threaded runtime
 *   **WASM target** — compile to WebAssembly via `wasm-bindgen`
 *   **Debug mode** — inspect tokens, AST, and bytecode with `-d`
 
 ### Planned / In Progress
 
-*   **Component inheritance** — `extends`, `implements`
-*   **Proper call stack** — stack frames, stack traces on error
-*   **Closure mutation** — closures currently read but cannot write to parent scope
-*   **Session/application scopes** — shared state management
+*   **Interface enforcement** — `implements` keyword (parsed but not enforced)
+*   **Session scope** — per-user session management
 *   **Threading** — `cfthread` equivalent
 *   **JIT compilation** — compile hot functions to native code
 *   **Package manager integration** — install CFML packages
@@ -446,10 +508,11 @@ unit tests, integration tests, and test individual features.
 
 ## Disclaimer
 
-RustCFML is in active development. The interpreter covers a substantial portion  
-of the CFML language and can run real CFScript and tag-based CFML code, but it  
-is not yet production-ready. Notable gaps include full component inheritance,  
-closure mutation, and session/application scopes.
+RustCFML is in active development. The interpreter covers a substantial portion
+of the CFML language — including components with inheritance, application
+lifecycle, closures with mutation, and 250+ built-in functions — and can run
+real CFScript and tag-based CFML code including frameworks like Taffy.
+It is not yet production-ready.
 
 Contributions are welcome!
 

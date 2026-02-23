@@ -177,6 +177,9 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
                 body
             };
             let body = strip_hashes(body);
+            // CFML tags don't use backslash escaping, but the script parser does.
+            // Escape backslashes in string literals so they survive script parsing.
+            let body = escape_backslashes_in_tag_strings(&body);
             let result = match tag_lower.as_str() {
                 "cfset" => format!("{};\n", body),
                 "cfif" => format!("if ({}) {{\n", body),
@@ -274,7 +277,7 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
             (format!("}} catch ({} e) {{\n", catch_type), tag_end - start)
         }
         "cfabort" => {
-            ("abort;\n".to_string(), tag_end - start)
+            ("__cfabort();\n".to_string(), tag_end - start)
         }
         "cfparam" => {
             let name = attrs.get("name").cloned().unwrap_or_default();
@@ -634,6 +637,54 @@ fn quote_if_needed(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\\\""))
 }
 
+/// Escape backslashes inside string literals in tag body expressions.
+/// CFML tag-based code doesn't use backslash escaping, but the script parser does.
+/// This converts `\` to `\\` inside string literals so the script parser
+/// correctly interprets them as literal backslashes.
+fn escape_backslashes_in_tag_strings(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut result = String::new();
+    let mut i = 0;
+
+    while i < len {
+        if chars[i] == '"' || chars[i] == '\'' {
+            let quote = chars[i];
+            result.push(quote); // opening quote
+            i += 1;
+            while i < len {
+                if chars[i] == quote {
+                    // Check for doubled quote (CFML escape: "" or '')
+                    if i + 1 < len && chars[i + 1] == quote {
+                        result.push(quote);
+                        result.push(quote);
+                        i += 2;
+                    } else {
+                        // End of string
+                        break;
+                    }
+                } else if chars[i] == '\\' {
+                    result.push('\\');
+                    result.push('\\');
+                    i += 1;
+                } else {
+                    result.push(chars[i]);
+                    i += 1;
+                }
+            }
+            if i < len {
+                result.push(chars[i]); // closing quote
+                i += 1;
+            }
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+
+    result
+}
+
 fn strip_hashes(s: &str) -> String {
     let s = s.trim();
     // If the entire string is wrapped in #...#, just strip outer hashes
@@ -778,12 +829,21 @@ fn parse_cfloop_tag(
             ),
             consumed,
         )
-    } else if let (Some(query), Some(index)) = (attrs.get("query"), attrs.get("index").or(attrs.get("item"))) {
+    } else if let Some(query) = attrs.get("query") {
         let query = strip_hashes(query);
-        (
-            format!("for (var {} in {}) {{\n", index, query),
-            consumed,
-        )
+        if let Some(index) = attrs.get("index").or(attrs.get("item")) {
+            (
+                format!("for (var {} in {}) {{\n", index, query),
+                consumed,
+            )
+        } else {
+            // <cfloop query="q"> without index — CFML query row loop
+            // q.column resolves to the current row's column value
+            (
+                format!("for (var __qrow in {}) {{ {} = __qrow;\n", query, query),
+                consumed,
+            )
+        }
     } else if let Some(collection) = attrs.get("collection") {
         let collection = strip_hashes(collection);
         let item = attrs.get("item").cloned().unwrap_or("item".to_string());

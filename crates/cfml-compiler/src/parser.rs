@@ -231,6 +231,25 @@ impl Parser {
             })));
         }
 
+        // Handle 'abort' keyword as __cfabort() call
+        if matches!(self.peek(0), Token::Identifier(ref s) if s.to_lowercase() == "abort") {
+            self.advance(); // consume 'abort'
+            self.match_token(&Token::Semicolon);
+            // Build a function call expression to __cfabort()
+            let abort_call = Expression::FunctionCall(Box::new(FunctionCall {
+                name: Box::new(Expression::Identifier(Identifier {
+                    name: "__cfabort".to_string(),
+                    location: stmt_loc.clone(),
+                })),
+                arguments: vec![],
+                location: stmt_loc.clone(),
+            }));
+            return Ok(CfmlNode::Statement(Statement::Expression(ExpressionStatement {
+                expr: abort_call,
+                location: stmt_loc,
+            })));
+        }
+
         // Expression statement (may be assignment)
         let expr = self.parse_expression()?;
 

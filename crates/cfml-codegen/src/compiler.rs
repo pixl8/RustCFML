@@ -105,10 +105,11 @@ pub enum BytecodeOp {
 
     // Method call: object is on stack, then args, method name + arg count
     // Optional write-back: (object_var, Option<property_name>)
-    //   - Some(("dog", None)) for dog.method() — write modified this back to dog
-    //   - Some(("this", Some("items"))) for this.items.method() — write result back to this.items
+    //   - Some(vec!["dog"]) for dog.method() — write modified this back to dog
+    //   - Some(vec!["this", "items"]) for this.items.method() — write result back to this.items
+    //   - Some(vec!["local", "_taffy", "factory"]) for local._taffy.factory.method()
     //   - None — no write-back needed
-    CallMethod(String, usize, Option<(String, Option<String>)>),
+    CallMethod(String, usize, Option<Vec<String>>),
 
     // For-in support
     GetKeys,  // Pop value: if struct, push array of keys; if array, leave as-is
@@ -172,31 +173,40 @@ impl CfmlCompiler {
     /// Determine write-back target for a method call from the AST.
     /// Returns Some((var_name, Some(prop_name))) for obj.prop.method()
     /// or Some((var_name, None)) for var.method()
-    fn method_call_write_back(object: &Expression) -> Option<(String, Option<String>)> {
-        match object {
-            // this.items.method() or var.prop.method()
-            Expression::MemberAccess(access) => {
-                match &*access.object {
-                    Expression::Identifier(ident) => {
-                        Some((ident.name.clone(), Some(access.member.clone())))
-                    }
-                    Expression::This(_) => {
-                        Some(("this".to_string(), Some(access.member.clone())))
-                    }
-                    _ => None,
+    fn method_call_write_back(object: &Expression) -> Option<Vec<String>> {
+        // Recursively collect the member access chain: a.b.c.method()
+        // returns vec!["a", "b", "c"]
+        fn collect_path(expr: &Expression, path: &mut Vec<String>) -> bool {
+            match expr {
+                Expression::Identifier(ident) => {
+                    path.push(ident.name.clone());
+                    true
                 }
+                Expression::This(_) => {
+                    path.push("this".to_string());
+                    true
+                }
+                Expression::Super(_) => {
+                    path.push("this".to_string());
+                    true
+                }
+                Expression::MemberAccess(access) => {
+                    if collect_path(&access.object, path) {
+                        path.push(access.member.clone());
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
             }
-            // var.method() or this.method() or super.method()
-            Expression::Identifier(ident) => {
-                Some((ident.name.clone(), None))
-            }
-            Expression::This(_) => {
-                Some(("this".to_string(), None))
-            }
-            Expression::Super(_) => {
-                Some(("this".to_string(), None))
-            }
-            _ => None,
+        }
+
+        let mut path = Vec::new();
+        if collect_path(object, &mut path) {
+            Some(path)
+        } else {
+            None
         }
     }
 
@@ -222,6 +232,86 @@ impl CfmlCompiler {
                 instructions.push(BytecodeOp::Pop);
             }
             _ => {}
+        }
+    }
+
+    /// Check if an expression is a call to a known mutating function with a simple
+    /// variable as the first argument. Returns the variable name for write-back.
+    /// e.g. structAppend(myStruct, other) → Some("myStruct")
+    fn is_mutating_standalone_call(expr: &Expression) -> bool {
+        if let Expression::FunctionCall(call) = expr {
+            if let Expression::Identifier(ident) = &*call.name {
+                let name_lower = ident.name.to_lowercase();
+                return matches!(name_lower.as_str(),
+                    "structappend" | "structinsert" | "structdelete" | "structupdate" |
+                    "structclear" | "arrayclear" | "arrayappend" | "arrayprepend" |
+                    "arrayinsert" | "arrayinsertat" | "arraydeleteat" | "arraysort" |
+                    "arrayresize" | "arrayswap" | "arrayreverse" | "arrayset"
+                ) && !call.arguments.is_empty();
+            }
+        }
+        false
+    }
+
+    /// Get the first argument expression of a function call (for mutating write-back).
+    fn mutating_call_first_arg(expr: &Expression) -> Option<&Expression> {
+        if let Expression::FunctionCall(call) = expr {
+            call.arguments.first()
+        } else {
+            None
+        }
+    }
+
+    /// Emit write-back instructions for nested property assignment.
+    /// After SetProperty("leaf"), the modified intermediate object is on the stack.
+    /// This walks up the MemberAccess chain, writing back to each parent level.
+    /// e.g. for `s.a.b = val`: after SetProperty("b"), stack has modified s.a
+    ///   → Load s, Swap, SetProperty("a") → stack has modified s → StoreLocal("s")
+    /// Emit bytecode to write back a modified nested value through the property chain.
+    /// Stack state on entry: [modified_value]
+    /// For `s.a.b = val`, after SetProperty("b"), stack has [modified_a_struct].
+    /// We need to: load s, swap, SetProperty("a"), StoreLocal("s").
+    /// For deeper chains like `s.a.b.c = val`, we recurse up the chain.
+    fn emit_nested_writeback(obj: &Expression, instructions: &mut Vec<BytecodeOp>) {
+        match obj {
+            Expression::Identifier(ident) => {
+                instructions.push(BytecodeOp::StoreLocal(ident.name.clone()));
+            }
+            Expression::This(_) => {
+                instructions.push(BytecodeOp::StoreLocal("this".to_string()));
+            }
+            Expression::MemberAccess(access) => {
+                // Stack has modified child value. Load the parent, swap, set property.
+                // Then recurse to write back the parent.
+                Self::emit_load_for_writeback(&access.object, instructions);
+                instructions.push(BytecodeOp::Swap);
+                instructions.push(BytecodeOp::SetProperty(access.member.clone()));
+                Self::emit_nested_writeback(&access.object, instructions);
+            }
+            _ => {
+                instructions.push(BytecodeOp::Pop);
+            }
+        }
+    }
+
+    /// Emit a load instruction for the given expression (used during write-back chain).
+    fn emit_load_for_writeback(expr: &Expression, instructions: &mut Vec<BytecodeOp>) {
+        match expr {
+            Expression::Identifier(ident) => {
+                instructions.push(BytecodeOp::LoadLocal(ident.name.clone()));
+            }
+            Expression::This(_) => {
+                instructions.push(BytecodeOp::LoadLocal("this".to_string()));
+            }
+            Expression::MemberAccess(access) => {
+                // For nested access like loading "s.a", we load s then get property a
+                Self::emit_load_for_writeback(&access.object, instructions);
+                instructions.push(BytecodeOp::GetProperty(access.member.clone()));
+            }
+            _ => {
+                // Can't load this expression for writeback
+                instructions.push(BytecodeOp::Null);
+            }
         }
     }
 
@@ -258,8 +348,36 @@ impl CfmlCompiler {
 
         match stmt {
             Statement::Expression(expr_stmt) => {
-                self.compile_expression(&expr_stmt.expr, instructions);
-                instructions.push(BytecodeOp::Pop);
+                // Check for mutating function calls: structAppend(a, b), structInsert(a, k, v), etc.
+                // These return the modified struct; store it back to the first arg's location.
+                if Self::is_mutating_standalone_call(&expr_stmt.expr) {
+                    if let Some(first_arg) = Self::mutating_call_first_arg(&expr_stmt.expr) {
+                        match first_arg {
+                            Expression::Identifier(ident) => {
+                                // Simple: structAppend(a, b) → compile call → StoreLocal(a)
+                                self.compile_expression(&expr_stmt.expr, instructions);
+                                instructions.push(BytecodeOp::StoreLocal(ident.name.clone()));
+                            }
+                            Expression::MemberAccess(_) => {
+                                // Nested: structAppend(local._taffy.settings, defaultConfig)
+                                // → compile call → emit_nested_writeback(local._taffy.settings)
+                                self.compile_expression(&expr_stmt.expr, instructions);
+                                Self::emit_nested_writeback(first_arg, instructions);
+                            }
+                            _ => {
+                                // Can't write back — just pop
+                                self.compile_expression(&expr_stmt.expr, instructions);
+                                instructions.push(BytecodeOp::Pop);
+                            }
+                        }
+                    } else {
+                        self.compile_expression(&expr_stmt.expr, instructions);
+                        instructions.push(BytecodeOp::Pop);
+                    }
+                } else {
+                    self.compile_expression(&expr_stmt.expr, instructions);
+                    instructions.push(BytecodeOp::Pop);
+                }
             }
             Statement::Var(var) => {
                 if let Some(value) = &var.value {
@@ -340,6 +458,8 @@ impl CfmlCompiler {
                         self.compile_expression(arr, instructions);
                         self.compile_expression(idx, instructions);
                         instructions.push(BytecodeOp::SetIndex);
+                        // SetIndex leaves modified collection on stack; write it back
+                        Self::emit_nested_writeback(arr, instructions);
                     }
                     AssignTarget::StructAccess(obj, member) => {
                         // Stack has [value]. SetProperty needs [obj, value].
@@ -348,18 +468,11 @@ impl CfmlCompiler {
                         instructions.push(BytecodeOp::Swap);
                         instructions.push(BytecodeOp::SetProperty(member.clone()));
                         // SetProperty leaves modified obj on stack; store it back
-                        match obj.as_ref() {
-                            Expression::Identifier(ident) => {
-                                instructions.push(BytecodeOp::StoreLocal(ident.name.clone()));
-                            }
-                            Expression::This(_) => {
-                                instructions.push(BytecodeOp::StoreLocal("this".to_string()));
-                            }
-                            _ => {
-                                // For nested access, just pop (mutation is lost)
-                                instructions.push(BytecodeOp::Pop);
-                            }
-                        }
+                        // For nested access (e.g. s.a.b = val), walk up the chain:
+                        //   After SetProperty("b"), stack has modified s.a
+                        //   Load s, swap, SetProperty("a") → modified s on stack
+                        //   StoreLocal("s")
+                        Self::emit_nested_writeback(obj, instructions);
                     }
                 }
             }
@@ -927,23 +1040,15 @@ impl CfmlCompiler {
                             self.compile_expression(&access.object, instructions);
                             instructions.push(BytecodeOp::Swap);
                             instructions.push(BytecodeOp::SetProperty(access.member.clone()));
-                            // Store modified object back to its variable
-                            match &*access.object {
-                                Expression::Identifier(ident) => {
-                                    instructions.push(BytecodeOp::StoreLocal(ident.name.clone()));
-                                }
-                                Expression::This(_) => {
-                                    instructions.push(BytecodeOp::StoreLocal("this".to_string()));
-                                }
-                                _ => {
-                                    instructions.push(BytecodeOp::Pop);
-                                }
-                            }
+                            // Write back through nested chain
+                            Self::emit_nested_writeback(&access.object, instructions);
                         }
                         Expression::ArrayAccess(access) => {
                             self.compile_expression(&access.array, instructions);
                             self.compile_expression(&access.index, instructions);
                             instructions.push(BytecodeOp::SetIndex);
+                            // SetIndex leaves modified collection on stack; write it back
+                            Self::emit_nested_writeback(&access.array, instructions);
                         }
                         _ => {}
                     }

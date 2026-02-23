@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::exit;
+use std::sync::Arc;
 
 use cfml_codegen::compiler::CfmlCompiler;
 use cfml_common::dynamic::CfmlValue;
@@ -49,6 +50,10 @@ struct Args {
     /// Server port (default: 8500)
     #[arg(long, default_value = "8500")]
     port: u16,
+
+    /// Use single-threaded async runtime (lower memory, lower concurrency)
+    #[arg(long)]
+    single_threaded: bool,
 }
 
 /// Encapsulates the full response from CFML execution, including HTTP metadata.
@@ -79,7 +84,7 @@ fn main() {
             eprintln!("Error: Document root is not a directory: {}", doc_root.display());
             exit(1);
         }
-        run_server(&doc_root, args.port, args.debug);
+        run_server(&doc_root, args.port, args.debug, args.single_threaded);
         return;
     }
 
@@ -230,7 +235,12 @@ fn compile_and_run(
         vm.builtins.insert(name, func);
     }
 
-    // Inject extra globals (web scopes, etc.)
+    // Ensure web scopes always exist (CFML guarantees url/cgi/form are always defined)
+    vm.globals.entry("url".to_string()).or_insert_with(|| CfmlValue::Struct(HashMap::new()));
+    vm.globals.entry("cgi".to_string()).or_insert_with(|| CfmlValue::Struct(HashMap::new()));
+    vm.globals.entry("form".to_string()).or_insert_with(|| CfmlValue::Struct(HashMap::new()));
+
+    // Inject extra globals (web scopes, etc.) — overrides defaults above in serve mode
     for (name, value) in extra_globals {
         vm.globals.insert(name, value);
     }
@@ -247,7 +257,7 @@ fn compile_and_run(
 
     // Catch redirect errors as success
     let result = match result {
-        Err(e) if e.message == "__cflocation_redirect" => Ok(CfmlValue::Null),
+        Err(e) if e.message == "__cflocation_redirect" || e.message == "__cfabort" => Ok(CfmlValue::Null),
         other => other,
     };
 
@@ -277,13 +287,30 @@ fn compile_and_run(
 // Web server
 // ---------------------------------------------------------------------------
 
-fn run_server(doc_root: &Path, port: u16, debug: bool) {
-    let addr = format!("0.0.0.0:{}", port);
-    let server = tiny_http::Server::http(&addr).unwrap_or_else(|e| {
-        eprintln!("Failed to start server on {}: {}", addr, e);
-        exit(1);
-    });
+struct AppState {
+    doc_root: PathBuf,
+    port: u16,
+    debug: bool,
+    server_state: ServerState,
+    rewrite_rules: Vec<rewrite::RewriteRule>,
+}
 
+fn run_server(doc_root: &Path, port: u16, debug: bool, single_threaded: bool) {
+    let rt = if single_threaded {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    } else {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    };
+    rt.block_on(async_run_server(doc_root, port, debug, single_threaded));
+}
+
+async fn async_run_server(doc_root: &Path, port: u16, debug: bool, single_threaded: bool) {
     let server_state = ServerState::new();
 
     // Load URL rewrite rules if urlrewrite.xml exists
@@ -296,29 +323,49 @@ fn run_server(doc_root: &Path, port: u16, debug: bool) {
         Vec::new()
     };
 
-    println!("RustCFML server running on http://127.0.0.1:{}", port);
+    let mode = if single_threaded { "single-threaded" } else { "multi-threaded" };
+    println!("RustCFML server running on http://127.0.0.1:{} ({})", port, mode);
     println!("Document root: {}", fs::canonicalize(doc_root).unwrap_or_else(|_| doc_root.to_path_buf()).display());
     println!("Press Ctrl+C to stop\n");
 
-    for request in server.incoming_requests() {
-        handle_request(request, doc_root, port, debug, &server_state, &rewrite_rules);
-    }
+    let app_state = Arc::new(AppState {
+        doc_root: doc_root.to_path_buf(),
+        port,
+        debug,
+        server_state,
+        rewrite_rules,
+    });
+
+    let app = axum::Router::new()
+        .fallback(handle_request)
+        .with_state(app_state);
+
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await.unwrap_or_else(|e| {
+        eprintln!("Failed to start server on 0.0.0.0:{}: {}", port, e);
+        exit(1);
+    });
+    axum::serve(listener, app).await.unwrap();
 }
 
-fn handle_request(
-    mut request: tiny_http::Request,
-    doc_root: &Path,
-    port: u16,
-    debug: bool,
-    server_state: &ServerState,
-    rewrite_rules: &[rewrite::RewriteRule],
-) {
-    let method = request.method().to_string();
-    let url = request.url().to_string();
+async fn handle_request(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    let (parts, body) = req.into_parts();
+    let method = parts.method.to_string();
+    let url = parts.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/").to_string();
 
-    if debug {
-        println!("{} {}", method, url);
-    }
+    // Extract headers as Vec<(String, String)>
+    let headers: Vec<(String, String)> = parts.headers.iter()
+        .map(|(name, value)| (name.as_str().to_string(), value.to_str().unwrap_or("").to_string()))
+        .collect();
+
+    // Read body bytes
+    let body_bytes = axum::body::to_bytes(body, 10_000_000).await.unwrap_or_default();
+
+    let debug = state.debug;
+
+    log::debug!("{} {}", method, url);
 
     // Split URL into path and query string
     let (raw_path, original_qs) = match url.find('?') {
@@ -329,44 +376,33 @@ fn handle_request(
     // Apply URL rewrite rules before file resolution
     let mut path = raw_path.to_string();
     let mut query_string = original_qs.to_string();
-    if !rewrite_rules.is_empty() {
-        let mut headers = HashMap::new();
-        for header in request.headers() {
-            headers.insert(
-                header.field.as_str().as_str().to_string(),
-                header.value.as_str().to_string(),
-            );
+    if !state.rewrite_rules.is_empty() {
+        let mut header_map = HashMap::new();
+        for (name, value) in &headers {
+            header_map.insert(name.clone(), value.clone());
         }
 
-        if let Some(result) = rewrite::apply_rewrite_rules(rewrite_rules, &path, &method, port, &headers) {
+        if let Some(result) = rewrite::apply_rewrite_rules(&state.rewrite_rules, &path, &method, state.port, &header_map) {
             match result.rewrite_type {
                 rewrite::RewriteType::PermanentRedirect => {
-                    if debug {
-                        println!("  -> 301 redirect to {}", result.new_path);
-                    }
-                    let response = tiny_http::Response::from_string("")
-                        .with_status_code(tiny_http::StatusCode(301))
-                        .with_header(
-                            tiny_http::Header::from_bytes(b"Location", result.new_path.as_bytes()).unwrap(),
-                        );
-                    let _ = request.respond(response);
-                    return;
+                    log::debug!("  -> 301 redirect to {}", result.new_path);
+                    return axum::response::Response::builder()
+                        .status(301)
+                        .header("Location", &result.new_path)
+                        .body(axum::body::Body::empty())
+                        .unwrap();
                 }
                 rewrite::RewriteType::Redirect => {
-                    if debug {
-                        println!("  -> 302 redirect to {}", result.new_path);
-                    }
-                    let response = tiny_http::Response::from_string("")
-                        .with_status_code(tiny_http::StatusCode(302))
-                        .with_header(
-                            tiny_http::Header::from_bytes(b"Location", result.new_path.as_bytes()).unwrap(),
-                        );
-                    let _ = request.respond(response);
-                    return;
+                    log::debug!("  -> 302 redirect to {}", result.new_path);
+                    return axum::response::Response::builder()
+                        .status(302)
+                        .header("Location", &result.new_path)
+                        .body(axum::body::Body::empty())
+                        .unwrap();
                 }
                 rewrite::RewriteType::Forward => {
-                    if debug && result.new_path != path {
-                        println!("  -> rewrite to {}", result.new_path);
+                    if result.new_path != path {
+                        log::debug!("  -> rewrite to {}", result.new_path);
                     }
                     // Split rewritten path from its query string
                     if let Some(qpos) = result.new_path.find('?') {
@@ -385,34 +421,47 @@ fn handle_request(
             }
         }
     }
-    let path = path.as_str();
-    let query_string = query_string.as_str();
 
     // Resolve file path from URL
-    let resolved = resolve_file(doc_root, path);
+    let resolved = resolve_file(&state.doc_root, &path);
 
     match resolved {
-        Some(file_path) if file_path.extension().map_or(false, |e| e == "cfm") => {
+        Some(ref rf) if rf.file_path.extension().map_or(false, |e| e == "cfm") => {
             // Execute .cfm file
-            let source = match fs::read_to_string(&file_path) {
+            let source = match fs::read_to_string(&rf.file_path) {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = respond_error(request, 500, &format!("Error reading file: {}", e));
-                    return;
+                    return axum::response::Response::builder()
+                        .status(500)
+                        .header("Content-Type", "text/html; charset=utf-8")
+                        .body(axum::body::Body::from(format!(
+                            "<html><body><h1>500 Internal Server Error</h1><p>Error reading file: {}</p></body></html>",
+                            html_escape(&e.to_string())
+                        )))
+                        .unwrap();
                 }
             };
 
-            // Build web scopes
-            let (extra_globals, http_request_data) = build_web_scopes(&mut request, path, query_string, port);
+            // Build web scopes using resolved script_name and path_info
+            let (extra_globals, http_request_data) = build_web_scopes(
+                &method, &headers, &body_bytes, &rf.script_name, &rf.path_info, &query_string, state.port,
+            );
 
-            match compile_and_run(
-                &source,
-                debug,
-                Some(file_path.to_string_lossy().to_string()),
-                extra_globals,
-                Some(server_state),
-                Some(http_request_data),
-            ) {
+            let file_path = rf.file_path.to_string_lossy().to_string();
+            let server_state = state.server_state.clone();
+
+            let result = tokio::task::spawn_blocking(move || {
+                compile_and_run(
+                    &source,
+                    debug,
+                    Some(file_path),
+                    extra_globals,
+                    Some(&server_state),
+                    Some(http_request_data),
+                )
+            }).await.unwrap();
+
+            match result {
                 Ok(response) => {
                     // Check for redirect
                     if let Some(ref redirect_url) = response.redirect_url {
@@ -420,21 +469,15 @@ fn handle_request(
                             .as_ref()
                             .map(|(c, _)| *c)
                             .unwrap_or(302);
-                        let mut http_response = tiny_http::Response::from_string("")
-                            .with_status_code(tiny_http::StatusCode(status_code))
-                            .with_header(
-                                tiny_http::Header::from_bytes(b"Location", redirect_url.as_bytes()).unwrap(),
-                            );
-                        // Add any extra response headers
+                        let mut builder = axum::response::Response::builder()
+                            .status(status_code)
+                            .header("Location", redirect_url.as_str());
                         for (name, value) in &response.response_headers {
                             if name.to_lowercase() != "location" {
-                                if let Ok(h) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
-                                    http_response.add_header(h);
-                                }
+                                builder = builder.header(name.as_str(), value.as_str());
                             }
                         }
-                        let _ = request.respond(http_response);
-                        return;
+                        return builder.body(axum::body::Body::empty()).unwrap();
                     }
 
                     // Determine content type
@@ -455,46 +498,74 @@ fn handle_request(
                         .map(|(c, _)| *c)
                         .unwrap_or(200);
 
-                    let mut http_response = tiny_http::Response::from_string(body)
-                        .with_status_code(tiny_http::StatusCode(status_code))
-                        .with_header(
-                            tiny_http::Header::from_bytes(b"Content-Type", content_type.as_bytes()).unwrap(),
-                        );
+                    let mut builder = axum::response::Response::builder()
+                        .status(status_code)
+                        .header("Content-Type", content_type);
 
-                    // Add response headers
                     for (name, value) in &response.response_headers {
-                        if let Ok(h) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
-                            http_response.add_header(h);
-                        }
+                        builder = builder.header(name.as_str(), value.as_str());
                     }
 
-                    let _ = request.respond(http_response);
+                    builder.body(axum::body::Body::from(body)).unwrap()
                 }
                 Err(e) => {
-                    let body = format!(
-                        "<html><body><h1>500 Internal Server Error</h1><pre>{}</pre></body></html>",
-                        html_escape(&e)
-                    );
-                    let _ = respond_error_body(request, 500, &body);
+                    axum::response::Response::builder()
+                        .status(500)
+                        .header("Content-Type", "text/html; charset=utf-8")
+                        .body(axum::body::Body::from(format!(
+                            "<html><body><h1>500 Internal Server Error</h1><pre>{}</pre></body></html>",
+                            html_escape(&e)
+                        )))
+                        .unwrap()
                 }
             }
         }
-        Some(file_path) => {
+        Some(ref rf) => {
             // Serve static file
-            serve_static(request, &file_path);
+            match fs::read(&rf.file_path) {
+                Ok(data) => {
+                    let ct = content_type_for(&rf.file_path);
+                    axum::response::Response::builder()
+                        .status(200)
+                        .header("Content-Type", ct)
+                        .body(axum::body::Body::from(data))
+                        .unwrap()
+                }
+                Err(_) => {
+                    axum::response::Response::builder()
+                        .status(500)
+                        .header("Content-Type", "text/html; charset=utf-8")
+                        .body(axum::body::Body::from(
+                            "<html><body><h1>500 Internal Server Error</h1><p>Error reading file</p></body></html>"
+                        ))
+                        .unwrap()
+                }
+            }
         }
         None => {
-            let body = format!(
-                "<html><body><h1>404 Not Found</h1><p>The requested URL {} was not found.</p></body></html>",
-                html_escape(path)
-            );
-            let _ = respond_error_body(request, 404, &body);
+            axum::response::Response::builder()
+                .status(404)
+                .header("Content-Type", "text/html; charset=utf-8")
+                .body(axum::body::Body::from(format!(
+                    "<html><body><h1>404 Not Found</h1><p>The requested URL {} was not found.</p></body></html>",
+                    html_escape(&path)
+                )))
+                .unwrap()
         }
     }
 }
 
+/// Result of resolving a URL path to a file.
+struct ResolvedFile {
+    file_path: PathBuf,
+    /// The script portion of the URL (e.g. "/index.cfm")
+    script_name: String,
+    /// Extra path info after the script (e.g. "/hello/world")
+    path_info: String,
+}
+
 /// Resolve a URL path to a file in the document root.
-fn resolve_file(doc_root: &Path, url_path: &str) -> Option<PathBuf> {
+fn resolve_file(doc_root: &Path, url_path: &str) -> Option<ResolvedFile> {
     // Normalize: strip leading slash, default to index.cfm
     let relative = url_path.trim_start_matches('/');
 
@@ -502,29 +573,65 @@ fn resolve_file(doc_root: &Path, url_path: &str) -> Option<PathBuf> {
     if !relative.is_empty() {
         let candidate = doc_root.join(relative);
         if candidate.is_file() {
-            return Some(candidate);
+            return Some(ResolvedFile {
+                file_path: candidate,
+                script_name: format!("/{}", relative),
+                path_info: String::new(),
+            });
         }
         // Try as directory with index.cfm
         let dir_index = doc_root.join(relative).join("index.cfm");
         if dir_index.is_file() {
-            return Some(dir_index);
+            let script = if relative.is_empty() {
+                "/index.cfm".to_string()
+            } else {
+                format!("/{}/index.cfm", relative)
+            };
+            return Some(ResolvedFile {
+                file_path: dir_index,
+                script_name: script,
+                path_info: String::new(),
+            });
+        }
+        // Try path info pattern: /script.cfm/extra/path
+        // Walk up the path segments to find a .cfm file
+        let mut parts: Vec<&str> = relative.split('/').collect();
+        while parts.len() > 1 {
+            parts.pop();
+            let partial = parts.join("/");
+            let candidate = doc_root.join(&partial);
+            if candidate.is_file() && candidate.extension().map_or(false, |e| e == "cfm" || e == "cfc") {
+                let script_name = format!("/{}", partial);
+                let path_info = url_path[script_name.len()..].to_string();
+                return Some(ResolvedFile {
+                    file_path: candidate,
+                    script_name,
+                    path_info,
+                });
+            }
         }
     } else {
         // Root path → index.cfm
         let index = doc_root.join("index.cfm");
         if index.is_file() {
-            return Some(index);
+            return Some(ResolvedFile {
+                file_path: index,
+                script_name: "/index.cfm".to_string(),
+                path_info: String::new(),
+            });
         }
     }
 
     None
 }
 
-/// Build CGI, URL, and Form scopes from the HTTP request.
-/// Takes `&mut` because reading the POST body requires mutable access.
+/// Build CGI, URL, and Form scopes from extracted HTTP request data.
 fn build_web_scopes(
-    request: &mut tiny_http::Request,
-    path: &str,
+    method: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    script_name: &str,
+    path_info: &str,
     query_string: &str,
     port: u16,
 ) -> (HashMap<String, CfmlValue>, CfmlValue) {
@@ -532,8 +639,10 @@ fn build_web_scopes(
 
     // CGI scope
     let mut cgi = HashMap::new();
-    cgi.insert("request_method".to_string(), CfmlValue::String(request.method().to_string()));
-    cgi.insert("path_info".to_string(), CfmlValue::String(path.to_string()));
+    cgi.insert("request_method".to_string(), CfmlValue::String(method.to_string()));
+    let path_info = if path_info.is_empty() { "/" } else { path_info };
+    cgi.insert("path_info".to_string(), CfmlValue::String(path_info.to_string()));
+    cgi.insert("script_name".to_string(), CfmlValue::String(script_name.to_string()));
     cgi.insert("query_string".to_string(), CfmlValue::String(query_string.to_string()));
     cgi.insert("server_name".to_string(), CfmlValue::String("127.0.0.1".to_string()));
     cgi.insert("server_port".to_string(), CfmlValue::String(port.to_string()));
@@ -541,12 +650,12 @@ fn build_web_scopes(
     // Extract headers
     let mut content_type = String::new();
     let mut user_agent = String::new();
-    for header in request.headers() {
-        let name = header.field.as_str().as_str().to_lowercase();
-        if name == "content-type" {
-            content_type = header.value.as_str().to_string();
-        } else if name == "user-agent" {
-            user_agent = header.value.as_str().to_string();
+    for (name, value) in headers {
+        let lower = name.to_lowercase();
+        if lower == "content-type" {
+            content_type = value.clone();
+        } else if lower == "user-agent" {
+            user_agent = value.clone();
         }
     }
     cgi.insert("content_type".to_string(), CfmlValue::String(content_type.clone()));
@@ -558,23 +667,11 @@ fn build_web_scopes(
     let url_scope = parse_query_string(query_string);
     globals.insert("url".to_string(), CfmlValue::Struct(url_scope));
 
-    // Read raw body BEFORE form parsing consumes it
-    let raw_body = {
-        let body_len = request.body_length().unwrap_or(0);
-        if body_len > 0 && body_len < 10_000_000 {
-            let mut body = String::new();
-            if std::io::Read::read_to_string(request.as_reader(), &mut body).is_ok() {
-                body
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        }
-    };
+    // Raw body as string
+    let raw_body = String::from_utf8_lossy(body).to_string();
 
     // Form scope — parsed POST body (application/x-www-form-urlencoded)
-    let form_scope = if request.method().as_str() == "POST"
+    let form_scope = if method == "POST"
         && content_type.starts_with("application/x-www-form-urlencoded")
         && !raw_body.is_empty()
     {
@@ -586,17 +683,14 @@ fn build_web_scopes(
 
     // Build full HTTP request data
     let mut headers_struct = HashMap::new();
-    for header in request.headers() {
-        headers_struct.insert(
-            header.field.as_str().as_str().to_string(),
-            CfmlValue::String(header.value.as_str().to_string()),
-        );
+    for (name, value) in headers {
+        headers_struct.insert(name.clone(), CfmlValue::String(value.clone()));
     }
 
     let mut http_request_data = HashMap::new();
     http_request_data.insert("headers".to_string(), CfmlValue::Struct(headers_struct));
     http_request_data.insert("content".to_string(), CfmlValue::String(raw_body));
-    http_request_data.insert("method".to_string(), CfmlValue::String(request.method().to_string()));
+    http_request_data.insert("method".to_string(), CfmlValue::String(method.to_string()));
     http_request_data.insert("protocol".to_string(), CfmlValue::String("HTTP/1.1".to_string()));
 
     (globals, CfmlValue::Struct(http_request_data))
@@ -665,40 +759,6 @@ fn content_type_for(path: &Path) -> &'static str {
         Some("txt") => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     }
-}
-
-fn serve_static(request: tiny_http::Request, path: &Path) {
-    match fs::read(path) {
-        Ok(data) => {
-            let ct = content_type_for(path);
-            let response = tiny_http::Response::from_data(data).with_header(
-                tiny_http::Header::from_bytes(b"Content-Type", ct.as_bytes()).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-        Err(_) => {
-            let _ = respond_error(request, 500, "Error reading file");
-        }
-    }
-}
-
-fn respond_error(request: tiny_http::Request, code: u16, message: &str) -> Result<(), ()> {
-    let body = format!(
-        "<html><body><h1>{} Error</h1><p>{}</p></body></html>",
-        code,
-        html_escape(message)
-    );
-    respond_error_body(request, code, &body)
-}
-
-fn respond_error_body(request: tiny_http::Request, code: u16, body: &str) -> Result<(), ()> {
-    let status = tiny_http::StatusCode(code);
-    let response = tiny_http::Response::from_string(body)
-        .with_status_code(status)
-        .with_header(
-            tiny_http::Header::from_bytes(b"Content-Type", b"text/html; charset=utf-8").unwrap(),
-        );
-    request.respond(response).map_err(|_| ())
 }
 
 fn html_escape(s: &str) -> String {

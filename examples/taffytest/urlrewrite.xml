@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Tuckey-compatible URL rewrite rules for Taffy REST API.
+    Based on: https://github.com/atuttle/Taffy/wiki/URL-Rewrite-Rule-Examples
+
+    Rewrites /api/* requests to /api/index.cfm?endpoint=/*
+    Uses two rules instead of lookahead (Rust regex doesn't support lookahead).
+    Rule 1 matches index.cfm and stops (pass-through), Rule 2 rewrites everything else.
+-->
+<urlrewrite>
+    <!-- Pass through requests already targeting index.cfm (stop processing) -->
+    <rule>
+        <name>Skip index.cfm</name>
+        <from>^/api/index\.cfm</from>
+        <!-- no <to> means pass-through; last=true (default) stops further rules -->
+    </rule>
+
+    <!-- Rewrite all other /api/* to the front controller -->
+    <rule>
+        <name>Taffy API Rewrite</name>
+        <from>^/api/(.+)$</from>
+        <to>/api/index.cfm?endpoint=/$1</to>
+    </rule>
+</urlrewrite>

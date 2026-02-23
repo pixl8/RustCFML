@@ -249,17 +249,28 @@ impl Lexer {
 
             while !self.is_at_end() && self.current() != quote {
                 if self.current() == '\\' {
-                    self.advance();
-                    match self.current() {
-                        'n' => current_str.push('\n'),
-                        't' => current_str.push('\t'),
-                        'r' => current_str.push('\r'),
-                        '\\' => current_str.push('\\'),
-                        '"' => current_str.push('"'),
-                        '#' => current_str.push('#'),
-                        _ => current_str.push(self.current()),
+                    // CFML: only \n, \t, \r, \\, \# are recognized escape sequences.
+                    // \" is NOT an escape — CFML uses "" for embedded quotes.
+                    let next = self.peek(1);
+                    match next {
+                        'n' | 't' | 'r' | '\\' | '#' => {
+                            self.advance(); // skip backslash
+                            match self.current() {
+                                'n' => current_str.push('\n'),
+                                't' => current_str.push('\t'),
+                                'r' => current_str.push('\r'),
+                                '\\' => current_str.push('\\'),
+                                '#' => current_str.push('#'),
+                                _ => unreachable!(),
+                            }
+                            self.advance(); // skip escape char
+                        }
+                        _ => {
+                            // Backslash is literal
+                            current_str.push('\\');
+                            self.advance(); // skip just the backslash
+                        }
                     }
-                    self.advance();
                 } else if self.current() == '#' && self.peek(1) == '#' {
                     // ## is an escaped # literal
                     current_str.push('#');
@@ -356,14 +367,25 @@ impl Lexer {
             let mut value = String::new();
             while !self.is_at_end() && self.current() != quote {
                 if self.current() == '\\' {
-                    self.advance();
-                    match self.current() {
-                        'n' => value.push('\n'),
-                        't' => value.push('\t'),
-                        'r' => value.push('\r'),
-                        '\\' => value.push('\\'),
-                        '\'' => value.push('\''),
-                        _ => value.push(self.current()),
+                    // CFML: only \n, \t, \r, \\, \# are recognized escape sequences.
+                    // \' is NOT an escape — CFML uses '' for embedded quotes.
+                    let next = self.peek(1);
+                    match next {
+                        'n' | 't' | 'r' | '\\' | '#' => {
+                            self.advance(); // skip backslash
+                            match self.current() {
+                                'n' => value.push('\n'),
+                                't' => value.push('\t'),
+                                'r' => value.push('\r'),
+                                '\\' => value.push('\\'),
+                                '#' => value.push('#'),
+                                _ => unreachable!(),
+                            }
+                        }
+                        _ => {
+                            // Backslash is literal
+                            value.push('\\');
+                        }
                     }
                 } else {
                     if self.current() == quote && self.peek(0) == quote {

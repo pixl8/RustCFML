@@ -252,6 +252,10 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("quarter".into(), fn_quarter);
     f.insert("week".into(), fn_week);
     f.insert("getTickCount".into(), fn_get_tick_count);
+    f.insert("getFunctionList".into(), fn_get_function_list);
+    f.insert("getContextRoot".into(), fn_get_context_root);
+    f.insert("GetContextRoot".into(), fn_get_context_root);
+    f.insert("getPageContext".into(), fn_get_page_context);
 
     // ---- List functions ----
     f.insert("listNew".into(), fn_list_new);
@@ -324,9 +328,13 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
 
     // ---- System functions ----
     f.insert("getTickCount".into(), fn_get_tick_count);
+    f.insert("getFunctionList".into(), fn_get_function_list);
     f.insert("getCurrentTemplatePath".into(), fn_get_current_template_path);
     f.insert("getBaseTemplatePath".into(), fn_get_base_template_path);
     f.insert("getTimeZone".into(), fn_get_time_zone);
+    f.insert("getContextRoot".into(), fn_get_context_root);
+    f.insert("GetContextRoot".into(), fn_get_context_root);
+    f.insert("getPageContext".into(), fn_get_page_context);
 
     // ---- File I/O functions ----
     f.insert("fileRead".into(), fn_file_read);
@@ -361,6 +369,7 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("__cfinvoke".into(), fn_cfinvoke_stub);
     f.insert("__cfsavecontent_start".into(), fn_cfsavecontent_start_stub);
     f.insert("__cfsavecontent_end".into(), fn_cfsavecontent_end_stub);
+    f.insert("__cfabort".into(), fn_cfabort_stub);
     f.insert("invoke".into(), fn_invoke_stub);
     f.insert("cfdirectory".into(), fn_cfdirectory);
 
@@ -3040,6 +3049,30 @@ fn fn_get_tick_count(_args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::Int(ms))
 }
 
+fn fn_get_function_list(_args: Vec<CfmlValue>) -> CfmlResult {
+    // Return a struct of all registered builtin function names
+    // Keys are function names, values are empty strings (matching CFML behavior)
+    let mut result = std::collections::HashMap::new();
+    for (name, _) in get_builtin_functions() {
+        result.insert(name, CfmlValue::String(String::new()));
+    }
+    Ok(CfmlValue::Struct(result))
+}
+
+fn fn_get_context_root(_args: Vec<CfmlValue>) -> CfmlResult {
+    // In a servlet context, returns the context root. For RustCFML, always "".
+    Ok(CfmlValue::String(String::new()))
+}
+
+fn fn_get_page_context(_args: Vec<CfmlValue>) -> CfmlResult {
+    // Stub: getPageContext() returns a Java PageContext in ACF/Lucee.
+    // We return a struct with common methods as stubs.
+    let mut ctx = std::collections::HashMap::new();
+    ctx.insert("getRequest".to_string(), CfmlValue::Null);
+    ctx.insert("getResponse".to_string(), CfmlValue::Null);
+    Ok(CfmlValue::Struct(ctx))
+}
+
 // ===============================================
 // LIST FUNCTIONS
 // ===============================================
@@ -3623,7 +3656,11 @@ fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
                 }
 
                 // Extract __metadata (custom attributes)
+                // In CFML, custom attributes appear as top-level keys in getMetadata()
                 if let Some(CfmlValue::Struct(md)) = s.get("__metadata") {
+                    for (mk, mv) in md {
+                        meta.insert(mk.clone(), mv.clone());
+                    }
                     meta.insert("metadata".to_string(), CfmlValue::Struct(md.clone()));
                 }
 
@@ -3960,27 +3997,49 @@ fn fn_directory_delete(args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn fn_directory_list(args: Vec<CfmlValue>) -> CfmlResult {
+    // directoryList(path [, recurse [, listInfo [, filter]]])
     let path = get_str(&args, 0);
     let recurse = if args.len() >= 2 { args[1].is_true() } else { false };
-    let filter = if args.len() >= 3 { get_str(&args, 2) } else { String::new() };
+    let list_info = if args.len() >= 3 { get_str(&args, 2).to_lowercase() } else { "path".to_string() };
+    let filter = if args.len() >= 4 { get_str(&args, 3) } else { String::new() };
 
-    fn list_dir(path: &str, recurse: bool, filter: &str) -> Result<Vec<CfmlValue>, std::io::Error> {
+    fn matches_filter(filename: &str, filter: &str) -> bool {
+        if filter.is_empty() { return true; }
+        // Support glob patterns like "*.cfc", "*.cfm"
+        if filter.starts_with("*.") {
+            let ext = &filter[1..]; // ".cfc"
+            filename.to_lowercase().ends_with(&ext.to_lowercase())
+        } else if filter.contains('*') || filter.contains('?') {
+            // Simple glob: convert to check
+            filename.to_lowercase().contains(&filter.replace("*", "").to_lowercase())
+        } else {
+            filename.to_lowercase().contains(&filter.to_lowercase())
+        }
+    }
+
+    fn list_dir(path: &str, recurse: bool, filter: &str, list_info: &str) -> Result<Vec<CfmlValue>, std::io::Error> {
         let mut results = Vec::new();
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;
             let entry_path = entry.path();
-            let name = entry_path.to_string_lossy().to_string();
-            if filter.is_empty() || name.contains(filter) {
-                results.push(CfmlValue::String(name.clone()));
+            let full_path = entry_path.to_string_lossy().to_string();
+            let file_name = entry.file_name().to_string_lossy().to_string();
+
+            if entry_path.is_file() && matches_filter(&file_name, filter) {
+                let value = match list_info {
+                    "name" => file_name.clone(),
+                    _ => full_path.clone(), // "path" is default
+                };
+                results.push(CfmlValue::String(value));
             }
             if recurse && entry_path.is_dir() {
-                results.extend(list_dir(&name, true, filter)?);
+                results.extend(list_dir(&full_path, true, filter, list_info)?);
             }
         }
         Ok(results)
     }
 
-    match list_dir(&path, recurse, &filter) {
+    match list_dir(&path, recurse, &filter, &list_info) {
         Ok(files) => Ok(CfmlValue::Array(files)),
         Err(e) => Err(CfmlError::runtime(format!("directoryList: {}", e))),
     }
@@ -4862,6 +4921,10 @@ fn fn_cfsavecontent_start_stub(_args: Vec<CfmlValue>) -> CfmlResult {
 
 fn fn_cfsavecontent_end_stub(_args: Vec<CfmlValue>) -> CfmlResult {
     Err(CfmlError::runtime("__cfsavecontent_end requires VM intercept".into()))
+}
+
+fn fn_cfabort_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("__cfabort requires VM intercept".into()))
 }
 
 fn fn_invoke_stub(_args: Vec<CfmlValue>) -> CfmlResult {
