@@ -427,6 +427,7 @@ impl CfmlVirtualMachine {
                             ),
                             return_type: None,
                             access: cfml_common::dynamic::CfmlAccess::Public,
+                            captured_scope: None,
                         }));
                     } else if self.builtins.keys().any(|k| k.to_lowercase() == name_lower)
                            || self.user_functions.keys().any(|k| k.to_lowercase() == name_lower) {
@@ -444,6 +445,7 @@ impl CfmlVirtualMachine {
                             ),
                             return_type: None,
                             access: cfml_common::dynamic::CfmlAccess::Public,
+                            captured_scope: None,
                         }));
                     } else {
                         return Err(self.wrap_error(CfmlError::runtime(
@@ -656,7 +658,29 @@ impl CfmlVirtualMachine {
 
                     if let Some(func_ref) = stack.pop() {
                         self.closure_parent_writeback = None;
-                        let result = self.call_function(&func_ref, args, &locals)?;
+                        // If the function has a captured scope (closure), use it as
+                        // parent locals so the closure sees its defining scope's vars.
+                        // Merge caller's locals on top so the closure also sees the
+                        // caller's scope (but captured vars take lower priority — the
+                        // closure's own params will override via execute_function_with_args).
+                        let effective_locals = if let CfmlValue::Function(ref f) = func_ref {
+                            if let Some(ref captured) = f.captured_scope {
+                                let mut merged = captured.clone();
+                                // Caller's locals overlay (for nested closures that
+                                // also need to see their immediate caller's vars)
+                                for (k, v) in &locals {
+                                    if !merged.contains_key(k) {
+                                        merged.insert(k.clone(), v.clone());
+                                    }
+                                }
+                                merged
+                            } else {
+                                locals.clone()
+                            }
+                        } else {
+                            locals.clone()
+                        };
+                        let result = self.call_function(&func_ref, args, &effective_locals)?;
                         // Merge closure write-back into caller's locals
                         if let Some(writeback) = self.closure_parent_writeback.take() {
                             for (k, v) in writeback {
@@ -915,6 +939,8 @@ impl CfmlVirtualMachine {
                 BytecodeOp::DefineFunction(func_idx) => {
                     let func_name = self.program.functions[func_idx].name.clone();
                     self.user_functions.insert(func_name.clone(), func_idx);
+                    // Snapshot current locals as captured scope for closures
+                    let captured = locals.clone();
                     // Push function reference — encode func_idx in body for super dispatch
                     stack.push(CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
                         name: func_name,
@@ -931,6 +957,7 @@ impl CfmlVirtualMachine {
                         ),
                         return_type: None,
                         access: cfml_common::dynamic::CfmlAccess::Public,
+                        captured_scope: Some(captured),
                     }));
                 }
 

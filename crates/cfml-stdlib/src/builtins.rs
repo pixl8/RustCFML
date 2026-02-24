@@ -408,6 +408,7 @@ fn create_builtin_func(name: &str) -> CfmlValue {
         body: CfmlClosureBody::Expression(Box::new(CfmlValue::Null)),
         return_type: None,
         access: CfmlAccess::Public,
+        captured_scope: None,
     })
 }
 

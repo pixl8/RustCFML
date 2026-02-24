@@ -171,6 +171,8 @@ pub struct CfmlFunction {
     pub body: CfmlClosureBody,
     pub return_type: Option<String>,
     pub access: CfmlAccess,
+    /// Captured scope for closures — snapshot of defining scope's locals
+    pub captured_scope: Option<HashMap<String, CfmlValue>>,
 }
 
 #[derive(Debug, Clone)]
