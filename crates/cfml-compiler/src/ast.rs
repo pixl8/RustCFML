@@ -38,6 +38,15 @@ pub struct Component {
 }
 
 #[derive(Debug, Clone)]
+pub struct Interface {
+    pub name: String,
+    pub extends: Vec<String>,
+    pub functions: Vec<Function>,
+    pub metadata: Vec<(String, String)>,
+    pub location: SourceLocation,
+}
+
+#[derive(Debug, Clone)]
 pub struct Property {
     pub name: String,
     pub prop_type: Option<String>,
@@ -93,6 +102,7 @@ pub enum Statement {
     Import(Import),
     Var(Var),
     ComponentDecl(ComponentDecl),
+    InterfaceDecl(InterfaceDecl),
     PropertyDecl(PropertyDecl),
     FunctionDecl(FunctionDecl),
     Output(Output),
@@ -248,6 +258,11 @@ pub struct Var {
 #[derive(Debug, Clone)]
 pub struct ComponentDecl {
     pub component: Component,
+}
+
+#[derive(Debug, Clone)]
+pub struct InterfaceDecl {
+    pub interface: Interface,
 }
 
 #[derive(Debug, Clone)]

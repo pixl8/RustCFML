@@ -331,6 +331,7 @@ impl CfmlCompiler {
             Statement::Try(t) => Some(t.location.start.line),
             Statement::Throw(t) => Some(t.location.start.line),
             Statement::ComponentDecl(c) => Some(c.component.location.start.line),
+            Statement::InterfaceDecl(i) => Some(i.interface.location.start.line),
             Statement::Include(i) => Some(i.location.start.line),
             Statement::Break(b) => Some(b.location.start.line),
             Statement::Continue(c) => Some(c.location.start.line),
@@ -534,6 +535,9 @@ impl CfmlCompiler {
             Statement::ComponentDecl(comp_decl) => {
                 // Compile component as a struct with methods
                 self.compile_component(&comp_decl.component, instructions);
+            }
+            Statement::InterfaceDecl(iface_decl) => {
+                self.compile_interface(&iface_decl.interface, instructions);
             }
             Statement::Include(inc) => {
                 // Extract the path string from the include expression
@@ -901,6 +905,97 @@ impl CfmlCompiler {
         instructions.push(BytecodeOp::StoreLocal(func.name.clone()));
     }
 
+    fn compile_interface(&mut self, interface: &Interface, instructions: &mut Vec<BytecodeOp>) {
+        let mut prop_count = 0;
+
+        // __is_interface marker
+        instructions.push(BytecodeOp::String("__is_interface".to_string()));
+        instructions.push(BytecodeOp::True);
+        prop_count += 1;
+
+        // __name
+        instructions.push(BytecodeOp::String("__name".to_string()));
+        instructions.push(BytecodeOp::String(interface.name.clone()));
+        prop_count += 1;
+
+        // __extends array (interfaces can extend multiple parents)
+        if !interface.extends.is_empty() {
+            instructions.push(BytecodeOp::String("__extends".to_string()));
+            for parent in &interface.extends {
+                instructions.push(BytecodeOp::String(parent.clone()));
+            }
+            instructions.push(BytecodeOp::BuildArray(interface.extends.len()));
+            prop_count += 1;
+        }
+
+        // __methods struct: { method_name_lc: { name, params, returnType, access } }
+        if !interface.functions.is_empty() {
+            instructions.push(BytecodeOp::String("__methods".to_string()));
+            for func in &interface.functions {
+                let method_key = func.name.to_lowercase();
+                instructions.push(BytecodeOp::String(method_key));
+
+                let mut method_prop_count = 0;
+
+                // name
+                instructions.push(BytecodeOp::String("name".to_string()));
+                instructions.push(BytecodeOp::String(func.name.clone()));
+                method_prop_count += 1;
+
+                // returnType
+                if let Some(ref rt) = func.return_type {
+                    instructions.push(BytecodeOp::String("returnType".to_string()));
+                    instructions.push(BytecodeOp::String(rt.clone()));
+                    method_prop_count += 1;
+                }
+
+                // access
+                let access_str = match func.access {
+                    AccessModifier::Public => "public",
+                    AccessModifier::Private => "private",
+                    AccessModifier::Package => "package",
+                    AccessModifier::Remote => "remote",
+                };
+                instructions.push(BytecodeOp::String("access".to_string()));
+                instructions.push(BytecodeOp::String(access_str.to_string()));
+                method_prop_count += 1;
+
+                // params array
+                if !func.params.is_empty() {
+                    instructions.push(BytecodeOp::String("params".to_string()));
+                    for param in &func.params {
+                        instructions.push(BytecodeOp::String(param.name.clone()));
+                    }
+                    instructions.push(BytecodeOp::BuildArray(func.params.len()));
+                    method_prop_count += 1;
+                }
+
+                instructions.push(BytecodeOp::BuildStruct(method_prop_count));
+            }
+            instructions.push(BytecodeOp::BuildStruct(interface.functions.len()));
+            prop_count += 1;
+        }
+
+        // __metadata
+        if !interface.metadata.is_empty() {
+            instructions.push(BytecodeOp::String("__metadata".to_string()));
+            for (k, v) in &interface.metadata {
+                instructions.push(BytecodeOp::String(k.clone()));
+                instructions.push(BytecodeOp::String(v.clone()));
+            }
+            instructions.push(BytecodeOp::BuildStruct(interface.metadata.len()));
+            prop_count += 1;
+        }
+
+        // Build the interface struct
+        instructions.push(BytecodeOp::BuildStruct(prop_count));
+
+        // Store in local and global scope (same as component)
+        instructions.push(BytecodeOp::StoreLocal(interface.name.clone()));
+        instructions.push(BytecodeOp::LoadLocal(interface.name.clone()));
+        instructions.push(BytecodeOp::StoreGlobal(interface.name.clone()));
+    }
+
     fn compile_component(&mut self, component: &Component, instructions: &mut Vec<BytecodeOp>) {
         // Build the component as a struct containing:
         // 1. Property defaults
@@ -927,6 +1022,16 @@ impl CfmlCompiler {
         if let Some(ref ext) = component.extends {
             instructions.push(BytecodeOp::String("__extends".to_string()));
             instructions.push(BytecodeOp::String(ext.clone()));
+            prop_count += 1;
+        }
+
+        // Add __implements if component implements interfaces
+        if !component.implements.is_empty() {
+            instructions.push(BytecodeOp::String("__implements".to_string()));
+            for iface_name in &component.implements {
+                instructions.push(BytecodeOp::String(iface_name.clone()));
+            }
+            instructions.push(BytecodeOp::BuildArray(component.implements.len()));
             prop_count += 1;
         }
 

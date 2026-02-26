@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone)]
 pub enum CfmlValue {
@@ -171,8 +172,9 @@ pub struct CfmlFunction {
     pub body: CfmlClosureBody,
     pub return_type: Option<String>,
     pub access: CfmlAccess,
-    /// Captured scope for closures — snapshot of defining scope's locals
-    pub captured_scope: Option<HashMap<String, CfmlValue>>,
+    /// Captured scope for closures — shared mutable environment so multiple
+    /// invocations (and sibling closures) see each other's mutations.
+    pub captured_scope: Option<Arc<RwLock<HashMap<String, CfmlValue>>>>,
 }
 
 #[derive(Debug, Clone)]

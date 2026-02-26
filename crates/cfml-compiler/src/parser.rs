@@ -207,6 +207,14 @@ impl Parser {
             )));
         }
 
+        if self.match_token(&Token::Interface) {
+            return Ok(CfmlNode::Statement(Statement::InterfaceDecl(
+                InterfaceDecl {
+                    interface: self.parse_interface()?,
+                },
+            )));
+        }
+
         if self.match_token(&Token::Include) {
             let path = self.parse_expression()?;
             self.match_token(&Token::Semicolon);
@@ -855,7 +863,7 @@ impl Parser {
 
         if self.match_token(&Token::Implements) {
             loop {
-                if let Ok(iface) = self.extract_identifier() {
+                if let Ok(iface) = self.extract_dotted_identifier() {
                     implements.push(iface);
                 }
                 if !self.match_token(&Token::Comma) {
@@ -945,6 +953,105 @@ impl Parser {
             body,
             location: loc,
             metadata,
+        })
+    }
+
+    fn parse_interface(&mut self) -> Result<Interface, ParseError> {
+        let loc = self.current_location();
+        // Optional name (same logic as component — skip if followed by '=')
+        let name = if matches!(self.peek(0), Token::Identifier(_))
+            && !matches!(self.peek(1), Token::Equal)
+            && !matches!(self.peek(0), Token::Extends)
+        {
+            self.extract_identifier().unwrap_or_else(|_| "Anonymous".to_string())
+        } else {
+            "Anonymous".to_string()
+        };
+
+        // interfaces can extend multiple other interfaces
+        let mut extends = Vec::new();
+        if self.match_token(&Token::Extends) {
+            loop {
+                if let Ok(parent) = self.extract_dotted_identifier() {
+                    extends.push(parent);
+                }
+                if !self.match_token(&Token::Comma) {
+                    break;
+                }
+            }
+        }
+
+        // Parse metadata attributes (same as component)
+        let mut metadata = Vec::new();
+        loop {
+            let is_attr_key = matches!(self.peek(1), Token::Equal)
+                && (matches!(self.peek(0), Token::Identifier(_))
+                    || self.token_as_string(&self.peek(0).clone()).is_some());
+            if !is_attr_key {
+                break;
+            }
+            let key = if let Token::Identifier(ref s) = self.peek(0) {
+                let s = s.clone();
+                self.advance();
+                s
+            } else if let Some(s) = self.token_as_string(&self.peek(0).clone()) {
+                self.advance();
+                s
+            } else {
+                break;
+            };
+            self.consume(&Token::Equal)?;
+            if let Token::String(val) = self.peek(0).clone() {
+                self.advance();
+                metadata.push((key, val));
+            } else {
+                break;
+            }
+        }
+
+        self.consume(&Token::LBrace)?;
+
+        let mut functions = Vec::new();
+
+        while !self.check(&Token::RBrace) && !self.is_at_end() {
+            // Consume optional semicolons between signatures
+            if self.match_token(&Token::Semicolon) {
+                continue;
+            }
+
+            // Parse access modifier
+            let access = if matches!(
+                self.peek(0),
+                Token::Public | Token::Private | Token::Remote | Token::Package
+            ) {
+                self.parse_access_modifier()
+            } else {
+                AccessModifier::Public
+            };
+
+            // Skip optional return type annotation
+            if matches!(self.peek(0), Token::Identifier(_)) && matches!(self.peek(1), Token::Function) {
+                self.advance();
+            }
+
+            if self.match_token(&Token::Function) {
+                let mut func = self.parse_function()?;
+                func.access = access;
+                functions.push(func);
+            } else {
+                // Skip unexpected tokens
+                self.advance();
+            }
+        }
+
+        self.consume(&Token::RBrace)?;
+
+        Ok(Interface {
+            name,
+            extends,
+            functions,
+            metadata,
+            location: loc,
         })
     }
 
