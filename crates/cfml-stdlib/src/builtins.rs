@@ -371,6 +371,9 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("__cfsavecontent_end".into(), fn_cfsavecontent_end_stub);
     f.insert("__cfabort".into(), fn_cfabort_stub);
     f.insert("invoke".into(), fn_invoke_stub);
+    f.insert("__cftransaction_start".into(), fn_cftransaction_start_stub);
+    f.insert("__cftransaction_commit".into(), fn_cftransaction_commit_stub);
+    f.insert("__cftransaction_rollback".into(), fn_cftransaction_rollback_stub);
     f.insert("cfdirectory".into(), fn_cfdirectory);
 
     // ---- HTTP functions ----
@@ -378,7 +381,7 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("cfhttp".into(), fn_cfhttp);
 
     // ---- Database functions ----
-    #[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db"))]
+    #[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
     f.insert("queryExecute".into(), fn_query_execute);
 
     // ---- Security functions ----
@@ -3791,6 +3794,36 @@ fn fn_is_instance_of(args: Vec<CfmlValue>) -> CfmlResult {
                 }
             }
         }
+
+        // Check direct interfaces (__implements)
+        if let Some(CfmlValue::Array(ifaces)) = s.get("__implements") {
+            for item in ifaces {
+                let item_str = item.as_string();
+                if item_str.to_lowercase() == type_lower {
+                    return Ok(CfmlValue::Bool(true));
+                }
+                if let Some(last) = item_str.split('.').last() {
+                    if last.to_lowercase() == type_lower {
+                        return Ok(CfmlValue::Bool(true));
+                    }
+                }
+            }
+        }
+
+        // Check inherited interfaces (__implements_chain)
+        if let Some(CfmlValue::Array(ifaces)) = s.get("__implements_chain") {
+            for item in ifaces {
+                let item_str = item.as_string();
+                if item_str.to_lowercase() == type_lower {
+                    return Ok(CfmlValue::Bool(true));
+                }
+                if let Some(last) = item_str.split('.').last() {
+                    if last.to_lowercase() == type_lower {
+                        return Ok(CfmlValue::Bool(true));
+                    }
+                }
+            }
+        }
     }
 
     Ok(CfmlValue::Bool(false))
@@ -4362,19 +4395,22 @@ fn parse_content_type(ct: &str) -> (String, String) {
 // DATABASE (queryExecute)
 // ===============================================
 
-#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db"))]
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
 enum DbDriver {
     Sqlite(String),
     Mysql(String),
     Postgres(String),
+    Mssql(String),
 }
 
-#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db"))]
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
 fn parse_datasource(ds: &str) -> DbDriver {
     if ds.starts_with("mysql://") {
         DbDriver::Mysql(ds.to_string())
     } else if ds.starts_with("postgresql://") || ds.starts_with("postgres://") {
         DbDriver::Postgres(ds.to_string())
+    } else if ds.starts_with("mssql://") || ds.starts_with("sqlserver://") {
+        DbDriver::Mssql(ds.to_string())
     } else if ds.starts_with("sqlite://") {
         DbDriver::Sqlite(ds[9..].to_string())
     } else {
@@ -4382,21 +4418,370 @@ fn parse_datasource(ds: &str) -> DbDriver {
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db"))]
+// -----------------------------------------------
+// Connection Pool Manager
+// -----------------------------------------------
+
+use std::sync::{Mutex, OnceLock};
+
+/// Global pool manager — maps datasource URL → pool instance (type-erased)
+static POOL_MANAGER: OnceLock<Mutex<HashMap<String, Box<dyn std::any::Any + Send>>>> = OnceLock::new();
+
+fn get_pool_manager() -> &'static Mutex<HashMap<String, Box<dyn std::any::Any + Send>>> {
+    POOL_MANAGER.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(feature = "sqlite")]
+struct SqliteConnectionManager {
+    path: String,
+}
+
+#[cfg(feature = "sqlite")]
+impl r2d2::ManageConnection for SqliteConnectionManager {
+    type Connection = rusqlite::Connection;
+    type Error = rusqlite::Error;
+
+    fn connect(&self) -> Result<Self::Connection, Self::Error> {
+        rusqlite::Connection::open(&self.path)
+    }
+
+    fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
+        conn.execute_batch("SELECT 1").map_err(Into::into)
+    }
+
+    fn has_broken(&self, _conn: &mut Self::Connection) -> bool {
+        false
+    }
+}
+
+#[cfg(feature = "sqlite")]
+fn get_sqlite_pool(path: &str) -> Result<r2d2::Pool<SqliteConnectionManager>, CfmlError> {
+    let mut manager = get_pool_manager().lock().unwrap();
+    let key = format!("sqlite:{}", path);
+    if let Some(pool_any) = manager.get(&key) {
+        if let Some(pool) = pool_any.downcast_ref::<r2d2::Pool<SqliteConnectionManager>>() {
+            return Ok(pool.clone());
+        }
+    }
+    let mgr = SqliteConnectionManager { path: path.to_string() };
+    let pool = r2d2::Pool::builder()
+        .max_size(10)
+        .min_idle(Some(1))
+        .connection_timeout(std::time::Duration::from_secs(30))
+        .build(mgr)
+        .map_err(|e| CfmlError::runtime(format!("queryExecute: failed to create SQLite pool: {}", e)))?;
+    manager.insert(key, Box::new(pool.clone()));
+    Ok(pool)
+}
+
+#[cfg(feature = "mysql_db")]
+fn get_mysql_pool(url: &str) -> Result<mysql::Pool, CfmlError> {
+    let mut manager = get_pool_manager().lock().unwrap();
+    let key = format!("mysql:{}", url);
+    if let Some(pool_any) = manager.get(&key) {
+        if let Some(pool) = pool_any.downcast_ref::<mysql::Pool>() {
+            return Ok(pool.clone());
+        }
+    }
+    let pool = mysql::Pool::new(url)
+        .map_err(|e| CfmlError::runtime(format!("queryExecute: MySQL pool creation error: {}", e)))?;
+    manager.insert(key, Box::new(pool.clone()));
+    Ok(pool)
+}
+
+#[cfg(feature = "postgres_db")]
+struct PostgresConnectionManager {
+    url: String,
+}
+
+#[cfg(feature = "postgres_db")]
+impl r2d2::ManageConnection for PostgresConnectionManager {
+    type Connection = postgres::Client;
+    type Error = postgres::Error;
+
+    fn connect(&self) -> Result<Self::Connection, Self::Error> {
+        postgres::Client::connect(&self.url, postgres::NoTls)
+    }
+
+    fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
+        conn.simple_query("SELECT 1").map(|_| ())
+    }
+
+    fn has_broken(&self, _conn: &mut Self::Connection) -> bool {
+        false
+    }
+}
+
+#[cfg(feature = "postgres_db")]
+fn get_postgres_pool(url: &str) -> Result<r2d2::Pool<PostgresConnectionManager>, CfmlError> {
+    let mut manager = get_pool_manager().lock().unwrap();
+    let key = format!("postgres:{}", url);
+    if let Some(pool_any) = manager.get(&key) {
+        if let Some(pool) = pool_any.downcast_ref::<r2d2::Pool<PostgresConnectionManager>>() {
+            return Ok(pool.clone());
+        }
+    }
+    let mgr = PostgresConnectionManager { url: url.to_string() };
+    let pool = r2d2::Pool::builder()
+        .max_size(10)
+        .min_idle(Some(1))
+        .connection_timeout(std::time::Duration::from_secs(30))
+        .build(mgr)
+        .map_err(|e| CfmlError::runtime(format!("queryExecute: failed to create PostgreSQL pool: {}", e)))?;
+    manager.insert(key, Box::new(pool.clone()));
+    Ok(pool)
+}
+
+// -----------------------------------------------
+// Structured query parameter normalization
+// -----------------------------------------------
+
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
+fn normalize_query_params(params_arg: &CfmlValue) -> (Vec<CfmlValue>, Vec<String>) {
+    // If params is an array of structs with "value" key, extract typed values
+    // Returns (effective_values, type_hints)
+    match params_arg {
+        CfmlValue::Array(arr) if !arr.is_empty() => {
+            // Check if first element is a struct with "value" key (cfqueryparam style)
+            if let Some(CfmlValue::Struct(first)) = arr.first() {
+                let has_value_key = first.iter().any(|(k, _)| k.eq_ignore_ascii_case("value"));
+                if has_value_key {
+                    let mut values = Vec::with_capacity(arr.len());
+                    let mut type_hints = Vec::with_capacity(arr.len());
+                    for item in arr {
+                        if let CfmlValue::Struct(s) = item {
+                            let value = s.iter()
+                                .find(|(k, _)| k.eq_ignore_ascii_case("value"))
+                                .map(|(_, v)| v.clone())
+                                .unwrap_or(CfmlValue::Null);
+
+                            let is_null = s.iter()
+                                .find(|(k, _)| k.eq_ignore_ascii_case("null"))
+                                .map(|(_, v)| {
+                                    match v {
+                                        CfmlValue::Bool(b) => *b,
+                                        CfmlValue::String(s) => s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes"),
+                                        _ => false,
+                                    }
+                                })
+                                .unwrap_or(false);
+
+                            let cfsqltype = s.iter()
+                                .find(|(k, _)| k.eq_ignore_ascii_case("cfsqltype"))
+                                .map(|(_, v)| v.as_string().to_lowercase())
+                                .unwrap_or_else(|| "cf_sql_varchar".to_string());
+
+                            let is_list = s.iter()
+                                .find(|(k, _)| k.eq_ignore_ascii_case("list"))
+                                .map(|(_, v)| {
+                                    match v {
+                                        CfmlValue::Bool(b) => *b,
+                                        CfmlValue::String(s) => s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes"),
+                                        _ => false,
+                                    }
+                                })
+                                .unwrap_or(false);
+
+                            let separator = s.iter()
+                                .find(|(k, _)| k.eq_ignore_ascii_case("separator"))
+                                .map(|(_, v)| v.as_string())
+                                .unwrap_or_else(|| ",".to_string());
+
+                            if is_null {
+                                values.push(CfmlValue::Null);
+                                type_hints.push(cfsqltype);
+                            } else if is_list {
+                                // Expand list value into multiple params
+                                let val_str = value.as_string();
+                                for part in val_str.split(&*separator) {
+                                    let trimmed = part.trim();
+                                    values.push(coerce_by_sqltype(trimmed, &cfsqltype));
+                                    type_hints.push(cfsqltype.clone());
+                                }
+                            } else {
+                                let coerced = coerce_by_sqltype_value(&value, &cfsqltype);
+                                values.push(coerced);
+                                type_hints.push(cfsqltype);
+                            }
+                        } else {
+                            values.push(item.clone());
+                            type_hints.push("cf_sql_varchar".to_string());
+                        }
+                    }
+                    return (values, type_hints);
+                }
+            }
+            // Plain array — pass through
+            (arr.clone(), vec!["cf_sql_varchar".to_string(); arr.len()])
+        }
+        _ => (vec![], vec![]),
+    }
+}
+
+/// Get how many placeholder values each structured param generates (1 for normal, N for list)
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
+fn get_list_placeholder_counts(params_arg: &CfmlValue) -> Vec<usize> {
+    match params_arg {
+        CfmlValue::Array(arr) => {
+            arr.iter().map(|item| {
+                if let CfmlValue::Struct(s) = item {
+                    let is_list = s.iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("list"))
+                        .map(|(_, v)| {
+                            match v {
+                                CfmlValue::Bool(b) => *b,
+                                CfmlValue::String(s) => s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes"),
+                                _ => false,
+                            }
+                        })
+                        .unwrap_or(false);
+                    if is_list {
+                        let separator = s.iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case("separator"))
+                            .map(|(_, v)| v.as_string())
+                            .unwrap_or_else(|| ",".to_string());
+                        let value = s.iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case("value"))
+                            .map(|(_, v)| v.as_string())
+                            .unwrap_or_default();
+                        value.split(&*separator).filter(|s| !s.trim().is_empty()).count().max(1)
+                    } else {
+                        1
+                    }
+                } else {
+                    1
+                }
+            }).collect()
+        }
+        _ => vec![],
+    }
+}
+
+/// Expand SQL ? placeholders for list params: if param N generates 3 values, replace its ? with ?,?,?
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
+fn expand_sql_placeholders(sql: &str, counts: &[usize]) -> String {
+    let mut result = String::with_capacity(sql.len() + counts.len() * 4);
+    let mut param_idx = 0;
+    let bytes = sql.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b'?' && param_idx < counts.len() {
+            let count = counts[param_idx];
+            for j in 0..count {
+                if j > 0 { result.push(','); }
+                result.push('?');
+            }
+            param_idx += 1;
+        } else if bytes[i] == b'\'' {
+            result.push('\'');
+            i += 1;
+            while i < len && bytes[i] != b'\'' {
+                result.push(bytes[i] as char);
+                i += 1;
+            }
+            if i < len { result.push('\''); }
+        } else {
+            result.push(bytes[i] as char);
+        }
+        i += 1;
+    }
+    result
+}
+
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
+fn coerce_by_sqltype(val_str: &str, sqltype: &str) -> CfmlValue {
+    match sqltype {
+        s if s.contains("integer") || s.contains("bigint") || s.contains("smallint") || s.contains("tinyint") => {
+            val_str.parse::<i64>().map(CfmlValue::Int).unwrap_or(CfmlValue::String(val_str.to_string()))
+        }
+        s if s.contains("float") || s.contains("double") || s.contains("decimal") || s.contains("numeric") || s.contains("real") || s.contains("money") => {
+            val_str.parse::<f64>().map(CfmlValue::Double).unwrap_or(CfmlValue::String(val_str.to_string()))
+        }
+        s if s.contains("bit") || s.contains("boolean") => {
+            let lower = val_str.to_lowercase();
+            CfmlValue::Bool(lower == "true" || lower == "yes" || lower == "1")
+        }
+        _ => CfmlValue::String(val_str.to_string()),
+    }
+}
+
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
+fn coerce_by_sqltype_value(val: &CfmlValue, sqltype: &str) -> CfmlValue {
+    match sqltype {
+        s if s.contains("integer") || s.contains("bigint") || s.contains("smallint") || s.contains("tinyint") => {
+            match val {
+                CfmlValue::Int(_) => val.clone(),
+                CfmlValue::Double(d) => CfmlValue::Int(*d as i64),
+                CfmlValue::String(s) => s.parse::<i64>().map(CfmlValue::Int).unwrap_or(val.clone()),
+                CfmlValue::Bool(b) => CfmlValue::Int(if *b { 1 } else { 0 }),
+                _ => val.clone(),
+            }
+        }
+        s if s.contains("float") || s.contains("double") || s.contains("decimal") || s.contains("numeric") || s.contains("real") || s.contains("money") => {
+            match val {
+                CfmlValue::Double(_) => val.clone(),
+                CfmlValue::Int(i) => CfmlValue::Double(*i as f64),
+                CfmlValue::String(s) => s.parse::<f64>().map(CfmlValue::Double).unwrap_or(val.clone()),
+                _ => val.clone(),
+            }
+        }
+        s if s.contains("bit") || s.contains("boolean") => {
+            match val {
+                CfmlValue::Bool(_) => val.clone(),
+                CfmlValue::Int(i) => CfmlValue::Bool(*i != 0),
+                CfmlValue::String(s) => {
+                    let lower = s.to_lowercase();
+                    CfmlValue::Bool(lower == "true" || lower == "yes" || lower == "1")
+                }
+                _ => val.clone(),
+            }
+        }
+        s if s == "cf_sql_null" => CfmlValue::Null,
+        _ => val.clone(),
+    }
+}
+
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
 fn is_select_query(sql: &str) -> bool {
     let trimmed = sql.trim_start();
     trimmed.len() >= 6 && trimmed[..6].eq_ignore_ascii_case("SELECT")
 }
 
-#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db"))]
-fn fn_query_execute(args: Vec<CfmlValue>) -> CfmlResult {
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
+pub fn fn_query_execute(args: Vec<CfmlValue>) -> CfmlResult {
     let sql = get_str(&args, 0);
     if sql.is_empty() {
         return Err(CfmlError::runtime("queryExecute: SQL string is required".to_string()));
     }
 
-    let params_arg = args.get(1).cloned().unwrap_or(CfmlValue::Null);
+    let raw_params = args.get(1).cloned().unwrap_or(CfmlValue::Null);
     let options_arg = args.get(2).cloned().unwrap_or(CfmlValue::Null);
+
+    // Normalize structured params (cfqueryparam-style array of structs) to plain values
+    // Also expand SQL for list params (single ? → multiple ?,?,?)
+    let (sql, params_arg) = match &raw_params {
+        CfmlValue::Array(arr) if !arr.is_empty() => {
+            if let Some(CfmlValue::Struct(first)) = arr.first() {
+                if first.iter().any(|(k, _)| k.eq_ignore_ascii_case("value")) {
+                    let (values, _hints) = normalize_query_params(&raw_params);
+                    // Check if any list params require SQL expansion
+                    let placeholder_counts = get_list_placeholder_counts(&raw_params);
+                    let expanded_sql = if placeholder_counts.iter().any(|&c| c > 1) {
+                        expand_sql_placeholders(&sql, &placeholder_counts)
+                    } else {
+                        sql
+                    };
+                    (expanded_sql, CfmlValue::Array(values))
+                } else {
+                    (sql, raw_params)
+                }
+            } else {
+                (sql, raw_params)
+            }
+        }
+        _ => (sql, raw_params),
+    };
 
     // Extract datasource from options
     let datasource = match &options_arg {
@@ -4423,9 +4808,11 @@ fn fn_query_execute(args: Vec<CfmlValue>) -> CfmlResult {
         DbDriver::Mysql(url) => execute_mysql(&url, &sql, &params_arg, &return_type),
         #[cfg(feature = "postgres_db")]
         DbDriver::Postgres(url) => execute_postgres(&url, &sql, &params_arg, &return_type),
+        #[cfg(feature = "mssql_db")]
+        DbDriver::Mssql(url) => execute_mssql(&url, &sql, &params_arg, &return_type),
         #[allow(unreachable_patterns)]
         _ => Err(CfmlError::runtime(format!(
-            "queryExecute: database driver not available for datasource '{}'. Enable the appropriate feature (sqlite, mysql_db, postgres_db).",
+            "queryExecute: database driver not available for datasource '{}'. Enable the appropriate feature (sqlite, mysql_db, postgres_db, mssql_db).",
             datasource
         ))),
     }
@@ -4437,10 +4824,11 @@ fn fn_query_execute(args: Vec<CfmlValue>) -> CfmlResult {
 
 #[cfg(feature = "sqlite")]
 fn execute_sqlite(path: &str, sql: &str, params_arg: &CfmlValue, return_type: &str) -> CfmlResult {
-    use rusqlite::{Connection, types::Value as SqlValue};
+    use rusqlite::types::Value as SqlValue;
 
-    let conn = Connection::open(path)
-        .map_err(|e| CfmlError::runtime(format!("queryExecute: failed to open database '{}': {}", path, e)))?;
+    let pool = get_sqlite_pool(path)?;
+    let conn = pool.get()
+        .map_err(|e| CfmlError::runtime(format!("queryExecute: failed to get SQLite connection from pool: {}", e)))?;
 
     let bound_params = build_sqlite_params(params_arg, sql)?;
 
@@ -4556,8 +4944,7 @@ fn execute_mysql(url: &str, sql: &str, params_arg: &CfmlValue, return_type: &str
     use mysql::*;
     use mysql::prelude::*;
 
-    let pool = Pool::new(url)
-        .map_err(|e| CfmlError::runtime(format!("queryExecute: MySQL connection error: {}", e)))?;
+    let pool = get_mysql_pool(url)?;
     let mut conn = pool.get_conn()
         .map_err(|e| CfmlError::runtime(format!("queryExecute: MySQL connection error: {}", e)))?;
 
@@ -4651,9 +5038,8 @@ fn mysql_value_to_cfml(val: mysql::Value) -> CfmlValue {
 
 #[cfg(feature = "postgres_db")]
 fn execute_postgres(url: &str, sql: &str, params_arg: &CfmlValue, return_type: &str) -> CfmlResult {
-    use postgres::{Client, NoTls};
-
-    let mut client = Client::connect(url, NoTls)
+    let pool = get_postgres_pool(url)?;
+    let mut client = pool.get()
         .map_err(|e| CfmlError::runtime(format!("queryExecute: PostgreSQL connection error: {}", e)))?;
 
     // Rewrite :name params to $1,$2,... for PostgreSQL
@@ -4864,10 +5250,436 @@ fn postgres_row_to_cfml(row: &postgres::Row, col_idx: usize) -> CfmlValue {
 }
 
 // -----------------------------------------------
+// MSSQL driver (tiberius)
+// -----------------------------------------------
+
+#[cfg(feature = "mssql_db")]
+fn execute_mssql(url: &str, sql: &str, params_arg: &CfmlValue, return_type: &str) -> CfmlResult {
+    use tiberius::{Client, Config, AuthMethod};
+    use tokio::runtime::Builder;
+    use tokio_util::compat::TokioAsyncWriteCompatExt;
+
+    // Parse URL: mssql://user:pass@host:port/database or sqlserver://...
+    let clean_url = url.replace("mssql://", "").replace("sqlserver://", "");
+    // Format: user:pass@host:port/database
+    let (auth_part, host_db) = clean_url.split_once('@')
+        .ok_or_else(|| CfmlError::runtime("queryExecute: MSSQL URL must be mssql://user:pass@host:port/database".to_string()))?;
+    let (user, pass) = auth_part.split_once(':')
+        .ok_or_else(|| CfmlError::runtime("queryExecute: MSSQL URL must include user:password".to_string()))?;
+    let (host_port, database) = host_db.split_once('/')
+        .unwrap_or((host_db, "master"));
+    let (host, port_str) = host_port.split_once(':')
+        .unwrap_or((host_port, "1433"));
+    let port: u16 = port_str.parse().unwrap_or(1433);
+
+    let mut config = Config::new();
+    config.host(host);
+    config.port(port);
+    config.database(database);
+    config.authentication(AuthMethod::sql_server(user, pass));
+    config.trust_cert();
+
+    let addr = format!("{}:{}", host, port);
+
+    // Normalize params
+    let (effective_params, _type_hints) = normalize_query_params(params_arg);
+
+    // Create single-threaded tokio runtime (safe inside spawn_blocking)
+    let rt = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| CfmlError::runtime(format!("queryExecute: failed to create MSSQL runtime: {}", e)))?;
+
+    rt.block_on(async {
+        let tcp = tokio::net::TcpStream::connect(&addr).await
+            .map_err(|e| CfmlError::runtime(format!("queryExecute: MSSQL connection error: {}", e)))?;
+        let mut client = Client::connect(config, tcp.compat_write()).await
+            .map_err(|e| CfmlError::runtime(format!("queryExecute: MSSQL connection error: {}", e)))?;
+
+        if is_select_query(sql) {
+            // Build query with inline params (tiberius simple query)
+            let query_sql = mssql_inline_params(sql, &effective_params);
+            let stream = client.simple_query(&query_sql).await
+                .map_err(|e| CfmlError::runtime(format!("queryExecute: MSSQL query error: {}", e)))?;
+            let result = stream.into_first_result().await
+                .map_err(|e| CfmlError::runtime(format!("queryExecute: MSSQL result error: {}", e)))?;
+
+            let columns: Vec<String> = if let Some(first_row) = result.first() {
+                first_row.columns().iter()
+                    .map(|c| c.name().to_string())
+                    .collect()
+            } else {
+                vec![]
+            };
+
+            let mut rows: Vec<HashMap<String, CfmlValue>> = Vec::with_capacity(result.len());
+            for row in &result {
+                let mut row_map = HashMap::new();
+                for (i, col) in columns.iter().enumerate() {
+                    let val = mssql_column_to_cfml(row.get::<'_, &str, _>(i));
+                    row_map.insert(col.clone(), val);
+                }
+                rows.push(row_map);
+            }
+
+            build_query_result(columns, rows, sql, return_type)
+        } else {
+            let query_sql = mssql_inline_params(sql, &effective_params);
+            let result = client.simple_query(&query_sql).await
+                .map_err(|e| CfmlError::runtime(format!("queryExecute: MSSQL error: {}", e)))?;
+            let rows = result.into_first_result().await
+                .map_err(|e| CfmlError::runtime(format!("queryExecute: MSSQL result error: {}", e)))?;
+            build_mutation_result(rows.len() as i64, 0)
+        }
+    })
+}
+
+#[cfg(feature = "mssql_db")]
+fn mssql_inline_params(sql: &str, params: &[CfmlValue]) -> String {
+    if params.is_empty() {
+        return sql.to_string();
+    }
+    let mut result = String::with_capacity(sql.len() + params.len() * 10);
+    let mut param_idx = 0;
+    let bytes = sql.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b'?' && param_idx < params.len() {
+            match &params[param_idx] {
+                CfmlValue::Null => result.push_str("NULL"),
+                CfmlValue::Int(n) => result.push_str(&n.to_string()),
+                CfmlValue::Double(d) => result.push_str(&d.to_string()),
+                CfmlValue::Bool(b) => result.push_str(if *b { "1" } else { "0" }),
+                CfmlValue::String(s) => {
+                    result.push('\'');
+                    result.push_str(&s.replace('\'', "''"));
+                    result.push('\'');
+                }
+                _ => {
+                    let s = params[param_idx].as_string();
+                    result.push('\'');
+                    result.push_str(&s.replace('\'', "''"));
+                    result.push('\'');
+                }
+            }
+            param_idx += 1;
+        } else if bytes[i] == b'\'' {
+            result.push('\'');
+            i += 1;
+            while i < len && bytes[i] != b'\'' {
+                result.push(bytes[i] as char);
+                i += 1;
+            }
+            if i < len { result.push('\''); }
+        } else {
+            result.push(bytes[i] as char);
+        }
+        i += 1;
+    }
+    result
+}
+
+#[cfg(feature = "mssql_db")]
+fn mssql_column_to_cfml(val: Option<&str>) -> CfmlValue {
+    match val {
+        None => CfmlValue::Null,
+        Some(s) => {
+            // Try integer first, then float, else string
+            if let Ok(i) = s.parse::<i64>() {
+                CfmlValue::Int(i)
+            } else if let Ok(f) = s.parse::<f64>() {
+                CfmlValue::Double(f)
+            } else {
+                CfmlValue::String(s.to_string())
+            }
+        }
+    }
+}
+
+// -----------------------------------------------
+// Transaction support (public functions called by VM)
+// -----------------------------------------------
+
+/// Enum to hold driver-specific transaction connections
+enum TransactionConn {
+    #[cfg(feature = "sqlite")]
+    Sqlite(r2d2::PooledConnection<SqliteConnectionManager>),
+    #[cfg(feature = "mysql_db")]
+    Mysql(mysql::PooledConn),
+    #[cfg(feature = "postgres_db")]
+    Postgres(r2d2::PooledConnection<PostgresConnectionManager>),
+}
+
+// ---- Public wrappers using Box<dyn Any> for VM interop ----
+
+/// Begin a transaction — returns a type-erased connection in a Box<dyn Any>
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
+pub fn txn_begin_boxed(datasource: &str) -> Result<Box<dyn std::any::Any>, CfmlError> {
+    let conn = transaction_begin(datasource)?;
+    Ok(Box::new(conn))
+}
+
+/// Commit a transaction via type-erased connection
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
+pub fn txn_commit_boxed(conn: &mut Box<dyn std::any::Any>) -> Result<(), CfmlError> {
+    if let Some(tc) = conn.downcast_mut::<TransactionConn>() {
+        transaction_commit(tc)
+    } else {
+        Err(CfmlError::runtime("cftransaction: invalid transaction connection".to_string()))
+    }
+}
+
+/// Rollback a transaction via type-erased connection
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
+pub fn txn_rollback_boxed(conn: &mut Box<dyn std::any::Any>) -> Result<(), CfmlError> {
+    if let Some(tc) = conn.downcast_mut::<TransactionConn>() {
+        transaction_rollback(tc)
+    } else {
+        Err(CfmlError::runtime("cftransaction: invalid transaction connection".to_string()))
+    }
+}
+
+/// Execute a query within a transaction via type-erased connection
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
+pub fn txn_execute_boxed(conn: &mut Box<dyn std::any::Any>, sql: &str, params_arg: &CfmlValue, return_type: &str) -> CfmlResult {
+    if let Some(tc) = conn.downcast_mut::<TransactionConn>() {
+        execute_with_transaction(tc, sql, params_arg, return_type)
+    } else {
+        Err(CfmlError::runtime("cftransaction: invalid transaction connection".to_string()))
+    }
+}
+
+/// Begin a transaction — returns a held connection
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
+fn transaction_begin(datasource: &str) -> Result<TransactionConn, CfmlError> {
+    match parse_datasource(datasource) {
+        #[cfg(feature = "sqlite")]
+        DbDriver::Sqlite(path) => {
+            let pool = get_sqlite_pool(&path)?;
+            let conn = pool.get()
+                .map_err(|e| CfmlError::runtime(format!("cftransaction: SQLite pool error: {}", e)))?;
+            conn.execute_batch("BEGIN")
+                .map_err(|e| CfmlError::runtime(format!("cftransaction: BEGIN error: {}", e)))?;
+            Ok(TransactionConn::Sqlite(conn))
+        }
+        #[cfg(feature = "mysql_db")]
+        DbDriver::Mysql(url) => {
+            let pool = get_mysql_pool(&url)?;
+            let mut conn = pool.get_conn()
+                .map_err(|e| CfmlError::runtime(format!("cftransaction: MySQL pool error: {}", e)))?;
+            use mysql::prelude::Queryable;
+            conn.query_drop("BEGIN")
+                .map_err(|e| CfmlError::runtime(format!("cftransaction: BEGIN error: {}", e)))?;
+            Ok(TransactionConn::Mysql(conn))
+        }
+        #[cfg(feature = "postgres_db")]
+        DbDriver::Postgres(url) => {
+            let pool = get_postgres_pool(&url)?;
+            let mut conn = pool.get()
+                .map_err(|e| CfmlError::runtime(format!("cftransaction: PostgreSQL pool error: {}", e)))?;
+            conn.simple_query("BEGIN")
+                .map_err(|e| CfmlError::runtime(format!("cftransaction: BEGIN error: {}", e)))?;
+            Ok(TransactionConn::Postgres(conn))
+        }
+        #[allow(unreachable_patterns)]
+        _ => Err(CfmlError::runtime(format!(
+            "cftransaction: unsupported datasource '{}'", datasource
+        ))),
+    }
+}
+
+/// Commit a transaction
+fn transaction_commit(conn: &mut TransactionConn) -> Result<(), CfmlError> {
+    match conn {
+        #[cfg(feature = "sqlite")]
+        TransactionConn::Sqlite(c) => {
+            c.execute_batch("COMMIT")
+                .map_err(|e| CfmlError::runtime(format!("cftransaction: COMMIT error: {}", e)))
+        }
+        #[cfg(feature = "mysql_db")]
+        TransactionConn::Mysql(c) => {
+            use mysql::prelude::Queryable;
+            c.query_drop("COMMIT")
+                .map_err(|e| CfmlError::runtime(format!("cftransaction: COMMIT error: {}", e)))
+        }
+        #[cfg(feature = "postgres_db")]
+        TransactionConn::Postgres(c) => {
+            c.simple_query("COMMIT").map(|_| ())
+                .map_err(|e| CfmlError::runtime(format!("cftransaction: COMMIT error: {}", e)))
+        }
+        #[allow(unreachable_patterns)]
+        _ => Ok(()),
+    }
+}
+
+/// Rollback a transaction
+fn transaction_rollback(conn: &mut TransactionConn) -> Result<(), CfmlError> {
+    match conn {
+        #[cfg(feature = "sqlite")]
+        TransactionConn::Sqlite(c) => {
+            c.execute_batch("ROLLBACK")
+                .map_err(|e| CfmlError::runtime(format!("cftransaction: ROLLBACK error: {}", e)))
+        }
+        #[cfg(feature = "mysql_db")]
+        TransactionConn::Mysql(c) => {
+            use mysql::prelude::Queryable;
+            c.query_drop("ROLLBACK")
+                .map_err(|e| CfmlError::runtime(format!("cftransaction: ROLLBACK error: {}", e)))
+        }
+        #[cfg(feature = "postgres_db")]
+        TransactionConn::Postgres(c) => {
+            c.simple_query("ROLLBACK").map(|_| ())
+                .map_err(|e| CfmlError::runtime(format!("cftransaction: ROLLBACK error: {}", e)))
+        }
+        #[allow(unreachable_patterns)]
+        _ => Ok(()),
+    }
+}
+
+/// Execute a query using an existing transaction connection
+fn execute_with_transaction(conn: &mut TransactionConn, sql: &str, params_arg: &CfmlValue, return_type: &str) -> CfmlResult {
+    match conn {
+        #[cfg(feature = "sqlite")]
+        TransactionConn::Sqlite(c) => {
+            execute_sqlite_with_conn(c, sql, params_arg, return_type)
+        }
+        #[cfg(feature = "mysql_db")]
+        TransactionConn::Mysql(c) => {
+            execute_mysql_with_conn(c, sql, params_arg, return_type)
+        }
+        #[cfg(feature = "postgres_db")]
+        TransactionConn::Postgres(c) => {
+            execute_postgres_with_conn(c, sql, params_arg, return_type)
+        }
+        #[allow(unreachable_patterns)]
+        _ => Err(CfmlError::runtime("Transaction: unsupported driver".to_string())),
+    }
+}
+
+#[cfg(feature = "sqlite")]
+fn execute_sqlite_with_conn(conn: &rusqlite::Connection, sql: &str, params_arg: &CfmlValue, return_type: &str) -> CfmlResult {
+    use rusqlite::types::Value as SqlValue;
+
+    let bound_params = build_sqlite_params(params_arg, sql)?;
+
+    if is_select_query(sql) {
+        let mut stmt = conn.prepare(sql)
+            .map_err(|e| CfmlError::runtime(format!("queryExecute: SQL error: {}", e)))?;
+        let column_count = stmt.column_count();
+        let columns: Vec<String> = (0..column_count)
+            .map(|i| stmt.column_name(i).unwrap_or("?").to_string())
+            .collect();
+        let rows_result: Result<Vec<HashMap<String, CfmlValue>>, _> = stmt
+            .query_map(rusqlite::params_from_iter(bound_params.iter()), |row| {
+                let mut row_map = HashMap::new();
+                for (i, col) in columns.iter().enumerate() {
+                    let val: SqlValue = row.get_unwrap(i);
+                    row_map.insert(col.clone(), sqlite_to_cfml(val));
+                }
+                Ok(row_map)
+            })
+            .map_err(|e| CfmlError::runtime(format!("queryExecute: query error: {}", e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CfmlError::runtime(format!("queryExecute: row error: {}", e)));
+        let rows = rows_result?;
+        build_query_result(columns, rows, sql, return_type)
+    } else {
+        let affected = conn.execute(sql, rusqlite::params_from_iter(bound_params.iter()))
+            .map_err(|e| CfmlError::runtime(format!("queryExecute: SQL error: {}", e)))?;
+        let last_id = conn.last_insert_rowid();
+        build_mutation_result(affected as i64, last_id)
+    }
+}
+
+#[cfg(feature = "mysql_db")]
+fn execute_mysql_with_conn(conn: &mut mysql::PooledConn, sql: &str, params_arg: &CfmlValue, return_type: &str) -> CfmlResult {
+    use mysql::*;
+    use mysql::prelude::*;
+
+    let params = match params_arg {
+        CfmlValue::Array(arr) => {
+            let vals: Vec<mysql::Value> = arr.iter().map(cfml_to_mysql_value).collect();
+            Params::Positional(vals)
+        }
+        CfmlValue::Struct(map) => {
+            let mut named: HashMap<Vec<u8>, mysql::Value> = HashMap::new();
+            for (k, v) in map.iter() {
+                named.insert(k.as_bytes().to_vec(), cfml_to_mysql_value(v));
+            }
+            Params::Named(named)
+        }
+        _ => Params::Empty,
+    };
+
+    if is_select_query(sql) {
+        let result: Vec<Row> = conn.exec(sql, &params)
+            .map_err(|e| CfmlError::runtime(format!("queryExecute: MySQL query error: {}", e)))?;
+        let columns: Vec<String> = if let Some(first_row) = result.first() {
+            first_row.columns_ref().iter()
+                .map(|c| c.name_str().to_string())
+                .collect()
+        } else {
+            vec![]
+        };
+        let mut rows: Vec<HashMap<String, CfmlValue>> = Vec::with_capacity(result.len());
+        for row in &result {
+            let mut row_map = HashMap::new();
+            for (i, col) in columns.iter().enumerate() {
+                let val: mysql::Value = row.get(i).unwrap_or(mysql::Value::NULL);
+                row_map.insert(col.clone(), mysql_value_to_cfml(val));
+            }
+            rows.push(row_map);
+        }
+        build_query_result(columns, rows, sql, return_type)
+    } else {
+        conn.exec_drop(sql, &params)
+            .map_err(|e| CfmlError::runtime(format!("queryExecute: MySQL error: {}", e)))?;
+        let affected = conn.affected_rows() as i64;
+        let last_id = conn.last_insert_id() as i64;
+        build_mutation_result(affected, last_id)
+    }
+}
+
+#[cfg(feature = "postgres_db")]
+fn execute_postgres_with_conn(client: &mut postgres::Client, sql: &str, params_arg: &CfmlValue, return_type: &str) -> CfmlResult {
+    let (rewritten_sql, ordered_params) = rewrite_params_for_postgres(sql, params_arg)?;
+    let param_refs: Vec<&(dyn postgres::types::ToSql + Sync)> = ordered_params.iter()
+        .map(|v| v as &(dyn postgres::types::ToSql + Sync))
+        .collect();
+
+    if is_select_query(sql) {
+        let rows = client.query(&rewritten_sql, &param_refs)
+            .map_err(|e| CfmlError::runtime(format!("queryExecute: PostgreSQL query error: {}", e)))?;
+        let columns: Vec<String> = if let Some(first_row) = rows.first() {
+            first_row.columns().iter()
+                .map(|c| c.name().to_string())
+                .collect()
+        } else {
+            vec![]
+        };
+        let mut result_rows: Vec<HashMap<String, CfmlValue>> = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let mut row_map = HashMap::new();
+            for (i, col) in columns.iter().enumerate() {
+                let val = postgres_row_to_cfml(row, i);
+                row_map.insert(col.clone(), val);
+            }
+            result_rows.push(row_map);
+        }
+        build_query_result(columns, result_rows, sql, return_type)
+    } else {
+        let affected = client.execute(&rewritten_sql, &param_refs)
+            .map_err(|e| CfmlError::runtime(format!("queryExecute: PostgreSQL error: {}", e)))?;
+        build_mutation_result(affected as i64, 0)
+    }
+}
+
+// -----------------------------------------------
 // Shared result builders
 // -----------------------------------------------
 
-#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db"))]
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
 fn build_query_result(columns: Vec<String>, rows: Vec<HashMap<String, CfmlValue>>, sql: &str, return_type: &str) -> CfmlResult {
     if return_type == "array" {
         let arr: Vec<CfmlValue> = rows.into_iter()
@@ -4884,7 +5696,7 @@ fn build_query_result(columns: Vec<String>, rows: Vec<HashMap<String, CfmlValue>
     }
 }
 
-#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db"))]
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
 fn build_mutation_result(affected: i64, last_id: i64) -> CfmlResult {
     let mut result = HashMap::new();
     result.insert("recordCount".to_string(), CfmlValue::Int(affected));
@@ -4930,6 +5742,18 @@ fn fn_cfabort_stub(_args: Vec<CfmlValue>) -> CfmlResult {
 
 fn fn_invoke_stub(_args: Vec<CfmlValue>) -> CfmlResult {
     Err(CfmlError::runtime("invoke requires VM intercept".into()))
+}
+
+fn fn_cftransaction_start_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("__cftransaction_start requires VM intercept".into()))
+}
+
+fn fn_cftransaction_commit_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("__cftransaction_commit requires VM intercept".into()))
+}
+
+fn fn_cftransaction_rollback_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("__cftransaction_rollback requires VM intercept".into()))
 }
 
 // -----------------------------------------------

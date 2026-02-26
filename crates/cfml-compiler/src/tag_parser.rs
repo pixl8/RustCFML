@@ -156,10 +156,12 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
             "cfoutput" => return (String::new(), close_end - start),
             "cffunction" => return ("}\n".to_string(), close_end - start),
             "cfcomponent" => return ("}\n".to_string(), close_end - start),
+            "cfinterface" => return ("}\n".to_string(), close_end - start),
             "cftry" => return (String::new(), close_end - start), // try block closed by catch
             "cfcatch" => return ("}\n".to_string(), close_end - start),
             "cfscript" => return (String::new(), close_end - start),
             "cfsavecontent" => return (String::new(), close_end - start),
+            "cftransaction" => return (String::new(), close_end - start),
             _ => return (String::new(), close_end - start),
         }
     }
@@ -293,10 +295,34 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
         "cfcomponent" => {
             let name = attrs.get("name").cloned();
             let extends = attrs.get("extends").cloned();
+            let implements = attrs.get("implements").cloned();
             let mut decl = if let Some(ref n) = name {
                 format!("component {} ", n)
             } else {
                 "component ".to_string()
+            };
+            if let Some(ext) = extends {
+                decl.push_str(&format!("extends {} ", ext));
+            }
+            if let Some(imp) = implements {
+                decl.push_str(&format!("implements {} ", imp));
+            }
+            // Pass through extra attributes as metadata key="value" pairs
+            for (k, v) in &attrs {
+                if k != "name" && k != "extends" && k != "implements" {
+                    decl.push_str(&format!("{}=\"{}\" ", k, v));
+                }
+            }
+            decl.push_str("{\n");
+            (decl, tag_end - start)
+        }
+        "cfinterface" => {
+            let name = attrs.get("name").cloned();
+            let extends = attrs.get("extends").cloned();
+            let mut decl = if let Some(ref n) = name {
+                format!("interface {} ", n)
+            } else {
+                "interface ".to_string()
             };
             if let Some(ext) = extends {
                 decl.push_str(&format!("extends {} ", ext));
@@ -346,12 +372,23 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
             // Everything between <cfquery> and </cfquery> is the SQL
             if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cfquery") {
                 let sql_raw: String = chars[tag_end..end_tag_pos].iter().collect();
-                let sql = sql_raw.trim().replace('"', "\\\"").replace('\n', " ").replace('\r', "");
                 let close_end = find_tag_end(chars, end_tag_pos, len);
 
+                // Scan for <cfqueryparam> tags — replace with ? and collect params
+                let (cleaned_sql, query_params) = scan_cfqueryparam_tags(&sql_raw);
+
+                // Process remaining hash expressions in SQL for string interpolation
+                let sql = process_sql_hashes(&cleaned_sql);
+
                 let mut opts_parts = Vec::new();
-                if let Some(ds) = datasource {
-                    opts_parts.push(format!("datasource: \"{}\"", ds));
+                if let Some(ds) = &datasource {
+                    let ds_val = strip_hashes(ds);
+                    if ds != &ds_val {
+                        // Dynamic datasource — emit as variable reference
+                        opts_parts.push(format!("datasource: {}", ds_val));
+                    } else {
+                        opts_parts.push(format!("datasource: \"{}\"", ds));
+                    }
                 }
                 if let Some(rt) = return_type {
                     opts_parts.push(format!("returnType: \"{}\"", rt));
@@ -363,7 +400,28 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
                     format!("{{ {} }}", opts_parts.join(", "))
                 };
 
-                (format!("{} = queryExecute(\"{}\", [], {});\n", name, sql, opts_str), close_end - start)
+                let params_str = if query_params.is_empty() {
+                    "[]".to_string()
+                } else {
+                    let param_strs: Vec<String> = query_params.iter().map(|p| {
+                        let mut parts = Vec::new();
+                        parts.push(format!("value: {}", p.value_expr));
+                        parts.push(format!("cfsqltype: \"{}\"", p.cfsqltype));
+                        if p.null {
+                            parts.push("null: true".to_string());
+                        }
+                        if p.list {
+                            parts.push("list: true".to_string());
+                            if p.separator != "," {
+                                parts.push(format!("separator: \"{}\"", p.separator));
+                            }
+                        }
+                        format!("{{ {} }}", parts.join(", "))
+                    }).collect();
+                    format!("[{}]", param_strs.join(", "))
+                };
+
+                (format!("{} = queryExecute({}, {}, {});\n", name, sql, params_str, opts_str), close_end - start)
             } else {
                 (String::new(), tag_end - start)
             }
@@ -472,6 +530,55 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
                 (format!("__cfsavecontent_start();\n{}{} = __cfsavecontent_end();\n", body_script, variable), close_end - start)
             } else {
                 (format!("__cfsavecontent_start();\n"), tag_end - start)
+            }
+        }
+        "cftransaction" => {
+            let action = attrs.get("action").cloned().unwrap_or_else(|| "begin".to_string());
+            let isolation = attrs.get("isolation").cloned();
+            let datasource = attrs.get("datasource").cloned();
+
+            match action.to_lowercase().as_str() {
+                "commit" => {
+                    (format!("__cftransaction_commit();\n"), tag_end - start)
+                }
+                "rollback" => {
+                    (format!("__cftransaction_rollback();\n"), tag_end - start)
+                }
+                _ => {
+                    // "begin" (default) — wraps body in try/catch
+                    if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cftransaction") {
+                        let body: String = chars[tag_end..end_tag_pos].iter().collect();
+                        let close_end = find_tag_end(chars, end_tag_pos, len);
+                        let body_script = tags_to_script(&body);
+
+                        // Build args for __cftransaction_start
+                        let mut txn_args = vec!["\"begin\"".to_string()];
+                        if let Some(ref iso) = isolation {
+                            txn_args.push(format!("\"{}\"", iso));
+                        }
+                        if let Some(ref ds) = datasource {
+                            let ds_val = strip_hashes(ds);
+                            if ds != &ds_val {
+                                txn_args.push(ds_val);
+                            } else {
+                                txn_args.push(format!("\"{}\"", ds));
+                            }
+                        } else {
+                            // Try to extract datasource from the first cfquery inside
+                            let ds_from_body = extract_datasource_from_body(&body);
+                            if let Some(ds) = ds_from_body {
+                                txn_args.push(format!("\"{}\"", ds));
+                            }
+                        }
+
+                        (format!(
+                            "__cftransaction_start({});\ntry {{\n{}\n__cftransaction_commit();\n}} catch(any __txn_e) {{\n__cftransaction_rollback();\nthrow __txn_e;\n}}\n",
+                            txn_args.join(", "), body_script
+                        ), close_end - start)
+                    } else {
+                        (format!("__cftransaction_start(\"begin\");\n"), tag_end - start)
+                    }
+                }
             }
         }
         "cfinvoke" => {
@@ -859,6 +966,164 @@ fn parse_cfloop_tag(
     } else {
         // Infinite loop? Just use while(true)
         ("while (true) {\n".to_string(), consumed)
+    }
+}
+
+/// Extract datasource from the first <cfquery> tag in a body string
+fn extract_datasource_from_body(body: &str) -> Option<String> {
+    let lower = body.to_lowercase();
+    if let Some(pos) = lower.find("<cfquery") {
+        let chars: Vec<char> = body.chars().collect();
+        let len = chars.len();
+        // Skip tag name
+        let mut i = pos + 8; // past "<cfquery"
+        while i < len && chars[i].is_alphanumeric() {
+            i += 1;
+        }
+        let (attrs, _) = parse_tag_attributes(&chars, i, len);
+        return attrs.get("datasource").cloned();
+    }
+    None
+}
+
+// -----------------------------------------------
+// cfqueryparam scanning
+// -----------------------------------------------
+
+struct CfQueryParam {
+    value_expr: String,  // The value expression (script-ready: variable ref or string literal)
+    cfsqltype: String,
+    null: bool,
+    list: bool,
+    separator: String,
+}
+
+/// Scan SQL body for <cfqueryparam> tags, replace them with ? placeholders,
+/// and collect structured parameter info.
+fn scan_cfqueryparam_tags(sql_body: &str) -> (String, Vec<CfQueryParam>) {
+    let mut result = String::with_capacity(sql_body.len());
+    let mut params = Vec::new();
+    let chars: Vec<char> = sql_body.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        // Look for <cfqueryparam
+        if i + 14 < len && chars[i] == '<' {
+            let ahead: String = chars[i..std::cmp::min(i + 14, len)].iter().collect();
+            if ahead.to_lowercase().starts_with("<cfqueryparam") {
+                // Check if followed by space or > (not a different tag)
+                let next_after = chars.get(i + 13);
+                if next_after == Some(&' ') || next_after == Some(&'>') || next_after == Some(&'/') || next_after == Some(&'\t') || next_after == Some(&'\n') {
+                    // Parse the tag attributes
+                    let name_end = i + 13; // after "cfqueryparam"
+                    let (tag_attrs, _) = parse_tag_attributes(&chars, name_end, len);
+
+                    // Extract cfqueryparam attributes
+                    let value_raw = tag_attrs.get("value").cloned().unwrap_or_default();
+                    let cfsqltype = tag_attrs.get("cfsqltype").cloned()
+                        .unwrap_or_else(|| "cf_sql_varchar".to_string());
+                    let null = tag_attrs.get("null")
+                        .map(|v| v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+                        .unwrap_or(false);
+                    let list = tag_attrs.get("list")
+                        .map(|v| v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+                        .unwrap_or(false);
+                    let separator = tag_attrs.get("separator").cloned().unwrap_or_else(|| ",".to_string());
+
+                    // Convert value to script expression
+                    let value_expr = if null {
+                        "\"\"".to_string()
+                    } else {
+                        let stripped = strip_hashes(&value_raw);
+                        if stripped != value_raw {
+                            // Had hashes — it's a variable reference
+                            stripped
+                        } else if value_raw.is_empty() {
+                            "\"\"".to_string()
+                        } else {
+                            // Literal string value
+                            format!("\"{}\"", value_raw.replace('"', "\\\""))
+                        }
+                    };
+
+                    params.push(CfQueryParam {
+                        value_expr,
+                        cfsqltype,
+                        null,
+                        list,
+                        separator,
+                    });
+
+                    // Replace with ? placeholder
+                    result.push('?');
+
+                    // Skip to end of <cfqueryparam> tag
+                    while i < len && chars[i] != '>' {
+                        i += 1;
+                    }
+                    if i < len {
+                        i += 1; // skip >
+                    }
+                    continue;
+                }
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+
+    (result, params)
+}
+
+/// Process hash expressions in SQL for cfquery.
+/// Converts #var# to string concatenation: `"..." & var & "..."`
+/// Returns a script expression that builds the final SQL string.
+fn process_sql_hashes(sql: &str) -> String {
+    let sql = sql.trim().replace('\n', " ").replace('\r', "");
+
+    if !sql.contains('#') {
+        // No hash expressions — simple string literal
+        return format!("\"{}\"", sql.replace('"', "\\\""));
+    }
+
+    // Split on hash pairs and build concatenation
+    let chars: Vec<char> = sql.chars().collect();
+    let len = chars.len();
+    let mut parts: Vec<String> = Vec::new();
+    let mut current_text = String::new();
+    let mut i = 0;
+
+    while i < len {
+        if chars[i] == '#' {
+            // Look for closing #
+            if let Some(end_offset) = chars[i + 1..].iter().position(|&c| c == '#') {
+                let end = i + 1 + end_offset;
+                // Flush current text
+                if !current_text.is_empty() {
+                    parts.push(format!("\"{}\"", current_text.replace('"', "\\\"")));
+                    current_text = String::new();
+                }
+                // Extract expression
+                let expr: String = chars[i + 1..end].iter().collect();
+                parts.push(expr);
+                i = end + 1;
+                continue;
+            }
+        }
+        current_text.push(chars[i]);
+        i += 1;
+    }
+
+    // Flush remaining text
+    if !current_text.is_empty() {
+        parts.push(format!("\"{}\"", current_text.replace('"', "\\\"")));
+    }
+
+    if parts.len() == 1 {
+        parts.into_iter().next().unwrap()
+    } else {
+        parts.join(" & ")
     }
 }
 

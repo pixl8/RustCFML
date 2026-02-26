@@ -67,6 +67,18 @@ struct CfmlResponse {
 }
 
 fn main() {
+    // Spawn a thread with a large stack (64 MB) so deep recursion in the VM
+    // doesn't blow the default ~8 MB main-thread stack (especially in debug builds).
+    const STACK_SIZE: usize = 64 * 1024 * 1024;
+    let builder = std::thread::Builder::new().stack_size(STACK_SIZE);
+    let handler = builder.spawn(real_main).expect("failed to spawn main thread");
+    if let Err(e) = handler.join() {
+        eprintln!("Fatal: {:?}", e);
+        exit(1);
+    }
+}
+
+fn real_main() {
     let args = Args::parse();
 
     if args.version {
@@ -234,6 +246,13 @@ fn compile_and_run(
     for (name, func) in get_builtin_functions() {
         vm.builtins.insert(name, func);
     }
+
+    // Register database transaction function pointers
+    vm.txn_begin = Some(cfml_stdlib::builtins::txn_begin_boxed);
+    vm.txn_commit = Some(cfml_stdlib::builtins::txn_commit_boxed);
+    vm.txn_rollback = Some(cfml_stdlib::builtins::txn_rollback_boxed);
+    vm.txn_execute = Some(cfml_stdlib::builtins::txn_execute_boxed);
+    vm.query_execute_fn = Some(cfml_stdlib::builtins::fn_query_execute);
 
     // Ensure web scopes always exist (CFML guarantees url/cgi/form are always defined)
     vm.globals.entry("url".to_string()).or_insert_with(|| CfmlValue::Struct(HashMap::new()));

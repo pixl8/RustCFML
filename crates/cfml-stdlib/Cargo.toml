@@ -16,7 +16,8 @@ database = ["sqlite"]
 sqlite = ["rusqlite"]
 mysql_db = ["dep:mysql"]
 postgres_db = ["dep:postgres"]
-all-databases = ["sqlite", "mysql_db", "postgres_db"]
+mssql_db = ["dep:tiberius", "dep:tokio", "dep:tokio-util"]
+all-databases = ["sqlite", "mysql_db", "postgres_db", "mssql_db"]
 xml = ["quick-xml"]
 
 [dependencies]
@@ -33,6 +34,10 @@ ureq = { version = "2", optional = true }
 rusqlite = { version = "0.31", features = ["bundled"], optional = true }
 mysql = { version = "25", optional = true }
 postgres = { version = "0.19", optional = true }
+tiberius = { version = "0.12", default-features = false, features = ["rustls"], optional = true }
+tokio = { version = "1", features = ["rt", "net"], optional = true }
+tokio-util = { version = "0.7", features = ["compat"], optional = true }
+r2d2 = "0.8"
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 des = "0.8"

@@ -3,6 +3,8 @@
 ## Overview
 RustCFML is a CFML interpreter written in Rust, inspired by RustPython's architecture. This document tracks the implementation status of various CFML features.
 
+Compatibility target: [cfdocs.org/functions](https://cfdocs.org/functions) and [cfdocs.org/tags](https://cfdocs.org/tags)
+
 ---
 
 ## ✅ COMPLETED / WORKING
@@ -108,31 +110,25 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 - [x] Local scope (`var x`, `local.x`)
 - [x] Variables scope (`variables.x`)
 - [x] Arguments scope (`arguments.name`, `arguments[1]`)
+- [x] `request` scope (per-request HashMap)
+- [x] `application` scope (Arc<Mutex>, persists in serve mode)
+- [x] `server` scope (read-only OS/version info)
 - [x] Parent scope inheritance (closures see parent variables)
 - [x] Parent scope write-back (closures can mutate parent variables via `closure_parent_writeback`)
 - [x] Case-insensitive variable lookup
 
-### CFML Tag Syntax
-- [x] `<cfset variable = value>` - variable assignment
-- [x] `<cfoutput>#expression#</cfoutput>` - output with expression interpolation
-- [x] `<cfif condition>...<cfelseif>...<cfelse>...</cfif>` - conditionals
-- [x] `<cfloop>` - loops (from/to/index, condition, array, list, collection)
-- [x] `<cfscript>...</cfscript>` - embedded script blocks
-- [x] `<cffunction name="..." ...>...</cffunction>` - function definition
-- [x] `<cfargument name="..." default="...">` - function parameters
-- [x] `<cfreturn expression>` - return values
-- [x] `<cfinclude template="path">` - file inclusion
-- [x] `<cfdump var="#expression#">` - debug dump
-- [x] `<cfthrow message="...">` - throw exception
-- [x] `<cftry>...<cfcatch>...</cfcatch></cftry>` - error handling
-- [x] `<cfabort>` - abort processing
-- [x] `<cfparam name="..." default="...">` - parameter defaults
-- [x] `<cfcomponent>...</cfcomponent>` - component definition
-- [x] `<cfproperty name="..." ...>` - property definition
+### CFML Tag Syntax (31 tags handled)
+- [x] `<cfset>`, `<cfoutput>`, `<cfif>/<cfelseif>/<cfelse>`, `<cfloop>`
+- [x] `<cfscript>`, `<cffunction>`, `<cfargument>`, `<cfreturn>`
+- [x] `<cfinclude>`, `<cfdump>`, `<cfthrow>`, `<cftry>/<cfcatch>`
+- [x] `<cfabort>`, `<cfparam>`, `<cfcomponent>`, `<cfinterface>`, `<cfproperty>`
+- [x] `<cfhttp>`, `<cfquery>`, `<cfqueryparam>`, `<cfheader>`, `<cfcontent>`, `<cflocation>`
+- [x] `<cfdirectory>`, `<cfsavecontent>`, `<cfinvoke>`, `<cftransaction>`
 - [x] Hash expression evaluation (`#expr#`) in text regions
+- [x] CFML comment stripping (`<!--- ... --->`)
 - [x] Automatic tag-to-script conversion
 
-### Standard Library (250+ Built-in Functions)
+### Standard Library (260+ Built-in Functions)
 
 **String Functions (45+)**
 - [x] `len()`, `ucase()`, `lcase()`, `trim()`, `ltrim()`, `rtrim()`
@@ -228,23 +224,33 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 - [x] Via `ureq` v2 (sync)
 
 ### Database Connectivity
-- [x] `queryExecute()` — SQLite (rusqlite), MySQL (mysql crate), PostgreSQL (postgres crate)
+- [x] `queryExecute()` — SQLite (rusqlite), MySQL/MariaDB (mysql crate), PostgreSQL (postgres crate), MSSQL/SQL Server (tiberius)
 - [x] Positional (`?`) and named (`:param`) parameters for all drivers
 - [x] SQLite: in-memory (`:memory:`) and file-based
-- [x] MySQL: `mysql://user:pass@host:port/db` datasource URL
+- [x] MySQL/MariaDB: `mysql://user:pass@host:port/db` datasource URL
 - [x] PostgreSQL: `postgres://user:pass@host:port/db` datasource URL (auto-rewrites `:name` → `$N`)
-- [x] Feature flags: `sqlite`, `mysql_db`, `postgres_db`, `all-databases`
+- [x] MSSQL/SQL Server: `mssql://user:pass@host:port/db` or `sqlserver://` datasource URL
+- [x] Feature flags: `sqlite`, `mysql_db`, `postgres_db`, `mssql_db`, `all-databases`
 - [x] SELECT → CfmlQuery, INSERT/UPDATE/DELETE → struct with recordCount/generatedKey
 - [x] `<cfquery>` tag support with datasource attribute
+- [x] Connection pooling: r2d2 pools for SQLite/PostgreSQL, cached mysql::Pool for MySQL/MariaDB
+- [x] `<cfqueryparam>` — parameterized queries with type coercion (`cfsqltype`), null support, list expansion
+- [x] `<cftransaction>` — begin/commit/rollback with auto-rollback on exception, datasource auto-detection
+- [x] Structured query params: array of `{value, cfsqltype, null, list, separator}` structs with type coercion
 
-### Component Inheritance
+### Components & Interfaces
 - [x] `extends` keyword with dot-path resolution (e.g., `extends taffy.core.resource`)
 - [x] Recursive parent→child merge with circular inheritance detection
 - [x] `super.method()` — calls parent method with child `this` binding
-- [x] `isInstanceOf(obj, typeName)` — walks `__extends_chain`, case-insensitive
+- [x] `isInstanceOf(obj, typeName)` — walks `__extends_chain` + `__implements_chain`, case-insensitive
 - [x] `getMetadata(component)` — name, extends, functions, properties, custom metadata
 - [x] `createObject("component", "name")` — VM-intercepted dynamic instantiation
 - [x] Component/function metadata attributes (`taffy_uri="/path"`, `taffy:mime="text/json"`)
+- [x] `interface` keyword + `<cfinterface>` tag — define method contracts
+- [x] `implements` keyword — compile-time + runtime validation of interface methods
+- [x] Interface inheritance (`interface IChild extends IParent`)
+- [x] Multiple interface implementation (`component Foo implements IBar, IBaz`)
+- [x] Transitive interface validation (parent interface methods enforced on implementors)
 
 ### Component Mappings
 - [x] `this.mappings` in Application.cfc — virtual prefix → physical directory
@@ -292,8 +298,52 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 - [x] `isValid(type, value)` — email, url, integer, numeric, date, uuid (CFML format), guid, range, regex, creditcard, boolean, zipcode, phone, ssn
 - [x] `encodeForHTML()`, `encodeForURL()`, `encodeForCSS()`, `encodeForJavaScript()`
 
+### Security Functions
+- [x] `encrypt()` / `decrypt()` — AES-128/192/256, DES, DESEDE, Blowfish (CBC+PKCS7), CFMX_COMPAT XOR
+- [x] `hmac()` — MD5, SHA-1, SHA-256, SHA-384, SHA-512
+- [x] `generateSecretKey()` — AES/DES/DESEDE/Blowfish
+- [x] UU/Base64/Hex encoding support
+
+### XML Functions
+- [x] `xmlParse()` — event-based parsing via quick-xml → nested structs
+- [x] `xmlSearch()` — descendant (`//tag`) and path (`/a/b/c`) queries
+- [x] `isXML()`
+
+### Application.cfc Lifecycle
+- [x] `Application.cfc` discovery — walks up directory tree
+- [x] Lifecycle methods: `onApplicationStart`, `onRequestStart`, `onRequest`, `onRequestEnd`, `onError`
+- [x] Function caching across requests in serve mode (ServerState)
+- [x] `onMissingMethod` — component fallback handler
+- [x] Implicit property accessors (`getXxx()`/`setXxx()` auto-generated)
+- [x] `cfsavecontent` — `<cfsavecontent variable="x">body</cfsavecontent>`
+- [x] `invoke()` — standalone function: `invoke(component, "method", argStruct)`
+
+### URL Rewrite Engine
+- [x] Tuckey-compatible `urlrewrite.xml` parser + rewrite engine
+- [x] Regex/wildcard patterns, conditions (method/port/header)
+- [x] Forward/redirect/permanent-redirect, rule chaining
+
+### Web Server (Axum)
+- [x] `--serve [path]` mode with `--port` option
+- [x] HTTP response infrastructure (headers, status, content-type, redirect)
+- [x] `cfheader`, `cfcontent`, `cflocation` tag support
+- [x] `getHTTPRequestData()` — method, headers, content
+- [x] `form` scope (application/x-www-form-urlencoded POST bodies)
+- [x] `url` scope (query string parameters)
+- [x] `cgi` scope (request metadata)
+
+### System Functions
+- [x] `getBaseTemplatePath()`, `getCurrentTemplatePath()`, `getDirectoryFromPath()`
+- [x] `getTimeZone()` (TZ env + /etc/localtime)
+- [x] `getComponentMetadata()` — VM intercept returning full component metadata
+
+### Closures
+- [x] Variable capture (closures retain defining scope)
+- [x] Shared mutable state across invocations (via `Arc<RwLock<HashMap>>` shared environment)
+- [x] Multiple closures from same scope share variables (accumulator/counter patterns)
+
 ### Infrastructure
-- [x] CLI with file execution support
+- [x] CLI with file execution support (64MB thread stack for deep recursion)
 - [x] `-c` / `--code` inline code execution
 - [x] `-d` / `--debug` debug output (tokens, AST, bytecode)
 - [x] `-r` / `--repl` interactive REPL mode
@@ -301,44 +351,258 @@ RustCFML is a CFML interpreter written in Rust, inspired by RustPython's archite
 - [x] WASM compilation target
 - [x] Error handling with line/column info
 - [x] Automatic CFML tag detection and conversion
+- [x] Soft keywords as identifiers (`local`, `param`, `output`, `required`, etc.)
+- [x] Keywords as property names after dot (`obj.default`, `obj.continue`)
+- [x] Return type annotations (`private array function foo()`)
+- [x] Dotted var declarations (`var local.x = 1`)
 
 ---
 
-## ⚠️ PARTIALLY IMPLEMENTED / NEEDS WORK
+## 🔴 CRITICAL GAPS (blocking real-world usage)
 
-### Components (.cfc)
-- [ ] Interfaces (`implements`)
+> Audited against [cfdocs.org/functions](https://cfdocs.org/functions) and [cfdocs.org/tags](https://cfdocs.org/tags) — Feb 2026
 
-### Standard Library (Remaining from Audit)
-- [ ] `evaluate()` / `iif()` — need embedded parser for runtime expression evaluation
-- [ ] `querySlice()` — query sub-range
-- [ ] `arraySplice()` — remove and replace elements
-- [ ] `xmlTransform()` — needs XSLT engine
-- [ ] `xmlValidate()` — needs XML schema engine
-- [ ] Session scope
+### 1. Missing Control-Flow Tags
+Tag-based CFML using switch/while/break/continue/finally fails — tag preprocessor doesn't handle them.
+- [ ] `<cfswitch>/<cfcase>/<cfdefaultcase>` → convert to cfscript `switch/case/default`
+- [ ] `<cfbreak>` → `break;`
+- [ ] `<cfcontinue>` → `continue;`
+- [ ] `<cfwhile>` → `while (...) { }`  (Lucee extension)
+- [ ] `<cffinally>` → `finally { }`
+- [ ] `<cfrethrow>` → `rethrow;` (also need cfscript `rethrow` keyword)
+
+### 2. `<cflock>` — Concurrency / Locking
+Required for safe shared-scope access in `--serve` mode. Almost every production app uses this.
+- [ ] `<cflock name="..." type="exclusive|readonly" timeout="...">`
+- [ ] cfscript `lock` block: `lock name="x" type="exclusive" timeout="5" { ... }`
+- [ ] Named locks + scope locks (`scope="application"`, `scope="session"`)
+
+### 3. `<cffile>` + File Upload + Multipart Form Parsing
+The `<cffile>` tag is extremely common. File upload requires multipart/form-data parsing which doesn't exist.
+- [ ] `<cffile action="upload" destination="..." filefield="..." nameconflict="...">`
+- [ ] `<cffile action="read|write|append|copy|move|delete|rename">` — wrappers over existing functions
+- [ ] `fileUpload(destination, formField, accept, nameConflict)` function
+- [ ] `fileUploadAll(destination, accept, nameConflict)` function
+- [ ] Multipart/form-data request body parsing in serve mode
+- [ ] Upload result struct: `serverFile`, `serverDirectory`, `contentType`, `fileSize`, `clientFile`, `clientFileName`, `clientFileExt`, `timeCreated`
+- [ ] `form` scope population from multipart fields (currently only handles url-encoded)
+
+### 4. Session Scope & Authentication
+No stateful web applications possible without sessions.
+- [ ] `session` scope with configurable timeout (`this.sessionManagement`, `this.sessionTimeout`)
+- [ ] Session ID generation + cookie management (`cfid`/`cftoken` or `jsessionid`)
+- [ ] `sessionInvalidate()`, `sessionRotate()`
+- [ ] `<cflogin>`, `<cfloginuser>`, `<cflogout>` tags
+- [ ] `getAuthUser()`, `isUserLoggedIn()`, `isUserInRole()`, `isUserInAnyRole()`
+- [ ] `onSessionStart`, `onSessionEnd` lifecycle methods in Application.cfc
 
 ---
 
-## ❌ NOT IMPLEMENTED
+## 🟠 HIGH PRIORITY GAPS (important for compatibility)
 
-### Language Features
-- [ ] Custom tag support / tag libraries
-- [ ] Layouts and views
-- [ ] ORM support
-- [ ] Threading (`cfthread`)
-- [ ] Mail (`cfmail`)
-- [ ] Scheduled tasks
+### 7. `<cfcookie>` + Cookie Scope
+- [ ] `cookie` scope readable from request headers
+- [ ] `<cfcookie name="..." value="..." expires="..." domain="..." path="..." secure="..." httponly="..." samesite="...">`
+- [ ] Cookie scope in scope cascade
 
-### Runtime
-- [ ] Proper call stack frames (currently flat)
-- [ ] Stack traces on error
-- [ ] Source maps for tag→script errors
-- [ ] Hot reload
-- [ ] JIT compilation (future)
+### 8. `<cfhttpparam>`
+cfhttp tag exists but lacks child parameter support — real HTTP calls need headers/formfields/files.
+- [ ] `<cfhttpparam type="header|formfield|url|body|file|cookie" name="..." value="...">`
 
-### Standard Library (Out of Scope for Now)
-- [ ] Image: `imageNew()`, `imageRead()`, `imageWrite()`, etc.
-- [ ] Spreadsheet: `spreadsheetNew()`, `spreadsheetAddRow()`, etc.
+### 9. `<cflog>` / `<cfsetting>` / `<cfsilent>`
+- [ ] `<cflog>` tag / `writeLog(text, type, file, log)` function
+- [ ] `<cfsetting enablecfoutputonly="..." requesttimeout="..." showdebugoutput="...">`
+- [ ] `<cfsilent>` — suppress output in tag body
+
+### 10. Missing String Functions
+- [ ] `ucFirst()` — capitalize first letter
+- [ ] `jsStringFormat()` — escape for JavaScript strings
+- [ ] `reEscape()` — escape regex special characters
+- [ ] `getToken()` — get nth token from delimited string
+- [ ] `newline()` — platform newline character
+
+### 11. Missing Type/Conversion Functions
+- [ ] `createTimeSpan(days, hours, minutes, seconds)` — **used in every Application.cfc for timeouts**
+- [ ] `yesNoFormat()` — boolean to "Yes"/"No"
+- [ ] `booleanFormat()` — boolean to "true"/"false"
+- [ ] `truefalseFormat()` — alias for booleanFormat
+- [ ] `nullValue()` — return null
+- [ ] `incrementValue()` / `decrementValue()` — add/subtract 1
+- [ ] `de()` — delay evaluation (wraps string)
+- [ ] `dollarFormat()` — format as currency
+- [ ] `setVariable()` / `getVariable()` — dynamic variable access by name string
+
+### 12. Missing Array Functions
+- [ ] `arrayPush()` — alias for arrayAppend
+- [ ] `arrayUnshift()` — alias for arrayPrepend
+- [ ] `arrayIndexExists()` — check if index exists
+- [ ] `arrayResize()` — resize array to N elements
+- [ ] `arrayMedian()` — median of numeric array
+- [ ] `arrayMid()` — sub-array extraction
+- [ ] `arrayReduceRight()` — reduce from right
+- [ ] `arraySplice()` — remove/insert elements at position
+- [ ] `arrayRange()` — generate range array
+- [ ] `arrayToStruct()` — convert to struct
+- [ ] `arrayDeleteNoCase()` — delete by value, case-insensitive
+
+### 13. Missing Query Functions
+- [ ] `queryColumnExists()` — check if column exists
+- [ ] `queryRowData()` — get row as struct
+- [ ] `querySlice()` — slice rows from query
+- [ ] `queryAppend()` — append rows from another query
+- [ ] `queryGetResult()` — metadata from last query execution
+- [ ] `queryKeyExists()` — check if key exists
+- [ ] `queryColumnData()` / `queryColumnArray()` — column as array
+- [ ] `queryInsertAt()` — insert row at position
+- [ ] `queryPrepend()` — prepend rows
+- [ ] `queryReverse()` — reverse row order
+- [ ] `queryRowSwap()` — swap two rows
+- [ ] `querySetRow()` — set entire row from struct
+- [ ] `queryCurrentRow()` — current row in cfoutput loop
+
+### 14. Missing Struct Functions
+- [ ] `structToSorted()` — return ordered struct
+- [ ] `structIsOrdered()` — check if ordered
+- [ ] `structIsCaseSensitive()` — check case sensitivity
+- [ ] `structToQueryString()` — convert to URL query string
+- [ ] `structGetMetadata()` / `structSetMetadata()` — metadata access
+
+### 15. Missing List Functions
+- [ ] `listSome()` / `listEvery()` — higher-order predicates
+- [ ] `listAvg()` — average of numeric list
+- [ ] `listItemTrim()` — trim whitespace from items
+- [ ] `listIndexExists()` — check if index exists
+- [ ] `listReduceRight()` — reduce from right
+
+### 16. Application/System Functions
+- [ ] `applicationStop()` — stop the application
+- [ ] `getApplicationMetadata()` / `getApplicationSettings()` — read app config
+- [ ] `getFileFromPath()` — extract filename from path
+- [ ] `getCanonicalPath()` — resolve canonical path
+- [ ] `writeLog()` — write to log file
+- [ ] `systemOutput()` — write to stdout/stderr
+- [ ] `setLocale()` / `getLocale()` — locale management
+- [ ] `setTimeZone()` — set timezone (have getTimeZone)
+- [ ] `trace()` — debug tracing
+- [ ] `getTemplatePath()` — alias for getCurrentTemplatePath
+- [ ] `throw()` function form (in addition to `throw` keyword)
+- [ ] `location()` function form — redirect
+
+### 17. Missing File Functions
+- [ ] `fileOpen()` / `fileClose()` / `fileReadLine()` / `fileWriteLine()` — streaming file I/O
+- [ ] `fileReadBinary()` — read as binary
+- [ ] `fileGetMimeType()` — detect MIME type
+- [ ] `fileIsEOF()` — check end of file
+- [ ] `fileSetAccessMode()` / `fileSetAttribute()` / `fileSetLastModified()`
+- [ ] `directoryRename()` / `directoryCopy()`
+
+---
+
+## 🟡 MEDIUM PRIORITY GAPS (nice to have)
+
+### 18. Date/Time Functions
+- [ ] `createTimeSpan()` (arguably CRITICAL — used in Application.cfc)
+- [ ] `dateConvert()` — convert between local/UTC
+- [ ] `getNumericDate()` — date as numeric value
+- [ ] `getHTTPTimeString()` — RFC 1123 date format
+- [ ] `millisecond()` — get milliseconds component
+- [ ] `nowServer()` — server time
+
+### 19. Locale-Sensitive Functions
+- [ ] `lsDateFormat()` / `lsTimeFormat()` / `lsDateTimeFormat()` — locale formatting
+- [ ] `lsCurrencyFormat()` / `lsEuroCurrencyFormat()` — currency formatting
+- [ ] `lsIsDate()` / `lsIsNumeric()` / `lsIsCurrency()` — locale validation
+- [ ] `lsParseCurrency()` / `lsParseDateTime()` — locale parsing
+- [ ] `lsNumberFormat()` — locale number formatting
+- [ ] `lsWeek()` / `lsDayOfWeek()` — locale week handling
+
+### 20. Encoding/Decoding Functions
+- [ ] `binaryDecode()` / `binaryEncode()` — convert between binary and encoded strings
+- [ ] `charsetDecode()` / `charsetEncode()` — character set conversions
+- [ ] `encodeForHTMLAttribute()` — XSS-safe attribute encoding
+- [ ] `encodeForXML()` / `encodeForXMLAttribute()` — XML encoding
+- [ ] `encodeFor()` — generic encoder
+- [ ] `decodeForHTML()` / `decodeFromURL()` — reverse encoding
+- [ ] `urlEncode()` — simpler alias for urlEncodedFormat
+- [ ] `canonicalize()` — anti-XSS canonicalization
+
+### 21. Password Hashing & Security
+- [ ] `generatePBKDFKey()` — PBKDF2 key derivation
+- [ ] `generateBCryptHash()` / `verifyBCryptHash()` — BCrypt
+- [ ] `generateSCryptHash()` / `verifySCryptHash()` — SCrypt
+- [ ] `generateArgon2Hash()` / `argon2CheckHash()` — Argon2
+- [ ] `csrfGenerateToken()` / `csrfVerifyToken()` — CSRF protection
+
+### 22. Error Handling
+- [ ] `rethrow` keyword in cfscript (currently only `throw`)
+- [ ] `cfcatch.tagContext` — stack trace array in catch blocks
+- [ ] `exceptionKeyExists()` — check exception keys
+
+### 23. `<cfmail>` / `<cfmailparam>` / `<cfmailpart>`
+- [ ] SMTP client integration for email sending
+- [ ] Attachments, HTML/text parts, from/to/cc/bcc
+
+### 24. Caching
+- [ ] `<cfcache>` tag
+- [ ] `cacheGet()`, `cachePut()`, `cacheDelete()`, `cacheClear()`
+- [ ] `cacheKeyExists()`, `cacheCount()`, `cacheGetAll()`, `cacheGetAllIds()`
+- [ ] In-memory cache implementation
+
+### 25. `<cfexecute>` — OS Command Execution
+- [ ] Execute OS commands with arguments, timeout, output capture
+
+### 26. `<cfstoredproc>` / `<cfprocparam>` / `<cfprocresult>`
+- [ ] Stored procedure execution for all database drivers
+
+### 27. Higher-Order Collection Functions
+- [ ] `collectionEach()` / `collectionMap()` / `collectionFilter()` / `collectionReduce()` / `collectionEvery()` / `collectionSome()`
+- [ ] `stringEach()` / `stringMap()` / `stringFilter()` / `stringReduce()` / `stringSome()` / `stringEvery()` / `stringSort()`
+- [ ] `each()` — generic iterator
+
+### 28. Bit Manipulation
+- [ ] `bitMaskClear()` / `bitMaskRead()` / `bitMaskSet()`
+
+### 29. XML Construction/Manipulation
+- [ ] `xmlNew()` — create new XML document
+- [ ] `xmlElemNew()` — create element
+- [ ] `xmlChildPos()`, `xmlGetNodeType()`, `xmlHasChild()`
+- [ ] `isXMLDoc()`, `isXMLElem()`, `isXMLNode()`, `isXMLRoot()`, `isXMLAttribute()`
+
+### 30. Miscellaneous String
+- [ ] `soundex()` / `metaphone()` — phonetic algorithms
+- [ ] `htmlParse()` — parse HTML
+- [ ] `jsstringFormat()` — JavaScript string escaping
+- [ ] `toScript()` — convert to JavaScript variable declaration
+
+---
+
+## 🟢 LOW PRIORITY / OUT OF SCOPE
+
+### Not implementing (niche/legacy/heavy dependencies)
+- [ ] Image functions (`imageNew`, `imageRead`, `imageWrite`, etc.) — 80+ functions, needs image library
+- [ ] Spreadsheet functions (`spreadsheetNew`, `spreadsheetAddRow`, etc.) — 40+ functions
+- [ ] ORM functions (`entityLoad`, `entitySave`, `ormFlush`, etc.) — 20+ functions
+- [ ] SOAP/WSDL functions (`addSOAPRequestHeader`, `getSOAPRequest`, etc.)
+- [ ] Flash/Flex UI tags (`cfcalendar`, `cfgrid`, `cfslider`, `cfmenu`, etc.)
+- [ ] Exchange server integration (`cfexchange*`)
+- [ ] PDF manipulation (`cfpdf`, `cfdocument` — needs rendering engine)
+- [ ] LDAP (`cfldap`)
+- [ ] Registry (`cfregistry`)
+- [ ] `.NET` integration (`dotNetToCFType`)
+- [ ] Gateway functions (`sendGatewayMessage`, `getGatewayHelper`)
+- [ ] K2 server functions
+
+### Low Priority but potentially useful
+- [ ] JWT functions: `createSignedJWT()`, `verifySignedJWT()`, `createEncryptedJWT()`, `verifyEncryptedJWT()`
+- [ ] `<cfzip>` / `<cfzipparam>` — zip/compress
+- [ ] `<cfschedule>` — scheduled tasks
+- [ ] `<cfthread>` / `threadNew()` / `threadJoin()` / `threadTerminate()` — threading
+- [ ] `<cfwddx>` / `isWDDX()` — legacy serialization
+- [ ] `callStackGet()` / `callStackDump()` — programmatic stack trace
+- [ ] `precisionEvaluate()` — BigDecimal math
+- [ ] `getProfileString()` / `setProfileString()` / `getProfileSections()` — INI file manipulation
+- [ ] `valuelist()` / `quotedValueList()` — query column to delimited list
+- [ ] `getMemoryUsage()` / `getCPUUsage()` / `getFreespace()` / `getTotalSpace()` — system monitoring
 
 ---
 
@@ -379,7 +643,7 @@ RustCFML/
 │   ├── cfml-compiler/   # Lexer, Parser, AST, Tag Preprocessor
 │   ├── cfml-codegen/    # Bytecode compiler (AST → BytecodeOp)
 │   ├── cfml-vm/         # Virtual machine (stack-based bytecode execution)
-│   ├── cfml-stdlib/     # Built-in functions (200+)
+│   ├── cfml-stdlib/     # Built-in functions (260+)
 │   ├── cli/             # Command-line interface
 │   └── wasm/            # WebAssembly target
 ```
@@ -388,7 +652,8 @@ RustCFML/
 - BoxLang ANTLR Grammar: `BoxLang/src/main/antlr/CFGrammar.g4`
 - Lucee Expression Grammar: `Lucee/core/src/main/java/lucee/transformer/cfml/expression/`
 - RustPython: `/Users/alexskinner/Repos/opensource/cfml_rust/RustPython/`
+- cfdocs.org: [functions](https://cfdocs.org/functions) | [tags](https://cfdocs.org/tags)
 
 ---
 
-*Last Updated: 2026-02-22*
+*Last Updated: 2026-02-25 — Database improvements: connection pooling, cfqueryparam, cftransaction, MSSQL driver*

@@ -4,7 +4,7 @@ use cfml_codegen::{BytecodeFunction, BytecodeOp, BytecodeProgram};
 use cfml_common::dynamic::CfmlValue;
 use cfml_common::vm::{CfmlError, CfmlErrorType, CfmlResult};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 pub type BuiltinFunction = fn(Vec<CfmlValue>) -> CfmlResult;
 
@@ -96,6 +96,20 @@ pub struct CfmlVirtualMachine {
     /// Captured locals from most recent execute_function_with_args call
     /// Used to capture component body variables (variables scope) after component loading
     captured_locals: Option<HashMap<String, CfmlValue>>,
+    /// Active transaction connection (held during cftransaction block, type-erased)
+    pub transaction_conn: Option<Box<dyn std::any::Any>>,
+    /// Datasource URL of the active transaction
+    pub transaction_datasource: Option<String>,
+    /// Function pointer: begin transaction (datasource) -> conn
+    pub txn_begin: Option<fn(&str) -> Result<Box<dyn std::any::Any>, CfmlError>>,
+    /// Function pointer: commit transaction (conn)
+    pub txn_commit: Option<fn(&mut Box<dyn std::any::Any>) -> Result<(), CfmlError>>,
+    /// Function pointer: rollback transaction (conn)
+    pub txn_rollback: Option<fn(&mut Box<dyn std::any::Any>) -> Result<(), CfmlError>>,
+    /// Function pointer: execute query with transaction conn (conn, sql, params, return_type) -> result
+    pub txn_execute: Option<fn(&mut Box<dyn std::any::Any>, &str, &CfmlValue, &str) -> CfmlResult>,
+    /// Function pointer: execute query normally (args) -> result
+    pub query_execute_fn: Option<fn(Vec<CfmlValue>) -> CfmlResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +157,13 @@ impl CfmlVirtualMachine {
             base_template_path: None,
             mappings: Vec::new(),
             captured_locals: None,
+            transaction_conn: None,
+            transaction_datasource: None,
+            txn_begin: None,
+            txn_commit: None,
+            txn_rollback: None,
+            txn_execute: None,
+            query_execute_fn: None,
         }
     }
 
@@ -217,9 +238,58 @@ impl CfmlVirtualMachine {
         args: Vec<CfmlValue>,
         parent_scope: Option<&HashMap<String, CfmlValue>>,
     ) -> CfmlResult {
+        // Guard against runaway recursion — checked before allocating locals
+        // to avoid blowing the native Rust stack.
+        //
+        // Strategy:
+        //  1. Hard ceiling at 2500 (matches CFML engine defaults)
+        //  2. Early infinite-recursion detection: once depth > 64, check if
+        //     the last 32 frames show a repeating cycle (covers both direct
+        //     self-recursion and mutual recursion like A→B→A→B)
+        let depth = self.call_stack.len();
+        if depth > 2500 {
+            return Err(self.wrap_error(CfmlError::runtime(
+                format!("Call stack overflow (depth {})", depth)
+            )));
+        }
+        if depth > 64 {
+            // Collect the last 32 function names
+            let window = 32.min(depth);
+            let recent: Vec<&str> = self.call_stack[depth - window..]
+                .iter()
+                .map(|f| f.function_name.as_str())
+                .collect();
+            // Try cycle lengths 1 (A,A,A), 2 (A,B,A,B), 3 (A,B,C,A,B,C)...
+            'cycle: for cycle_len in 1..=4 {
+                if window < cycle_len * 4 {
+                    continue; // need at least 4 full repeats to be confident
+                }
+                let pattern = &recent[recent.len() - cycle_len..];
+                let check_count = window / cycle_len;
+                for i in 0..check_count {
+                    let offset = recent.len() - cycle_len * (i + 1);
+                    let chunk = &recent[offset..offset + cycle_len];
+                    if chunk != pattern {
+                        continue 'cycle;
+                    }
+                }
+                // All checked repetitions matched — likely infinite
+                let cycle_desc = pattern.join(" -> ");
+                return Err(self.wrap_error(CfmlError::runtime(
+                    format!(
+                        "Likely infinite recursion detected: {} (depth {})",
+                        cycle_desc, depth
+                    )
+                )));
+            }
+        }
+
         let mut locals: HashMap<String, CfmlValue> = HashMap::new();
         let mut stack: Vec<CfmlValue> = Vec::new();
         let mut ip = 0;
+        // Shared closure environment: all closures defined within this function
+        // invocation share one Rc<RefCell<HashMap>>. Lazily created on first DefineFunction.
+        let mut closure_env: Option<Arc<RwLock<HashMap<String, CfmlValue>>>> = None;
 
         // Copy parent scope variables (closures and nested functions see parent vars)
         if let Some(parent) = parent_scope {
@@ -260,15 +330,6 @@ impl CfmlVirtualMachine {
                 break;
             }
 
-            // Guard against infinite recursion
-            if self.call_stack.len() > 50 {
-                return Err(self.wrap_error(CfmlError::runtime(
-                    format!("Call stack overflow (depth {}). Last frames: {:?}",
-                        self.call_stack.len(),
-                        self.call_stack.iter().rev().take(10).map(|f| format!("{}@{}", f.function_name, f.line)).collect::<Vec<_>>()
-                    )
-                )));
-            }
 
             let op = func.instructions[ip].clone();
             ip += 1;
@@ -658,14 +719,14 @@ impl CfmlVirtualMachine {
 
                     if let Some(func_ref) = stack.pop() {
                         self.closure_parent_writeback = None;
-                        // If the function has a captured scope (closure), use it as
-                        // parent locals so the closure sees its defining scope's vars.
+                        // If the function has a captured scope (closure), snapshot from
+                        // the shared RefCell so the closure sees its defining scope's vars.
                         // Merge caller's locals on top so the closure also sees the
                         // caller's scope (but captured vars take lower priority — the
                         // closure's own params will override via execute_function_with_args).
                         let effective_locals = if let CfmlValue::Function(ref f) = func_ref {
-                            if let Some(ref captured) = f.captured_scope {
-                                let mut merged = captured.clone();
+                            if let Some(ref shared_env) = f.captured_scope {
+                                let mut merged = shared_env.read().unwrap().clone();
                                 // Caller's locals overlay (for nested closures that
                                 // also need to see their immediate caller's vars)
                                 for (k, v) in &locals {
@@ -681,6 +742,10 @@ impl CfmlVirtualMachine {
                             locals.clone()
                         };
                         let result = self.call_function(&func_ref, args, &effective_locals)?;
+                        // Write back mutations into the shared closure environment
+                        if let Some(ref writeback) = self.closure_parent_writeback {
+                            Self::write_back_to_captured_scope(&func_ref, writeback);
+                        }
                         // Merge closure write-back into caller's locals
                         if let Some(writeback) = self.closure_parent_writeback.take() {
                             for (k, v) in writeback {
@@ -707,7 +772,7 @@ impl CfmlVirtualMachine {
                                 continue;
                             }
                             if let Some(parent_val) = parent.get(k) {
-                                if format!("{:?}", v) != format!("{:?}", parent_val) {
+                                if !Self::values_equal_shallow(v, parent_val) {
                                     writeback.insert(k.clone(), v.clone());
                                 }
                             } else {
@@ -718,6 +783,8 @@ impl CfmlVirtualMachine {
                             self.closure_parent_writeback = Some(writeback);
                         }
                     }
+                    // Pop call frame before early return (matches push at function entry)
+                    self.call_stack.pop();
                     return Ok(stack.pop().unwrap_or(CfmlValue::Null));
                 }
 
@@ -898,6 +965,23 @@ impl CfmlVirtualMachine {
                         // Resolve inheritance chain
                         let instance = self.resolve_inheritance(template, &locals);
 
+                        // Validate interface implementation and collect transitive interfaces
+                        let instance = if let CfmlValue::Struct(ref s) = instance {
+                            let all_ifaces = self.validate_interface_implementation(s, &locals)?;
+                            if !all_ifaces.is_empty() {
+                                let mut s = s.clone();
+                                let chain: Vec<CfmlValue> = all_ifaces.into_iter()
+                                    .map(|name| CfmlValue::String(name))
+                                    .collect();
+                                s.insert("__implements_chain".to_string(), CfmlValue::Array(chain));
+                                CfmlValue::Struct(s)
+                            } else {
+                                instance
+                            }
+                        } else {
+                            instance
+                        };
+
                         // Call init() constructor if present
                         let final_instance = if let CfmlValue::Struct(ref s) = instance {
                             let has_init = s.get("init")
@@ -939,8 +1023,19 @@ impl CfmlVirtualMachine {
                 BytecodeOp::DefineFunction(func_idx) => {
                     let func_name = self.program.functions[func_idx].name.clone();
                     self.user_functions.insert(func_name.clone(), func_idx);
-                    // Snapshot current locals as captured scope for closures
-                    let captured = locals.clone();
+                    // Create or reuse a shared closure environment so all closures
+                    // defined in this function invocation share the same mutable state.
+                    let env = closure_env.get_or_insert_with(|| {
+                        Arc::new(RwLock::new(locals.clone()))
+                    });
+                    // Sync current locals into the shared env so that closures defined
+                    // later see variables declared between earlier DefineFunction ops.
+                    {
+                        let mut m = env.write().unwrap();
+                        for (k, v) in &locals {
+                            m.insert(k.clone(), v.clone());
+                        }
+                    }
                     // Push function reference — encode func_idx in body for super dispatch
                     stack.push(CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
                         name: func_name,
@@ -957,7 +1052,7 @@ impl CfmlVirtualMachine {
                         ),
                         return_type: None,
                         access: cfml_common::dynamic::CfmlAccess::Public,
-                        captured_scope: Some(captured),
+                        captured_scope: Some(Arc::clone(env)),
                     }));
                 }
 
@@ -1040,6 +1135,12 @@ impl CfmlVirtualMachine {
                                 };
                                 let args: Vec<CfmlValue> = extra_args.drain(..).collect();
                                 let mut method_locals = HashMap::new();
+                                // Merge captured scope first (closure vars from defining scope)
+                                if let Some(ref shared_env) = f.captured_scope {
+                                    for (k, v) in shared_env.read().unwrap().iter() {
+                                        method_locals.insert(k.clone(), v.clone());
+                                    }
+                                }
                                 // Inject component __variables scope from this
                                 let this_ref = locals.get("this").unwrap_or(&object);
                                 if let CfmlValue::Struct(ref ts) = this_ref {
@@ -1056,7 +1157,8 @@ impl CfmlVirtualMachine {
                                     method_locals.insert("this".to_string(), object.clone());
                                 }
                                 // Execute directly by index to avoid name collision
-                                if let Some(idx) = func_idx {
+                                self.closure_parent_writeback = None;
+                                let call_result = if let Some(idx) = func_idx {
                                     if idx < self.program.functions.len() {
                                         let parent_func = self.program.functions[idx].clone();
                                         self.execute_function_with_args(&parent_func, args, Some(&method_locals))?
@@ -1065,7 +1167,12 @@ impl CfmlVirtualMachine {
                                     }
                                 } else {
                                     self.call_function(&prop, args, &method_locals)?
+                                };
+                                // Write back closure mutations to shared environment
+                                if let Some(ref wb) = self.closure_parent_writeback {
+                                    Self::write_back_to_captured_scope(&prop, wb);
                                 }
+                                call_result
                             } else {
                                 self.call_member_function(&object, &method_name, &mut extra_args)?
                             }
@@ -1267,7 +1374,17 @@ impl CfmlVirtualMachine {
                     } else {
                         vec![args_val]
                     };
+                    self.closure_parent_writeback = None;
                     let result = self.call_function(&func_ref, args, &locals)?;
+                    // Write back mutations into the shared closure environment
+                    if let Some(ref writeback) = self.closure_parent_writeback {
+                        Self::write_back_to_captured_scope(&func_ref, writeback);
+                    }
+                    if let Some(writeback) = self.closure_parent_writeback.take() {
+                        for (k, v) in writeback {
+                            locals.insert(k, v);
+                        }
+                    }
                     stack.push(result);
                 }
 
@@ -1304,7 +1421,7 @@ impl CfmlVirtualMachine {
                 // Only write back vars that existed in parent scope OR are new
                 if let Some(parent_val) = parent.get(k) {
                     // Only include if changed
-                    if format!("{:?}", v) != format!("{:?}", parent_val) {
+                    if !Self::values_equal_shallow(v, parent_val) {
                         writeback.insert(k.clone(), v.clone());
                     }
                 } else {
@@ -1368,7 +1485,9 @@ impl CfmlVirtualMachine {
                 | "__cfsavecontent_start" | "__cfsavecontent_end" | "invoke"
                 | "getbasetemplatepath" | "gettimezone"
                 | "expandpath"
-                | "isdefined" => {
+                | "isdefined"
+                | "queryexecute"
+                | "__cftransaction_start" | "__cftransaction_commit" | "__cftransaction_rollback" => {
                     // Will be handled at the end of this function (needs VM access)
                 }
                 _ => {
@@ -1390,6 +1509,24 @@ impl CfmlVirtualMachine {
                 }
             }
 
+            // If the function has a captured scope (closure), merge it with
+            // the caller's parent_locals so the closure sees its defining scope.
+            let effective_locals;
+            let effective_parent = if let Some(ref shared_env) = func.captured_scope {
+                effective_locals = {
+                    let mut merged = shared_env.read().unwrap().clone();
+                    for (k, v) in parent_locals {
+                        if !merged.contains_key(k) {
+                            merged.insert(k.clone(), v.clone());
+                        }
+                    }
+                    merged
+                };
+                &effective_locals
+            } else {
+                parent_locals
+            };
+
             // If the function has a stored bytecode index, use it directly
             // (avoids name collision when parent/child have same-named methods)
             if let cfml_common::dynamic::CfmlClosureBody::Expression(ref body) = func.body {
@@ -1397,7 +1534,7 @@ impl CfmlVirtualMachine {
                     let idx = *idx as usize;
                     if idx < self.program.functions.len() {
                         let user_func = self.program.functions[idx].clone();
-                        return self.execute_function_with_args(&user_func, args, Some(parent_locals));
+                        return self.execute_function_with_args(&user_func, args, Some(effective_parent));
                     }
                 }
             }
@@ -1434,6 +1571,7 @@ impl CfmlVirtualMachine {
                                 let mapped = self.call_function(&callback, cb_args, &pl)?;
                                 if let Some(wb) = self.closure_parent_writeback.take() {
                                     for (k, v) in &wb { pl.insert(k.clone(), v.clone()); }
+                                    Self::write_back_to_captured_scope(&callback, &wb);
                                     self.closure_parent_writeback = Some(wb);
                                 }
                                 result.push(mapped);
@@ -1456,6 +1594,7 @@ impl CfmlVirtualMachine {
                                 let keep = self.call_function(&callback, cb_args, &pl)?;
                                 if let Some(wb) = self.closure_parent_writeback.take() {
                                     for (k, v) in &wb { pl.insert(k.clone(), v.clone()); }
+                                    Self::write_back_to_captured_scope(&callback, &wb);
                                     self.closure_parent_writeback = Some(wb);
                                 }
                                 if keep.is_true() {
@@ -1480,6 +1619,7 @@ impl CfmlVirtualMachine {
                                 acc = self.call_function(&callback, cb_args, &pl)?;
                                 if let Some(wb) = self.closure_parent_writeback.take() {
                                     for (k, v) in &wb { pl.insert(k.clone(), v.clone()); }
+                                    Self::write_back_to_captured_scope(&callback, &wb);
                                     self.closure_parent_writeback = Some(wb);
                                 }
                             }
@@ -1500,6 +1640,7 @@ impl CfmlVirtualMachine {
                                 self.call_function(&callback, cb_args, &pl)?;
                                 if let Some(wb) = self.closure_parent_writeback.take() {
                                     for (k, v) in &wb { pl.insert(k.clone(), v.clone()); }
+                                    Self::write_back_to_captured_scope(&callback, &wb);
                                     self.closure_parent_writeback = Some(wb);
                                 }
                             }
@@ -1519,6 +1660,7 @@ impl CfmlVirtualMachine {
                                 self.call_function(&callback, cb_args, &pl)?;
                                 if let Some(wb) = self.closure_parent_writeback.take() {
                                     for (k, v) in &wb { pl.insert(k.clone(), v.clone()); }
+                                    Self::write_back_to_captured_scope(&callback, &wb);
                                     self.closure_parent_writeback = Some(wb);
                                 }
                             }
@@ -1539,6 +1681,7 @@ impl CfmlVirtualMachine {
                                 let mapped = self.call_function(&callback, cb_args, &pl)?;
                                 if let Some(wb) = self.closure_parent_writeback.take() {
                                     for (k2, v2) in &wb { pl.insert(k2.clone(), v2.clone()); }
+                                    Self::write_back_to_captured_scope(&callback, &wb);
                                     self.closure_parent_writeback = Some(wb);
                                 }
                                 result.insert(k.clone(), mapped);
@@ -1561,6 +1704,7 @@ impl CfmlVirtualMachine {
                                 let keep = self.call_function(&callback, cb_args, &pl)?;
                                 if let Some(wb) = self.closure_parent_writeback.take() {
                                     for (k2, v2) in &wb { pl.insert(k2.clone(), v2.clone()); }
+                                    Self::write_back_to_captured_scope(&callback, &wb);
                                     self.closure_parent_writeback = Some(wb);
                                 }
                                 if keep.is_true() {
@@ -1579,7 +1723,11 @@ impl CfmlVirtualMachine {
                             let callback = callback.clone();
                             for (i, item) in arr.iter().enumerate() {
                                 let cb_args = vec![item.clone(), CfmlValue::Int((i + 1) as i64), arr_val.clone()];
+                                self.closure_parent_writeback = None;
                                 let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                if let Some(ref wb) = self.closure_parent_writeback {
+                                    Self::write_back_to_captured_scope(&callback, wb);
+                                }
                                 if result.is_true() {
                                     return Ok(CfmlValue::Bool(true));
                                 }
@@ -1595,7 +1743,11 @@ impl CfmlVirtualMachine {
                             let callback = callback.clone();
                             for (i, item) in arr.iter().enumerate() {
                                 let cb_args = vec![item.clone(), CfmlValue::Int((i + 1) as i64), arr_val.clone()];
+                                self.closure_parent_writeback = None;
                                 let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                if let Some(ref wb) = self.closure_parent_writeback {
+                                    Self::write_back_to_captured_scope(&callback, wb);
+                                }
                                 if !result.is_true() {
                                     return Ok(CfmlValue::Bool(false));
                                 }
@@ -1612,7 +1764,11 @@ impl CfmlVirtualMachine {
                             let callback = callback.clone();
                             for (k, v) in s {
                                 let cb_args = vec![acc.clone(), CfmlValue::String(k.clone()), v.clone(), struct_val.clone()];
+                                self.closure_parent_writeback = None;
                                 acc = self.call_function(&callback, cb_args, parent_locals)?;
+                                if let Some(ref wb) = self.closure_parent_writeback {
+                                    Self::write_back_to_captured_scope(&callback, wb);
+                                }
                             }
                             return Ok(acc);
                         }
@@ -1625,7 +1781,11 @@ impl CfmlVirtualMachine {
                             let callback = callback.clone();
                             for (k, v) in s {
                                 let cb_args = vec![CfmlValue::String(k.clone()), v.clone(), struct_val.clone()];
+                                self.closure_parent_writeback = None;
                                 let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                if let Some(ref wb) = self.closure_parent_writeback {
+                                    Self::write_back_to_captured_scope(&callback, wb);
+                                }
                                 if result.is_true() {
                                     return Ok(CfmlValue::Bool(true));
                                 }
@@ -1641,7 +1801,11 @@ impl CfmlVirtualMachine {
                             let callback = callback.clone();
                             for (k, v) in s {
                                 let cb_args = vec![CfmlValue::String(k.clone()), v.clone(), struct_val.clone()];
+                                self.closure_parent_writeback = None;
                                 let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                if let Some(ref wb) = self.closure_parent_writeback {
+                                    Self::write_back_to_captured_scope(&callback, wb);
+                                }
                                 if !result.is_true() {
                                     return Ok(CfmlValue::Bool(false));
                                 }
@@ -1659,7 +1823,11 @@ impl CfmlVirtualMachine {
                         let items: Vec<&str> = list.split(|c: char| delimiter.contains(c)).filter(|s| !s.is_empty()).collect();
                         for (i, item) in items.iter().enumerate() {
                             let cb_args = vec![CfmlValue::String(item.to_string()), CfmlValue::Int((i + 1) as i64), list_val.clone()];
+                            self.closure_parent_writeback = None;
                             self.call_function(&callback, cb_args, parent_locals)?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                         }
                     }
                     return Ok(CfmlValue::Null);
@@ -1674,7 +1842,11 @@ impl CfmlVirtualMachine {
                         let mut result = Vec::new();
                         for (i, item) in items.iter().enumerate() {
                             let cb_args = vec![CfmlValue::String(item.to_string()), CfmlValue::Int((i + 1) as i64), list_val.clone()];
+                            self.closure_parent_writeback = None;
                             let mapped = self.call_function(&callback, cb_args, parent_locals)?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                             result.push(mapped.as_string());
                         }
                         return Ok(CfmlValue::String(result.join(&first_delim)));
@@ -1691,7 +1863,11 @@ impl CfmlVirtualMachine {
                         let mut result = Vec::new();
                         for (i, item) in items.iter().enumerate() {
                             let cb_args = vec![CfmlValue::String(item.to_string()), CfmlValue::Int((i + 1) as i64), list_val.clone()];
+                            self.closure_parent_writeback = None;
                             let keep = self.call_function(&callback, cb_args, parent_locals)?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                             if keep.is_true() {
                                 result.push(item.to_string());
                             }
@@ -1709,7 +1885,11 @@ impl CfmlVirtualMachine {
                         let items: Vec<&str> = list.split(|c: char| delimiter.contains(c)).filter(|s| !s.is_empty()).collect();
                         for (i, item) in items.iter().enumerate() {
                             let cb_args = vec![acc.clone(), CfmlValue::String(item.to_string()), CfmlValue::Int((i + 1) as i64), list_val.clone()];
+                            self.closure_parent_writeback = None;
                             acc = self.call_function(&callback, cb_args, parent_locals)?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                         }
                         return Ok(acc);
                     }
@@ -1722,7 +1902,11 @@ impl CfmlVirtualMachine {
                             for (i, row) in q.rows.iter().enumerate() {
                                 let row_struct = CfmlValue::Struct(row.clone());
                                 let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), q_val.clone()];
+                                self.closure_parent_writeback = None;
                                 self.call_function(&callback, cb_args, parent_locals)?;
+                                if let Some(ref wb) = self.closure_parent_writeback {
+                                    Self::write_back_to_captured_scope(&callback, wb);
+                                }
                             }
                         }
                     }
@@ -1736,7 +1920,11 @@ impl CfmlVirtualMachine {
                             for (i, row) in q.rows.iter().enumerate() {
                                 let row_struct = CfmlValue::Struct(row.clone());
                                 let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), q_val.clone()];
+                                self.closure_parent_writeback = None;
                                 let mapped = self.call_function(&callback, cb_args, parent_locals)?;
+                                if let Some(ref wb) = self.closure_parent_writeback {
+                                    Self::write_back_to_captured_scope(&callback, wb);
+                                }
                                 if let CfmlValue::Struct(s) = mapped {
                                     new_rows.push(s);
                                 } else {
@@ -1758,7 +1946,11 @@ impl CfmlVirtualMachine {
                             for (i, row) in q.rows.iter().enumerate() {
                                 let row_struct = CfmlValue::Struct(row.clone());
                                 let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), q_val.clone()];
+                                self.closure_parent_writeback = None;
                                 let keep = self.call_function(&callback, cb_args, parent_locals)?;
+                                if let Some(ref wb) = self.closure_parent_writeback {
+                                    Self::write_back_to_captured_scope(&callback, wb);
+                                }
                                 if keep.is_true() {
                                     new_rows.push(row.clone());
                                 }
@@ -1778,7 +1970,11 @@ impl CfmlVirtualMachine {
                             for (i, row) in q.rows.iter().enumerate() {
                                 let row_struct = CfmlValue::Struct(row.clone());
                                 let cb_args = vec![acc.clone(), row_struct, CfmlValue::Int((i + 1) as i64), q_val.clone()];
+                                self.closure_parent_writeback = None;
                                 acc = self.call_function(&callback, cb_args, parent_locals)?;
+                                if let Some(ref wb) = self.closure_parent_writeback {
+                                    Self::write_back_to_captured_scope(&callback, wb);
+                                }
                             }
                             return Ok(acc);
                         }
@@ -1797,7 +1993,11 @@ impl CfmlVirtualMachine {
                                     let a = CfmlValue::Struct(rows[j].clone());
                                     let b = CfmlValue::Struct(rows[j + 1].clone());
                                     let cb_args = vec![a, b];
+                                    self.closure_parent_writeback = None;
                                     let cmp = self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
                                     let cmp_val = match &cmp {
                                         CfmlValue::Int(n) => *n,
                                         CfmlValue::Double(d) => *d as i64,
@@ -1822,7 +2022,11 @@ impl CfmlVirtualMachine {
                             for (i, row) in q.rows.iter().enumerate() {
                                 let row_struct = CfmlValue::Struct(row.clone());
                                 let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), q_val.clone()];
+                                self.closure_parent_writeback = None;
                                 let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                if let Some(ref wb) = self.closure_parent_writeback {
+                                    Self::write_back_to_captured_scope(&callback, wb);
+                                }
                                 if result.is_true() {
                                     return Ok(CfmlValue::Bool(true));
                                 }
@@ -1839,7 +2043,11 @@ impl CfmlVirtualMachine {
                             for (i, row) in q.rows.iter().enumerate() {
                                 let row_struct = CfmlValue::Struct(row.clone());
                                 let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), q_val.clone()];
+                                self.closure_parent_writeback = None;
                                 let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                if let Some(ref wb) = self.closure_parent_writeback {
+                                    Self::write_back_to_captured_scope(&callback, wb);
+                                }
                                 if !result.is_true() {
                                     return Ok(CfmlValue::Bool(false));
                                 }
@@ -2290,6 +2498,77 @@ impl CfmlVirtualMachine {
                         return Err(CfmlError::runtime("invoke() first argument must be a component or component name".into()));
                     }
                 }
+                "queryexecute" => {
+                    // VM intercept for queryExecute — routes through transaction conn if active
+                    if self.transaction_conn.is_some() {
+                        if let Some(txn_execute) = self.txn_execute {
+                            let sql = args.get(0).map(|v| v.as_string()).unwrap_or_default();
+                            let params_arg = args.get(1).cloned().unwrap_or(CfmlValue::Null);
+                            let options_arg = args.get(2).cloned().unwrap_or(CfmlValue::Null);
+                            let return_type = match &options_arg {
+                                CfmlValue::Struct(opts) => opts.iter()
+                                    .find(|(k, _)| k.eq_ignore_ascii_case("returntype"))
+                                    .map(|(_, v)| v.as_string().to_lowercase())
+                                    .unwrap_or_else(|| "query".to_string()),
+                                _ => "query".to_string(),
+                            };
+                            let txn_conn = self.transaction_conn.as_mut().unwrap();
+                            return txn_execute(txn_conn, &sql, &params_arg, &return_type);
+                        }
+                    }
+                    // No active transaction — delegate to normal builtin (via fn pointer or registered builtin)
+                    if let Some(qe_fn) = self.query_execute_fn {
+                        return qe_fn(args);
+                    }
+                    // Fall through to normal builtin dispatch
+                    let builtin_match = self.builtins.iter()
+                        .find(|(k, _)| k.to_lowercase() == "queryexecute")
+                        .map(|(_, v)| *v);
+                    if let Some(builtin) = builtin_match {
+                        return builtin(args);
+                    }
+                    return Err(CfmlError::runtime("queryExecute: database features not enabled".to_string()));
+                }
+                "__cftransaction_start" => {
+                    if self.transaction_conn.is_some() {
+                        return Err(CfmlError::runtime("cftransaction: nested transactions are not supported".to_string()));
+                    }
+                    // Args: __cftransaction_start("begin", [isolation], [datasource])
+                    // Try arg[2] first (datasource after isolation), then arg[1] (datasource without isolation)
+                    let datasource = args.get(2).map(|v| v.as_string()).filter(|s| !s.is_empty())
+                        .or_else(|| args.get(1).map(|v| v.as_string()).filter(|s| !s.is_empty() && s != "begin"))
+                        .unwrap_or_else(|| self.get_default_datasource(parent_locals));
+                    if datasource.is_empty() {
+                        return Err(CfmlError::runtime("cftransaction: no datasource specified and no default datasource configured".to_string()));
+                    }
+                    if let Some(txn_begin) = self.txn_begin {
+                        let conn = txn_begin(&datasource)?;
+                        self.transaction_conn = Some(conn);
+                        self.transaction_datasource = Some(datasource);
+                        return Ok(CfmlValue::Null);
+                    }
+                    return Err(CfmlError::runtime("cftransaction: transaction support not initialized".to_string()));
+                }
+                "__cftransaction_commit" => {
+                    if let Some(ref mut conn) = self.transaction_conn {
+                        if let Some(txn_commit) = self.txn_commit {
+                            txn_commit(conn)?;
+                        }
+                    }
+                    self.transaction_conn = None;
+                    self.transaction_datasource = None;
+                    return Ok(CfmlValue::Null);
+                }
+                "__cftransaction_rollback" => {
+                    if let Some(ref mut conn) = self.transaction_conn {
+                        if let Some(txn_rollback) = self.txn_rollback {
+                            txn_rollback(conn)?;
+                        }
+                    }
+                    self.transaction_conn = None;
+                    self.transaction_datasource = None;
+                    return Ok(CfmlValue::Null);
+                }
                 _ => {}
             }
         }
@@ -2487,7 +2766,11 @@ impl CfmlVirtualMachine {
                                 CfmlValue::Int((i + 1) as i64),
                                 object.clone(),
                             ];
+                            self.closure_parent_writeback = None;
                             let mapped = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                             result.push(mapped);
                         }
                         return Ok(CfmlValue::Array(result));
@@ -2504,7 +2787,11 @@ impl CfmlVirtualMachine {
                                 CfmlValue::Int((i + 1) as i64),
                                 object.clone(),
                             ];
+                            self.closure_parent_writeback = None;
                             let keep = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                             if keep.is_true() {
                                 result.push(item.clone());
                             }
@@ -2524,7 +2811,11 @@ impl CfmlVirtualMachine {
                                 CfmlValue::Int((i + 1) as i64),
                                 object.clone(),
                             ];
+                            self.closure_parent_writeback = None;
                             acc = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                         }
                         return Ok(acc);
                     }
@@ -2539,7 +2830,11 @@ impl CfmlVirtualMachine {
                                 CfmlValue::Int((i + 1) as i64),
                                 object.clone(),
                             ];
+                            self.closure_parent_writeback = None;
                             self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                         }
                     }
                     return Ok(CfmlValue::Null);
@@ -2548,7 +2843,11 @@ impl CfmlVirtualMachine {
                     if let Some(callback) = extra_args.first().cloned() {
                         for (i, item) in arr.iter().enumerate() {
                             let cb_args = vec![item.clone(), CfmlValue::Int((i + 1) as i64), object.clone()];
+                            self.closure_parent_writeback = None;
                             let result = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                             if result.is_true() { return Ok(CfmlValue::Bool(true)); }
                         }
                         return Ok(CfmlValue::Bool(false));
@@ -2559,7 +2858,11 @@ impl CfmlVirtualMachine {
                     if let Some(callback) = extra_args.first().cloned() {
                         for (i, item) in arr.iter().enumerate() {
                             let cb_args = vec![item.clone(), CfmlValue::Int((i + 1) as i64), object.clone()];
+                            self.closure_parent_writeback = None;
                             let result = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                             if !result.is_true() { return Ok(CfmlValue::Bool(false)); }
                         }
                         return Ok(CfmlValue::Bool(true));
@@ -2603,7 +2906,11 @@ impl CfmlVirtualMachine {
                                 v.clone(),
                                 object.clone(),
                             ];
+                            self.closure_parent_writeback = None;
                             self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                         }
                     }
                     return Ok(CfmlValue::Null);
@@ -2618,7 +2925,11 @@ impl CfmlVirtualMachine {
                                 v.clone(),
                                 object.clone(),
                             ];
+                            self.closure_parent_writeback = None;
                             let mapped = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                             result.insert(k.clone(), mapped);
                         }
                         return Ok(CfmlValue::Struct(result));
@@ -2635,7 +2946,11 @@ impl CfmlVirtualMachine {
                                 v.clone(),
                                 object.clone(),
                             ];
+                            self.closure_parent_writeback = None;
                             let keep = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                             if keep.is_true() {
                                 result.insert(k.clone(), v.clone());
                             }
@@ -2648,7 +2963,11 @@ impl CfmlVirtualMachine {
                     if let Some(callback) = extra_args.first().cloned() {
                         for (k, v) in s {
                             let cb_args = vec![CfmlValue::String(k.clone()), v.clone(), object.clone()];
+                            self.closure_parent_writeback = None;
                             let result = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                             if result.is_true() { return Ok(CfmlValue::Bool(true)); }
                         }
                         return Ok(CfmlValue::Bool(false));
@@ -2659,7 +2978,11 @@ impl CfmlVirtualMachine {
                     if let Some(callback) = extra_args.first().cloned() {
                         for (k, v) in s {
                             let cb_args = vec![CfmlValue::String(k.clone()), v.clone(), object.clone()];
+                            self.closure_parent_writeback = None;
                             let result = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                             if !result.is_true() { return Ok(CfmlValue::Bool(false)); }
                         }
                         return Ok(CfmlValue::Bool(true));
@@ -2672,7 +2995,11 @@ impl CfmlVirtualMachine {
                         let mut acc = if extra_args.len() >= 2 { extra_args[1].clone() } else { CfmlValue::Null };
                         for (k, v) in s {
                             let cb_args = vec![acc.clone(), CfmlValue::String(k.clone()), v.clone(), object.clone()];
+                            self.closure_parent_writeback = None;
                             acc = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                         }
                         return Ok(acc);
                     }
@@ -2695,7 +3022,11 @@ impl CfmlVirtualMachine {
                         for (i, row) in q.rows.iter().enumerate() {
                             let row_struct = CfmlValue::Struct(row.clone());
                             let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), object.clone()];
+                            self.closure_parent_writeback = None;
                             self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                         }
                     }
                     return Ok(CfmlValue::Null);
@@ -2706,7 +3037,11 @@ impl CfmlVirtualMachine {
                         for (i, row) in q.rows.iter().enumerate() {
                             let row_struct = CfmlValue::Struct(row.clone());
                             let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), object.clone()];
+                            self.closure_parent_writeback = None;
                             let mapped = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                             if let CfmlValue::Struct(s) = mapped {
                                 new_rows.push(s);
                             } else {
@@ -2725,7 +3060,11 @@ impl CfmlVirtualMachine {
                         for (i, row) in q.rows.iter().enumerate() {
                             let row_struct = CfmlValue::Struct(row.clone());
                             let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), object.clone()];
+                            self.closure_parent_writeback = None;
                             let keep = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                             if keep.is_true() {
                                 new_rows.push(row.clone());
                             }
@@ -2742,7 +3081,11 @@ impl CfmlVirtualMachine {
                         for (i, row) in q.rows.iter().enumerate() {
                             let row_struct = CfmlValue::Struct(row.clone());
                             let cb_args = vec![acc.clone(), row_struct, CfmlValue::Int((i + 1) as i64), object.clone()];
+                            self.closure_parent_writeback = None;
                             acc = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                         }
                         return Ok(acc);
                     }
@@ -2757,7 +3100,11 @@ impl CfmlVirtualMachine {
                                 let a = CfmlValue::Struct(rows[j].clone());
                                 let b = CfmlValue::Struct(rows[j + 1].clone());
                                 let cb_args = vec![a, b];
+                                self.closure_parent_writeback = None;
                                 let cmp = self.call_function(&callback, cb_args, &HashMap::new())?;
+                                if let Some(ref wb) = self.closure_parent_writeback {
+                                    Self::write_back_to_captured_scope(&callback, wb);
+                                }
                                 let cmp_val = match &cmp {
                                     CfmlValue::Int(n) => *n,
                                     CfmlValue::Double(d) => *d as i64,
@@ -2779,7 +3126,11 @@ impl CfmlVirtualMachine {
                         for (i, row) in q.rows.iter().enumerate() {
                             let row_struct = CfmlValue::Struct(row.clone());
                             let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), object.clone()];
+                            self.closure_parent_writeback = None;
                             let result = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                             if result.is_true() { return Ok(CfmlValue::Bool(true)); }
                         }
                         return Ok(CfmlValue::Bool(false));
@@ -2791,7 +3142,11 @@ impl CfmlVirtualMachine {
                         for (i, row) in q.rows.iter().enumerate() {
                             let row_struct = CfmlValue::Struct(row.clone());
                             let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), object.clone()];
+                            self.closure_parent_writeback = None;
                             let result = self.call_function(&callback, cb_args, &HashMap::new())?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
                             if !result.is_true() { return Ok(CfmlValue::Bool(false)); }
                         }
                         return Ok(CfmlValue::Bool(true));
@@ -2858,7 +3213,12 @@ impl CfmlVirtualMachine {
                 }
             }
             method_locals.insert("this".to_string(), object.clone());
-            return self.call_function(&func_ref, args, &method_locals);
+            self.closure_parent_writeback = None;
+            let result = self.call_function(&func_ref, args, &method_locals)?;
+            if let Some(ref wb) = self.closure_parent_writeback {
+                Self::write_back_to_captured_scope(&func_ref, wb);
+            }
+            return Ok(result);
         }
 
         // Implicit property accessors (getXxx / setXxx) for components
@@ -2991,6 +3351,44 @@ impl CfmlVirtualMachine {
         true
     }
 
+    /// Shallow equality check for CfmlValues — avoids recursing into captured
+    /// scopes (which could cause infinite recursion with shared environments).
+    fn values_equal_shallow(a: &CfmlValue, b: &CfmlValue) -> bool {
+        match (a, b) {
+            (CfmlValue::Null, CfmlValue::Null) => true,
+            (CfmlValue::Bool(a), CfmlValue::Bool(b)) => a == b,
+            (CfmlValue::Int(a), CfmlValue::Int(b)) => a == b,
+            (CfmlValue::Double(a), CfmlValue::Double(b)) => a == b,
+            (CfmlValue::String(a), CfmlValue::String(b)) => a == b,
+            (CfmlValue::Array(a), CfmlValue::Array(b)) => {
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| Self::values_equal_shallow(x, y))
+            }
+            (CfmlValue::Struct(a), CfmlValue::Struct(b)) => {
+                a.len() == b.len() && a.iter().all(|(k, v)| {
+                    b.get(k).map_or(false, |bv| Self::values_equal_shallow(v, bv))
+                })
+            }
+            // Functions/Closures/Components/Queries/Binary: treat as always different
+            // to ensure write-back happens (avoids recursing into captured scopes).
+            _ => false,
+        }
+    }
+
+    /// Write back mutations into a closure's shared Arc<RwLock> environment.
+    /// Only updates variables that already exist in the captured scope (prevents pollution).
+    fn write_back_to_captured_scope(func_ref: &CfmlValue, writeback: &HashMap<String, CfmlValue>) {
+        if let CfmlValue::Function(ref f) = func_ref {
+            if let Some(ref shared_env) = f.captured_scope {
+                let mut env = shared_env.write().unwrap();
+                for (k, v) in writeback {
+                    if env.contains_key(k) {
+                        env.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+    }
+
     /// Compute final closure write-back after a higher-order function loop.
     /// Compares modified locals against original parent_locals and sets closure_parent_writeback.
     fn set_ho_final_writeback(
@@ -3002,7 +3400,7 @@ impl CfmlVirtualMachine {
         for (k, v) in modified {
             match original.get(k) {
                 Some(pv) => {
-                    if format!("{:?}", v) != format!("{:?}", pv) {
+                    if !Self::values_equal_shallow(v, pv) {
                         final_wb.insert(k.clone(), v.clone());
                     }
                 }
@@ -3141,6 +3539,29 @@ impl CfmlVirtualMachine {
             }
             _ => {}
         }
+    }
+
+    /// Get default datasource from application scope or request scope
+    fn get_default_datasource(&self, parent_locals: &HashMap<String, CfmlValue>) -> String {
+        // Check application scope for datasource config
+        if let Some(ref app_scope) = self.application_scope {
+            if let Ok(scope) = app_scope.lock() {
+                if let Some(ds) = scope.get("datasource").or_else(|| scope.get("defaultdatasource")) {
+                    let s = ds.as_string();
+                    if !s.is_empty() {
+                        return s;
+                    }
+                }
+            }
+        }
+        // Check local variables
+        if let Some(ds) = parent_locals.get("datasource") {
+            let s = ds.as_string();
+            if !s.is_empty() {
+                return s;
+            }
+        }
+        String::new()
     }
 
     /// Resolve a component template by name: tries locals, globals (exact + CI),
@@ -3309,6 +3730,173 @@ impl CfmlVirtualMachine {
     /// Resolve the full inheritance chain for a component template.
     /// If the template has an `__extends` key, load the parent, recursively
     /// resolve its inheritance, then merge child on top of parent.
+    /// Resolve all required method names from an interface, including inherited ones.
+    fn resolve_interface_methods(
+        &mut self,
+        iface_name: &str,
+        locals: &HashMap<String, CfmlValue>,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> Result<Vec<String>, CfmlError> {
+        let name_lower = iface_name.to_lowercase();
+        if visited.contains(&name_lower) {
+            return Ok(Vec::new()); // Cycle detected
+        }
+        visited.insert(name_lower);
+
+        // Look up the interface in globals/locals
+        let iface = locals.get(iface_name)
+            .or_else(|| {
+                // Case-insensitive lookup in globals
+                self.globals.iter()
+                    .find(|(k, _)| k.to_lowercase() == iface_name.to_lowercase())
+                    .map(|(_, v)| v)
+            })
+            .cloned();
+
+        let iface = match iface {
+            Some(iface) => iface,
+            None => {
+                // Try resolving as a component template (file-based)
+                match self.resolve_component_template(iface_name, locals) {
+                    Some(t) => t,
+                    None => return Err(CfmlError::runtime(
+                        format!("Interface '{}' not found", iface_name)
+                    )),
+                }
+            }
+        };
+
+        let iface_struct = match &iface {
+            CfmlValue::Struct(s) => s,
+            _ => return Err(CfmlError::runtime(
+                format!("'{}' is not an interface", iface_name)
+            )),
+        };
+
+        // Verify it's actually an interface
+        let is_interface = matches!(iface_struct.get("__is_interface"), Some(CfmlValue::Bool(true)));
+        if !is_interface {
+            return Err(CfmlError::runtime(
+                format!("'{}' is not an interface", iface_name)
+            ));
+        }
+
+        let mut methods = Vec::new();
+
+        // Collect methods from __methods struct
+        if let Some(CfmlValue::Struct(methods_map)) = iface_struct.get("__methods") {
+            for key in methods_map.keys() {
+                methods.push(key.clone());
+            }
+        }
+
+        // Recursively collect from parent interfaces
+        if let Some(CfmlValue::Array(parents)) = iface_struct.get("__extends") {
+            for parent in parents {
+                let parent_name = parent.as_string();
+                let parent_methods = self.resolve_interface_methods(&parent_name, locals, visited)?;
+                for m in parent_methods {
+                    if !methods.iter().any(|existing| existing.to_lowercase() == m.to_lowercase()) {
+                        methods.push(m);
+                    }
+                }
+            }
+        }
+
+        Ok(methods)
+    }
+
+    /// Collect all transitive interface names from an interface's extends chain.
+    fn collect_transitive_interfaces(
+        &mut self,
+        iface_name: &str,
+        locals: &HashMap<String, CfmlValue>,
+        visited: &mut std::collections::HashSet<String>,
+        result: &mut Vec<String>,
+    ) {
+        let name_lower = iface_name.to_lowercase();
+        if visited.contains(&name_lower) {
+            return;
+        }
+        visited.insert(name_lower);
+        result.push(iface_name.to_string());
+
+        // Look up the interface
+        let iface = locals.get(iface_name)
+            .or_else(|| {
+                self.globals.iter()
+                    .find(|(k, _)| k.to_lowercase() == iface_name.to_lowercase())
+                    .map(|(_, v)| v)
+            })
+            .cloned();
+
+        let iface = match iface {
+            Some(i) => i,
+            None => match self.resolve_component_template(iface_name, locals) {
+                Some(t) => t,
+                None => return,
+            },
+        };
+
+        if let CfmlValue::Struct(s) = &iface {
+            if let Some(CfmlValue::Array(parents)) = s.get("__extends") {
+                for parent in parents.clone() {
+                    let parent_name = parent.as_string();
+                    self.collect_transitive_interfaces(&parent_name, locals, visited, result);
+                }
+            }
+        }
+    }
+
+    /// Validate that a component struct implements all methods required by its interfaces.
+    /// Returns the full set of transitive interface names (for __implements_chain).
+    fn validate_interface_implementation(
+        &mut self,
+        component: &HashMap<String, CfmlValue>,
+        locals: &HashMap<String, CfmlValue>,
+    ) -> Result<Vec<String>, CfmlError> {
+        let iface_names = match component.get("__implements") {
+            Some(CfmlValue::Array(arr)) => arr.clone(),
+            _ => return Ok(Vec::new()), // No interfaces to validate
+        };
+
+        let comp_name = component.get("__name")
+            .map(|v| v.as_string())
+            .unwrap_or_else(|| "Anonymous".to_string());
+
+        let mut all_interfaces = Vec::new();
+
+        for iface_val in &iface_names {
+            let iface_name = iface_val.as_string();
+
+            // Collect all transitive interface names
+            let mut visited_ifaces = std::collections::HashSet::new();
+            self.collect_transitive_interfaces(&iface_name, locals, &mut visited_ifaces, &mut all_interfaces);
+
+            // Validate methods
+            let mut visited = std::collections::HashSet::new();
+            let required_methods = self.resolve_interface_methods(&iface_name, locals, &mut visited)?;
+
+            for method_name in &required_methods {
+                // Check if component has this method (case-insensitive)
+                let has_method = component.iter().any(|(k, v)| {
+                    k.to_lowercase() == method_name.to_lowercase()
+                        && matches!(v, CfmlValue::Function(_))
+                });
+                if !has_method {
+                    return Err(CfmlError::runtime(
+                        format!(
+                            "Component '{}' does not implement method '{}' required by interface '{}'",
+                            comp_name, method_name, iface_name
+                        )
+                    ));
+                }
+            }
+        }
+
+        Ok(all_interfaces)
+    }
+
     fn resolve_inheritance(
         &mut self,
         template: CfmlValue,
@@ -3420,6 +4008,32 @@ impl CfmlVirtualMachine {
             }
         }
         parent_map.insert("__extends_chain".to_string(), CfmlValue::Array(chain));
+
+        // Propagate __implements through inheritance: aggregate child + parent interfaces
+        let mut all_implements = std::collections::HashSet::new();
+        // Collect child's direct interfaces
+        if let Some(CfmlValue::Array(child_ifaces)) = child_map.get("__implements") {
+            for iface in child_ifaces {
+                all_implements.insert(iface.as_string().to_lowercase());
+            }
+        }
+        // Collect parent's interfaces (direct + inherited)
+        if let Some(CfmlValue::Array(parent_ifaces)) = parent_map.get("__implements") {
+            for iface in parent_ifaces {
+                all_implements.insert(iface.as_string().to_lowercase());
+            }
+        }
+        if let Some(CfmlValue::Array(parent_chain)) = parent_map.get("__implements_chain") {
+            for iface in parent_chain {
+                all_implements.insert(iface.as_string().to_lowercase());
+            }
+        }
+        if !all_implements.is_empty() {
+            let chain: Vec<CfmlValue> = all_implements.into_iter()
+                .map(|s| CfmlValue::String(s))
+                .collect();
+            parent_map.insert("__implements_chain".to_string(), CfmlValue::Array(chain));
+        }
 
         CfmlValue::Struct(parent_map)
     }
