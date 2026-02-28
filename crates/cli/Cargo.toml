@@ -25,3 +25,4 @@ anyhow = { workspace = true }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }
 regex = "1"
+multer = "3"

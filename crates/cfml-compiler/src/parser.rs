@@ -173,6 +173,11 @@ impl Parser {
             return Ok(CfmlNode::Statement(Statement::Throw(self.parse_throw()?)));
         }
 
+        if self.match_token(&Token::Rethrow) {
+            self.match_token(&Token::Semicolon);
+            return Ok(CfmlNode::Statement(Statement::Rethrow(stmt_loc)));
+        }
+
         if self.match_token(&Token::Return) {
             return Ok(CfmlNode::Statement(Statement::Return(self.parse_return()?)));
         }
@@ -1193,7 +1198,7 @@ impl Parser {
             Token::Do => "do", Token::Break => "break", Token::Continue => "continue",
             Token::Return => "return", Token::Switch => "switch", Token::Case => "case",
             Token::Try => "try", Token::Catch => "catch", Token::Finally => "finally",
-            Token::Throw => "throw", Token::Function => "function", Token::Var => "var",
+            Token::Throw => "throw", Token::Rethrow => "rethrow", Token::Function => "function", Token::Var => "var",
             Token::New => "new", Token::This => "this", Token::Super => "super",
             Token::Component => "component", Token::Extends => "extends",
             Token::Implements => "implements", Token::Interface => "interface",

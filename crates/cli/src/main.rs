@@ -64,6 +64,7 @@ struct CfmlResponse {
     response_content_type: Option<String>,
     response_body: Option<CfmlValue>,
     redirect_url: Option<String>,
+    session_id: Option<String>,
 }
 
 fn main() {
@@ -139,7 +140,7 @@ fn execute_code(source: &str, debug: bool) {
 }
 
 fn execute_code_with_file(source: &str, debug: bool, source_file: Option<String>) {
-    match compile_and_run(source, debug, source_file, HashMap::new(), None, None) {
+    match compile_and_run(source, debug, source_file, HashMap::new(), None, None, None) {
         Ok(response) => {
             if !response.output.is_empty() {
                 print!("{}", response.output);
@@ -154,6 +155,18 @@ fn execute_code_with_file(source: &str, debug: bool, source_file: Option<String>
 
 /// Compile and execute CFML source, returning output as a String.
 /// `extra_globals` are injected into vm.globals before execution (e.g. web scopes).
+fn compile_and_run_with_session(
+    source: &str,
+    debug: bool,
+    source_file: Option<String>,
+    extra_globals: HashMap<String, CfmlValue>,
+    server_state: Option<&ServerState>,
+    http_request_data: Option<CfmlValue>,
+    session_id: Option<String>,
+) -> Result<CfmlResponse, String> {
+    compile_and_run(source, debug, source_file, extra_globals, server_state, http_request_data, session_id)
+}
+
 fn compile_and_run(
     source: &str,
     debug: bool,
@@ -161,6 +174,7 @@ fn compile_and_run(
     extra_globals: HashMap<String, CfmlValue>,
     server_state: Option<&ServerState>,
     http_request_data: Option<CfmlValue>,
+    session_id: Option<String>,
 ) -> Result<CfmlResponse, String> {
     // Strip shebang line if present (e.g. #!/usr/bin/env rustcfml)
     let source = if source.starts_with("#!") {
@@ -272,6 +286,9 @@ fn compile_and_run(
     // Wire up HTTP request data if provided
     vm.http_request_data = http_request_data;
 
+    // Wire up session ID
+    vm.session_id = session_id;
+
     let result = vm.execute_with_lifecycle();
 
     // Catch redirect errors as success
@@ -296,6 +313,7 @@ fn compile_and_run(
                 response_content_type: vm.response_content_type,
                 response_body: vm.response_body,
                 redirect_url: vm.redirect_url,
+                session_id: vm.session_id,
             })
         }
         Err(e) => Err(format!("{}", e)),
@@ -469,14 +487,39 @@ async fn handle_request(
             let file_path = rf.file_path.to_string_lossy().to_string();
             let server_state = state.server_state.clone();
 
+            // Extract or generate session ID from cookies
+            let session_id = {
+                let cookie_header = headers.iter()
+                    .find(|(n, _)| n.to_lowercase() == "cookie")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                let existing_sid = cookie_header.split(';')
+                    .find_map(|c| {
+                        let c = c.trim();
+                        if c.starts_with("CFID=") {
+                            Some(c[5..].to_string())
+                        } else {
+                            None
+                        }
+                    });
+                existing_sid.unwrap_or_else(|| {
+                    // Generate a new session ID
+                    use std::time::SystemTime;
+                    let ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos();
+                    format!("{:x}", ts)
+                })
+            };
+            let session_id_clone = session_id.clone();
+
             let result = tokio::task::spawn_blocking(move || {
-                compile_and_run(
+                compile_and_run_with_session(
                     &source,
                     debug,
                     Some(file_path),
                     extra_globals,
                     Some(&server_state),
                     Some(http_request_data),
+                    Some(session_id_clone),
                 )
             }).await.unwrap();
 
@@ -523,6 +566,11 @@ async fn handle_request(
 
                     for (name, value) in &response.response_headers {
                         builder = builder.header(name.as_str(), value.as_str());
+                    }
+
+                    // Set session cookie
+                    if let Some(ref sid) = response.session_id {
+                        builder = builder.header("Set-Cookie", format!("CFID={}; Path=/; HttpOnly", sid));
                     }
 
                     builder.body(axum::body::Body::from(body)).unwrap()
@@ -689,16 +737,37 @@ fn build_web_scopes(
     // Raw body as string
     let raw_body = String::from_utf8_lossy(body).to_string();
 
-    // Form scope — parsed POST body (application/x-www-form-urlencoded)
+    // Form scope — parsed POST body (application/x-www-form-urlencoded or multipart/form-data)
     let form_scope = if method == "POST"
         && content_type.starts_with("application/x-www-form-urlencoded")
         && !raw_body.is_empty()
     {
         parse_query_string(&raw_body)
+    } else if method == "POST" && content_type.starts_with("multipart/form-data") {
+        parse_multipart_sync(&content_type, body)
     } else {
         HashMap::new()
     };
     globals.insert("form".to_string(), CfmlValue::Struct(form_scope));
+
+    // Cookie scope — parsed from Cookie header
+    let cookie_scope = {
+        let mut cookies = HashMap::new();
+        for (name, value) in headers {
+            if name.to_lowercase() == "cookie" {
+                for cookie in value.split(';') {
+                    let cookie = cookie.trim();
+                    if let Some(eq) = cookie.find('=') {
+                        let cname = cookie[..eq].trim().to_string();
+                        let cvalue = cookie[eq+1..].trim().to_string();
+                        cookies.insert(cname, CfmlValue::String(cvalue));
+                    }
+                }
+            }
+        }
+        cookies
+    };
+    globals.insert("cookie".to_string(), CfmlValue::Struct(cookie_scope));
 
     // Build full HTTP request data
     let mut headers_struct = HashMap::new();
@@ -762,6 +831,116 @@ fn url_decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&result).to_string()
+}
+
+/// Parse multipart/form-data body synchronously.
+/// Extracts form fields and file uploads into the form scope.
+/// File uploads are stored as structs with file metadata + temp path.
+fn parse_multipart_sync(content_type: &str, body: &[u8]) -> HashMap<String, CfmlValue> {
+    let mut form = HashMap::new();
+
+    // Extract boundary from content-type
+    let boundary = content_type
+        .split(';')
+        .find_map(|part| {
+            let trimmed = part.trim();
+            if trimmed.to_lowercase().starts_with("boundary=") {
+                Some(trimmed[9..].trim_matches('"').to_string())
+            } else {
+                None
+            }
+        });
+
+    let boundary = match boundary {
+        Some(b) => b,
+        None => return form,
+    };
+
+    let delimiter = format!("--{}", boundary);
+    let end_delimiter = format!("--{}--", boundary);
+
+    // Split body by boundary
+    let body_str = String::from_utf8_lossy(body);
+    let parts: Vec<&str> = body_str.split(&delimiter).collect();
+
+    for part in parts {
+        let part = part.trim_start_matches("\r\n").trim_end_matches("\r\n");
+        if part.is_empty() || part == "--" || part.starts_with(&end_delimiter) {
+            continue;
+        }
+
+        // Split headers from body
+        let header_end = if let Some(pos) = part.find("\r\n\r\n") {
+            pos
+        } else if let Some(pos) = part.find("\n\n") {
+            pos
+        } else {
+            continue;
+        };
+
+        let header_section = &part[..header_end];
+        let body_start = if part[header_end..].starts_with("\r\n\r\n") {
+            header_end + 4
+        } else {
+            header_end + 2
+        };
+        let part_body = &part[body_start..];
+
+        // Parse Content-Disposition
+        let mut field_name = String::new();
+        let mut file_name = None;
+        let mut part_content_type = None;
+
+        for line in header_section.lines() {
+            let lower = line.to_lowercase();
+            if lower.starts_with("content-disposition:") {
+                // Extract name
+                if let Some(pos) = line.find("name=\"") {
+                    let rest = &line[pos + 6..];
+                    if let Some(end) = rest.find('"') {
+                        field_name = rest[..end].to_string();
+                    }
+                }
+                // Extract filename
+                if let Some(pos) = line.find("filename=\"") {
+                    let rest = &line[pos + 10..];
+                    if let Some(end) = rest.find('"') {
+                        file_name = Some(rest[..end].to_string());
+                    }
+                }
+            } else if lower.starts_with("content-type:") {
+                part_content_type = Some(line[13..].trim().to_string());
+            }
+        }
+
+        if field_name.is_empty() {
+            continue;
+        }
+
+        if let Some(fname) = file_name {
+            // File upload — save to temp directory and store metadata
+            let temp_dir = std::env::temp_dir();
+            let temp_path = temp_dir.join(format!("cfupload_{}", fname));
+            let _ = std::fs::write(&temp_path, part_body.as_bytes());
+
+            let mut file_info = HashMap::new();
+            file_info.insert("serverFile".to_string(), CfmlValue::String(fname.clone()));
+            file_info.insert("clientFile".to_string(), CfmlValue::String(fname.clone()));
+            file_info.insert("serverDirectory".to_string(), CfmlValue::String(temp_dir.to_string_lossy().to_string()));
+            file_info.insert("serverFileName".to_string(), CfmlValue::String(fname.clone()));
+            file_info.insert("tempFilePath".to_string(), CfmlValue::String(temp_path.to_string_lossy().to_string()));
+            file_info.insert("contentType".to_string(), CfmlValue::String(part_content_type.unwrap_or_else(|| "application/octet-stream".to_string())));
+            file_info.insert("fileSize".to_string(), CfmlValue::Int(part_body.len() as i64));
+            file_info.insert("fileWasSaved".to_string(), CfmlValue::Bool(true));
+
+            form.insert(field_name.to_lowercase(), CfmlValue::Struct(file_info));
+        } else {
+            // Regular form field
+            form.insert(field_name.to_lowercase(), CfmlValue::String(part_body.to_string()));
+        }
+    }
+
+    form
 }
 
 fn content_type_for(path: &Path) -> &'static str {

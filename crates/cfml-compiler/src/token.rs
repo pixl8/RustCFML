@@ -80,6 +80,7 @@ pub enum Token {
     Try,
     Catch,
     Throw,
+    Rethrow,
     Finally,
 
     // OOP
@@ -162,6 +163,7 @@ impl Token {
             "catch" => Some(Token::Catch),
             "finally" => Some(Token::Finally),
             "throw" => Some(Token::Throw),
+            "rethrow" => Some(Token::Rethrow),
             "component" => Some(Token::Component),
             "property" => Some(Token::Property),
             "function" => Some(Token::Function),

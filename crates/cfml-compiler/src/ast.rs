@@ -99,6 +99,7 @@ pub enum Statement {
     Continue(Continue),
     Try(Try),
     Throw(Throw),
+    Rethrow(SourceLocation),
     Import(Import),
     Var(Var),
     ComponentDecl(ComponentDecl),

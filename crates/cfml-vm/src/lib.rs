@@ -29,16 +29,28 @@ pub struct CfmlMapping {
     pub path: String, // Absolute filesystem directory
 }
 
+/// Session data for a single user session.
+#[derive(Clone)]
+pub struct SessionData {
+    pub variables: HashMap<String, CfmlValue>,
+    pub created: std::time::Instant,
+    pub last_accessed: std::time::Instant,
+    pub auth_user: Option<String>,
+    pub auth_roles: Vec<String>,
+}
+
 /// Server-level state, persists across requests in --serve mode.
 #[derive(Clone)]
 pub struct ServerState {
     pub applications: Arc<Mutex<HashMap<String, ApplicationState>>>,
+    pub sessions: Arc<Mutex<HashMap<String, SessionData>>>,
 }
 
 impl ServerState {
     pub fn new() -> Self {
         Self {
             applications: Arc::new(Mutex::new(HashMap::new())),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -59,6 +71,8 @@ pub struct CfmlVirtualMachine {
     /// Current exception (if any)
     #[allow(dead_code)]
     current_exception: Option<CfmlValue>,
+    /// Last thrown exception (for rethrow support)
+    last_exception: Option<CfmlValue>,
     /// Current source line being executed (updated by LineInfo op)
     current_line: usize,
     /// Current source column
@@ -110,6 +124,8 @@ pub struct CfmlVirtualMachine {
     pub txn_execute: Option<fn(&mut Box<dyn std::any::Any>, &str, &CfmlValue, &str) -> CfmlResult>,
     /// Function pointer: execute query normally (args) -> result
     pub query_execute_fn: Option<fn(Vec<CfmlValue>) -> CfmlResult>,
+    /// Session ID for current request
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +156,7 @@ impl CfmlVirtualMachine {
             call_stack: Vec::new(),
             try_stack: Vec::new(),
             current_exception: None,
+            last_exception: None,
             current_line: 0,
             current_column: 0,
             method_this_writeback: None,
@@ -163,6 +180,7 @@ impl CfmlVirtualMachine {
             txn_commit: None,
             txn_rollback: None,
             txn_execute: None,
+            session_id: None,
             query_execute_fn: None,
         }
     }
@@ -360,6 +378,11 @@ impl CfmlVirtualMachine {
                         } else {
                             CfmlValue::Struct(HashMap::new())
                         }
+                    } else if name_lower == "session" {
+                        self.get_session_scope()
+                    } else if name_lower == "cookie" {
+                        self.globals.get("cookie").cloned()
+                            .unwrap_or(CfmlValue::Struct(HashMap::new()))
                     } else if name_lower == "server" {
                         let mut info = HashMap::new();
                         info.insert("coldfusion".to_string(), CfmlValue::Struct({
@@ -456,6 +479,10 @@ impl CfmlVirtualMachine {
                                         *scope = s.clone();
                                     }
                                 }
+                            }
+                        } else if name_lower == "session" {
+                            if let CfmlValue::Struct(s) = &val {
+                                self.set_session_scope(s.clone());
                             }
                         } else {
                             locals.insert(name, val);
@@ -1091,8 +1118,23 @@ impl CfmlVirtualMachine {
                     let error_val = stack.pop().unwrap_or(CfmlValue::String(
                         "Unknown error".to_string(),
                     ));
+                    self.last_exception = Some(error_val.clone());
                     if let Some(handler) = self.try_stack.pop() {
                         // Unwind stack
+                        while stack.len() > handler.stack_depth {
+                            stack.pop();
+                        }
+                        stack.push(error_val);
+                        ip = handler.catch_ip;
+                    } else {
+                        return Err(CfmlError::runtime(error_val.as_string()));
+                    }
+                }
+                BytecodeOp::Rethrow => {
+                    let error_val = self.last_exception.clone().unwrap_or(
+                        CfmlValue::String("No exception to rethrow".to_string()),
+                    );
+                    if let Some(handler) = self.try_stack.pop() {
                         while stack.len() > handler.stack_depth {
                             stack.pop();
                         }
@@ -1487,7 +1529,12 @@ impl CfmlVirtualMachine {
                 | "expandpath"
                 | "isdefined"
                 | "queryexecute"
-                | "__cftransaction_start" | "__cftransaction_commit" | "__cftransaction_rollback" => {
+                | "__cftransaction_start" | "__cftransaction_commit" | "__cftransaction_rollback"
+                | "__cflog" | "__cfsetting" | "__cflock_start" | "__cflock_end" | "__cfcookie"
+                | "fileupload" | "fileuploadall" | "__cffile_upload"
+                | "sessioninvalidate" | "sessionrotate" | "sessiongetmetadata"
+                | "getauthuser" | "isuserinrole" | "isuserloggedin"
+                | "__cfloginuser" | "__cflogout" => {
                     // Will be handled at the end of this function (needs VM access)
                 }
                 _ => {
@@ -2569,6 +2616,299 @@ impl CfmlVirtualMachine {
                     self.transaction_datasource = None;
                     return Ok(CfmlValue::Null);
                 }
+                "__cflog" => {
+                    // Extract log message from struct argument
+                    if let Some(CfmlValue::Struct(opts)) = args.get(0) {
+                        let text = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "text")
+                            .map(|(_, v)| v.as_string())
+                            .unwrap_or_default();
+                        let log_type = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "type")
+                            .map(|(_, v)| v.as_string())
+                            .unwrap_or_else(|| "Information".to_string());
+                        let file = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "file")
+                            .map(|(_, v)| v.as_string())
+                            .unwrap_or_else(|| "application".to_string());
+                        eprintln!("[CFLOG {}:{}] {}", file, log_type, text);
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "__cfsetting" => {
+                    // Handle cfsetting options
+                    if let Some(CfmlValue::Struct(opts)) = args.get(0) {
+                        let _show_debug = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "showdebugoutput")
+                            .map(|(_,v)| v.as_string().to_lowercase() == "true" || v.as_string() == "yes");
+                        let _request_timeout = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "requesttimeout")
+                            .map(|(_, v)| v.as_string());
+                        let enable_output = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "enablecfoutputonly")
+                            .map(|(_,v)| v.as_string().to_lowercase() == "true" || v.as_string() == "yes");
+                        if let Some(_enabled) = enable_output {
+                            // Would control output suppression - stub for now
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "__cflock_start" => {
+                    // cflock start - stub (real implementation needs concurrency primitives)
+                    return Ok(CfmlValue::Null);
+                }
+                "__cflock_end" => {
+                    // cflock end - stub
+                    return Ok(CfmlValue::Null);
+                }
+                "__cfcookie" => {
+                    // Set a cookie via response headers
+                    if let Some(CfmlValue::Struct(opts)) = args.get(0) {
+                        let name = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "name")
+                            .map(|(_, v)| v.as_string())
+                            .unwrap_or_default();
+                        let value = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "value")
+                            .map(|(_, v)| v.as_string())
+                            .unwrap_or_default();
+                        let mut cookie = format!("{}={}", name, value);
+                        if let Some((_, expires)) = opts.iter().find(|(k, _)| k.to_lowercase() == "expires") {
+                            cookie.push_str(&format!("; Expires={}", expires.as_string()));
+                        }
+                        if let Some((_, domain)) = opts.iter().find(|(k, _)| k.to_lowercase() == "domain") {
+                            cookie.push_str(&format!("; Domain={}", domain.as_string()));
+                        }
+                        if let Some((_, path)) = opts.iter().find(|(k, _)| k.to_lowercase() == "path") {
+                            cookie.push_str(&format!("; Path={}", path.as_string()));
+                        }
+                        if let Some((_, secure)) = opts.iter().find(|(k, _)| k.to_lowercase() == "secure") {
+                            if secure.as_string().to_lowercase() == "true" || secure.as_string() == "yes" {
+                                cookie.push_str("; Secure");
+                            }
+                        }
+                        if let Some((_, httponly)) = opts.iter().find(|(k, _)| k.to_lowercase() == "httponly") {
+                            if httponly.as_string().to_lowercase() == "true" || httponly.as_string() == "yes" {
+                                cookie.push_str("; HttpOnly");
+                            }
+                        }
+                        self.response_headers.push(("Set-Cookie".to_string(), cookie));
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "fileupload" | "__cffile_upload" => {
+                    // fileUpload(destination, formField, accept, nameConflict)
+                    let destination = args.get(0).map(|v| v.as_string()).unwrap_or_default();
+                    let form_field = args.get(1).map(|v| v.as_string()).unwrap_or_default();
+                    let _accept = args.get(2).map(|v| v.as_string()).unwrap_or_default();
+                    let name_conflict = args.get(3).map(|v| v.as_string().to_lowercase()).unwrap_or_else(|| "error".to_string());
+
+                    // Look up the form field to find uploaded file info
+                    let form_scope = self.globals.get("form")
+                        .cloned()
+                        .unwrap_or(CfmlValue::Struct(HashMap::new()));
+
+                    if let CfmlValue::Struct(form) = form_scope {
+                        let field_lower = form_field.to_lowercase();
+                        if let Some(CfmlValue::Struct(file_info)) = form.iter()
+                            .find(|(k, _)| k.to_lowercase() == field_lower)
+                            .map(|(_, v)| v)
+                        {
+                            let temp_path = file_info.iter()
+                                .find(|(k, _)| k.to_lowercase() == "tempfilepath")
+                                .map(|(_, v)| v.as_string())
+                                .unwrap_or_default();
+                            let client_file = file_info.iter()
+                                .find(|(k, _)| k.to_lowercase() == "clientfile")
+                                .map(|(_, v)| v.as_string())
+                                .unwrap_or_default();
+
+                            if !temp_path.is_empty() {
+                                let dest_dir = std::path::Path::new(&destination);
+                                let _ = std::fs::create_dir_all(dest_dir);
+                                let dest_file = dest_dir.join(&client_file);
+
+                                let final_path = if dest_file.exists() && name_conflict == "makeunique" {
+                                    let stem = dest_file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                                    let ext = dest_file.extension().map(|s| format!(".{}", s.to_string_lossy())).unwrap_or_default();
+                                    let unique = dest_dir.join(format!("{}_{}{}", stem, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(), ext));
+                                    unique
+                                } else {
+                                    dest_file
+                                };
+
+                                match std::fs::copy(&temp_path, &final_path) {
+                                    Ok(_) => {
+                                        let _ = std::fs::remove_file(&temp_path);
+                                        let mut result = file_info.clone();
+                                        result.insert("serverDirectory".to_string(), CfmlValue::String(destination));
+                                        result.insert("serverFile".to_string(), CfmlValue::String(final_path.file_name().unwrap_or_default().to_string_lossy().to_string()));
+                                        result.insert("fileWasSaved".to_string(), CfmlValue::Bool(true));
+                                        return Ok(CfmlValue::Struct(result));
+                                    }
+                                    Err(e) => return Err(CfmlError::runtime(format!("fileUpload: {}", e))),
+                                }
+                            }
+                        }
+                    }
+                    return Err(CfmlError::runtime(format!("fileUpload: form field '{}' not found or no file uploaded", form_field)));
+                }
+                "fileuploadall" => {
+                    // fileUploadAll(destination, accept, nameConflict)
+                    let destination = args.get(0).map(|v| v.as_string()).unwrap_or_default();
+                    let _accept = args.get(1).map(|v| v.as_string()).unwrap_or_default();
+                    let name_conflict = args.get(2).map(|v| v.as_string().to_lowercase()).unwrap_or_else(|| "error".to_string());
+
+                    let form_scope = self.globals.get("form")
+                        .cloned()
+                        .unwrap_or(CfmlValue::Struct(HashMap::new()));
+
+                    let mut results = Vec::new();
+                    if let CfmlValue::Struct(form) = form_scope {
+                        for (_, val) in &form {
+                            if let CfmlValue::Struct(file_info) = val {
+                                let temp_path = file_info.iter()
+                                    .find(|(k, _)| k.to_lowercase() == "tempfilepath")
+                                    .map(|(_, v)| v.as_string())
+                                    .unwrap_or_default();
+                                if temp_path.is_empty() { continue; }
+
+                                let client_file = file_info.iter()
+                                    .find(|(k, _)| k.to_lowercase() == "clientfile")
+                                    .map(|(_, v)| v.as_string())
+                                    .unwrap_or_default();
+
+                                let dest_dir = std::path::Path::new(&destination);
+                                let _ = std::fs::create_dir_all(dest_dir);
+                                let dest_file = dest_dir.join(&client_file);
+
+                                let final_path = if dest_file.exists() && name_conflict == "makeunique" {
+                                    let stem = dest_file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                                    let ext = dest_file.extension().map(|s| format!(".{}", s.to_string_lossy())).unwrap_or_default();
+                                    let unique = dest_dir.join(format!("{}_{}{}", stem, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(), ext));
+                                    unique
+                                } else {
+                                    dest_file
+                                };
+
+                                if let Ok(_) = std::fs::copy(&temp_path, &final_path) {
+                                    let _ = std::fs::remove_file(&temp_path);
+                                    let mut result = file_info.clone();
+                                    result.insert("serverDirectory".to_string(), CfmlValue::String(destination.clone()));
+                                    result.insert("serverFile".to_string(), CfmlValue::String(final_path.file_name().unwrap_or_default().to_string_lossy().to_string()));
+                                    result.insert("fileWasSaved".to_string(), CfmlValue::Bool(true));
+                                    results.push(CfmlValue::Struct(result));
+                                }
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Array(results));
+                }
+                "sessioninvalidate" => {
+                    if let (Some(ref state), Some(ref sid)) = (&self.server_state, &self.session_id) {
+                        if let Ok(mut sessions) = state.sessions.lock() {
+                            sessions.remove(sid);
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "sessionrotate" => {
+                    // Generate a new session ID and migrate data
+                    if let (Some(ref state), Some(ref old_sid)) = (&self.server_state, &self.session_id) {
+                        let new_sid = {
+                            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+                            format!("{:x}", ts)
+                        };
+                        if let Ok(mut sessions) = state.sessions.lock() {
+                            if let Some(old_data) = sessions.remove(old_sid) {
+                                sessions.insert(new_sid.clone(), old_data);
+                            }
+                        }
+                        self.session_id = Some(new_sid);
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "sessiongetmetadata" => {
+                    let mut meta = HashMap::new();
+                    if let (Some(ref state), Some(ref sid)) = (&self.server_state, &self.session_id) {
+                        if let Ok(sessions) = state.sessions.lock() {
+                            if let Some(session) = sessions.get(sid) {
+                                meta.insert("sessionId".to_string(), CfmlValue::String(sid.clone()));
+                                meta.insert("timeCreated".to_string(), CfmlValue::Int(session.created.elapsed().as_secs() as i64));
+                                meta.insert("lastAccessed".to_string(), CfmlValue::Int(session.last_accessed.elapsed().as_secs() as i64));
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Struct(meta));
+                }
+                "getauthuser" => {
+                    if let (Some(ref state), Some(ref sid)) = (&self.server_state, &self.session_id) {
+                        if let Ok(sessions) = state.sessions.lock() {
+                            if let Some(session) = sessions.get(sid) {
+                                if let Some(ref user) = session.auth_user {
+                                    return Ok(CfmlValue::String(user.clone()));
+                                }
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::String(String::new()));
+                }
+                "isuserloggedin" => {
+                    if let (Some(ref state), Some(ref sid)) = (&self.server_state, &self.session_id) {
+                        if let Ok(sessions) = state.sessions.lock() {
+                            if let Some(session) = sessions.get(sid) {
+                                return Ok(CfmlValue::Bool(session.auth_user.is_some()));
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Bool(false));
+                }
+                "isuserinrole" => {
+                    let role = args.get(0).map(|v| v.as_string().to_lowercase()).unwrap_or_default();
+                    if let (Some(ref state), Some(ref sid)) = (&self.server_state, &self.session_id) {
+                        if let Ok(sessions) = state.sessions.lock() {
+                            if let Some(session) = sessions.get(sid) {
+                                let has_role = session.auth_roles.iter().any(|r| r.to_lowercase() == role);
+                                return Ok(CfmlValue::Bool(has_role));
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Bool(false));
+                }
+                "__cfloginuser" => {
+                    // cfloginuser name="..." password="..." roles="..."
+                    let name = args.get(0).map(|v| v.as_string()).unwrap_or_default();
+                    let roles_str = args.get(2).map(|v| v.as_string()).unwrap_or_default();
+                    let roles: Vec<String> = roles_str.split(',').map(|r| r.trim().to_string()).filter(|r| !r.is_empty()).collect();
+                    if let (Some(ref state), Some(ref sid)) = (&self.server_state, &self.session_id) {
+                        if let Ok(mut sessions) = state.sessions.lock() {
+                            if let Some(session) = sessions.get_mut(sid) {
+                                session.auth_user = Some(name);
+                                session.auth_roles = roles;
+                            } else {
+                                sessions.insert(sid.clone(), SessionData {
+                                    variables: HashMap::new(),
+                                    created: std::time::Instant::now(),
+                                    last_accessed: std::time::Instant::now(),
+                                    auth_user: Some(name),
+                                    auth_roles: roles,
+                                });
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "__cflogout" => {
+                    if let (Some(ref state), Some(ref sid)) = (&self.server_state, &self.session_id) {
+                        if let Ok(mut sessions) = state.sessions.lock() {
+                            if let Some(session) = sessions.get_mut(sid) {
+                                session.auth_user = None;
+                                session.auth_roles.clear();
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
                 _ => {}
             }
         }
@@ -3300,6 +3640,11 @@ impl CfmlVirtualMachine {
             } else {
                 None
             }
+        } else if root == "session" {
+            Some(self.get_session_scope())
+        } else if root == "cookie" {
+            self.globals.get("cookie").cloned()
+                .or(Some(CfmlValue::Struct(HashMap::new())))
         } else if root == "server" {
             Some(CfmlValue::Struct(HashMap::new())) // server scope always exists
         } else {
@@ -3562,6 +3907,61 @@ impl CfmlVirtualMachine {
             }
         }
         String::new()
+    }
+
+    /// Get the session scope for the current request
+    fn get_session_scope(&self) -> CfmlValue {
+        if let (Some(ref state), Some(ref sid)) = (&self.server_state, &self.session_id) {
+            if let Ok(sessions) = state.sessions.lock() {
+                if let Some(session) = sessions.get(sid) {
+                    return CfmlValue::Struct(session.variables.clone());
+                }
+            }
+        }
+        CfmlValue::Struct(HashMap::new())
+    }
+
+    /// Set the session scope for the current request
+    fn set_session_scope(&self, vars: HashMap<String, CfmlValue>) {
+        if let (Some(ref state), Some(ref sid)) = (&self.server_state, &self.session_id) {
+            if let Ok(mut sessions) = state.sessions.lock() {
+                if let Some(session) = sessions.get_mut(sid) {
+                    session.variables = vars;
+                    session.last_accessed = std::time::Instant::now();
+                } else {
+                    sessions.insert(sid.clone(), SessionData {
+                        variables: vars,
+                        created: std::time::Instant::now(),
+                        last_accessed: std::time::Instant::now(),
+                        auth_user: None,
+                        auth_roles: Vec::new(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Update a single key in the session scope
+    #[allow(dead_code)]
+    fn set_session_variable(&self, key: &str, value: CfmlValue) {
+        if let (Some(ref state), Some(ref sid)) = (&self.server_state, &self.session_id) {
+            if let Ok(mut sessions) = state.sessions.lock() {
+                if let Some(session) = sessions.get_mut(sid) {
+                    session.variables.insert(key.to_string(), value);
+                    session.last_accessed = std::time::Instant::now();
+                } else {
+                    let mut vars = HashMap::new();
+                    vars.insert(key.to_string(), value);
+                    sessions.insert(sid.clone(), SessionData {
+                        variables: vars,
+                        created: std::time::Instant::now(),
+                        last_accessed: std::time::Instant::now(),
+                        auth_user: None,
+                        auth_roles: Vec::new(),
+                    });
+                }
+            }
+        }
     }
 
     /// Resolve a component template by name: tries locals, globals (exact + CI),

@@ -102,6 +102,7 @@ pub enum BytecodeOp {
     TryStart(usize),    // Jump target for catch
     TryEnd,
     Throw,
+    Rethrow,            // Re-throw current exception
 
     // Method call: object is on stack, then args, method name + arg count
     // Optional write-back: (object_var, Option<property_name>)
@@ -330,6 +331,7 @@ impl CfmlCompiler {
             Statement::FunctionDecl(f) => Some(f.func.location.start.line),
             Statement::Try(t) => Some(t.location.start.line),
             Statement::Throw(t) => Some(t.location.start.line),
+            Statement::Rethrow(loc) => Some(loc.start.line),
             Statement::ComponentDecl(c) => Some(c.component.location.start.line),
             Statement::InterfaceDecl(i) => Some(i.interface.location.start.line),
             Statement::Include(i) => Some(i.location.start.line),
@@ -528,6 +530,9 @@ impl CfmlCompiler {
                     instructions.push(BytecodeOp::String("An error occurred".to_string()));
                 }
                 instructions.push(BytecodeOp::Throw);
+            }
+            Statement::Rethrow(_loc) => {
+                instructions.push(BytecodeOp::Rethrow);
             }
             Statement::FunctionDecl(func_decl) => {
                 self.compile_function_decl(&func_decl.func, instructions);

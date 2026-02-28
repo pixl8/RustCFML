@@ -92,6 +92,11 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("xmlFormat".into(), fn_xml_format);
     f.insert("paragraphFormat".into(), fn_paragraph_format);
     f.insert("cJustify".into(), fn_cjustify);
+    f.insert("ucFirst".into(), fn_uc_first);
+    f.insert("jsStringFormat".into(), fn_js_string_format);
+    f.insert("reEscape".into(), fn_re_escape);
+    f.insert("getToken".into(), fn_get_token);
+    f.insert("newLine".into(), fn_new_line);
 
     // ---- Array functions ----
     f.insert("arrayNew".into(), fn_array_new);
@@ -130,6 +135,17 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("arrayFindAllNoCase".into(), fn_array_find_all_no_case);
     f.insert("arrayFirst".into(), fn_array_first);
     f.insert("arrayLast".into(), fn_array_last);
+    f.insert("arrayPush".into(), fn_array_append);  // alias
+    f.insert("arrayUnshift".into(), fn_array_prepend);  // alias
+    f.insert("arrayIndexExists".into(), fn_array_index_exists);
+    f.insert("arrayResize".into(), fn_array_resize);
+    f.insert("arrayMedian".into(), fn_array_median);
+    f.insert("arrayMid".into(), fn_array_mid);
+    f.insert("arrayReduceRight".into(), fn_array_each);  // VM intercepts
+    f.insert("arraySplice".into(), fn_array_splice);
+    f.insert("arrayRange".into(), fn_array_range);
+    f.insert("arrayToStruct".into(), fn_array_to_struct);
+    f.insert("arrayDeleteNoCase".into(), fn_array_delete_no_case);
 
     // ---- Struct functions ----
     f.insert("structNew".into(), fn_struct_new);
@@ -159,6 +175,10 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("structValueArray".into(), fn_struct_value_array);
     f.insert("structEquals".into(), fn_struct_equals);
     f.insert("structKeyTranslate".into(), fn_struct_key_translate);
+    f.insert("structToSorted".into(), fn_struct_to_sorted);
+    f.insert("structIsOrdered".into(), fn_struct_is_ordered);
+    f.insert("structIsCaseSensitive".into(), fn_struct_is_case_sensitive);
+    f.insert("structToQueryString".into(), fn_struct_to_query_string);
 
     // ---- General utility functions ----
     f.insert("isEmpty".into(), fn_is_empty);
@@ -184,6 +204,15 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("val".into(), fn_val);
     f.insert("int".into(), fn_int);
     f.insert("javacast".into(), fn_java_cast);
+    f.insert("createTimeSpan".into(), fn_create_time_span);
+    f.insert("yesNoFormat".into(), fn_yes_no_format);
+    f.insert("booleanFormat".into(), fn_yes_no_format);  // alias
+    f.insert("trueFalseFormat".into(), fn_true_false_format);
+    f.insert("nullValue".into(), fn_null_value);
+    f.insert("incrementValue".into(), fn_increment_value);
+    f.insert("decrementValue".into(), fn_decrement_value);
+    f.insert("de".into(), fn_de);
+    f.insert("dollarFormat".into(), fn_dollar_format);
 
     // ---- Math functions ----
     f.insert("abs".into(), fn_abs);
@@ -284,6 +313,12 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("listEach".into(), fn_list_each);
     f.insert("listMap".into(), fn_list_map);
     f.insert("listFilter".into(), fn_list_filter);
+    f.insert("listSome".into(), fn_list_each);  // VM intercepts
+    f.insert("listEvery".into(), fn_list_each);  // VM intercepts
+    f.insert("listAvg".into(), fn_list_avg);
+    f.insert("listItemTrim".into(), fn_list_item_trim);
+    f.insert("listIndexExists".into(), fn_list_index_exists);
+    f.insert("listReduceRight".into(), fn_list_each);  // VM intercepts
 
     // ---- JSON functions ----
     f.insert("serializeJSON".into(), fn_serialize_json);
@@ -310,6 +345,14 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("querySort".into(), fn_query_ho_stub as BuiltinFunction);
     f.insert("querySome".into(), fn_query_ho_stub as BuiltinFunction);
     f.insert("queryEvery".into(), fn_query_ho_stub as BuiltinFunction);
+    f.insert("queryColumnExists".into(), fn_query_column_exists as BuiltinFunction);
+    f.insert("queryRowData".into(), fn_query_get_row as BuiltinFunction);  // alias
+    f.insert("querySlice".into(), fn_query_slice as BuiltinFunction);
+    f.insert("queryGetResult".into(), fn_query_get_result as BuiltinFunction);
+    f.insert("queryKeyExists".into(), fn_query_column_exists as BuiltinFunction);  // alias
+    f.insert("queryColumnData".into(), fn_query_column_data as BuiltinFunction);
+    f.insert("queryColumnArray".into(), fn_query_column_data as BuiltinFunction);  // alias
+    f.insert("queryCurrentRow".into(), fn_query_current_row as BuiltinFunction);
 
     // ---- Utility functions ----
     f.insert("evaluate".into(), fn_evaluate);
@@ -335,6 +378,19 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("getContextRoot".into(), fn_get_context_root);
     f.insert("GetContextRoot".into(), fn_get_context_root);
     f.insert("getPageContext".into(), fn_get_page_context);
+    f.insert("getFileFromPath".into(), fn_get_file_from_path);
+    f.insert("getCanonicalPath".into(), fn_get_canonical_path);
+    f.insert("systemOutput".into(), fn_system_output);
+    f.insert("getTemplatePath".into(), fn_get_current_template_path);  // alias
+    f.insert("writeLog".into(), fn_write_log);
+    f.insert("setLocale".into(), fn_set_locale);
+    f.insert("getLocale".into(), fn_get_locale);
+    f.insert("setTimeZone".into(), fn_set_time_zone);
+    f.insert("applicationStop".into(), fn_application_stop);
+    f.insert("getApplicationMetadata".into(), fn_get_application_metadata);
+    f.insert("getApplicationSettings".into(), fn_get_application_metadata);  // alias
+    f.insert("location".into(), fn_cflocation_stub);  // VM intercepts
+    f.insert("trace".into(), fn_trace);
 
     // ---- File I/O functions ----
     f.insert("fileRead".into(), fn_file_read);
@@ -352,6 +408,18 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("getTempFile".into(), fn_get_temp_file);
     f.insert("getFileInfo".into(), fn_get_file_info);
     f.insert("expandPath".into(), fn_expand_path);
+    f.insert("fileReadBinary".into(), fn_file_read_binary);
+    f.insert("fileGetMimeType".into(), fn_file_get_mime_type);
+    f.insert("directoryRename".into(), fn_directory_rename);
+    f.insert("directoryCopy".into(), fn_directory_copy);
+    f.insert("fileOpen".into(), fn_file_open);
+    f.insert("fileClose".into(), fn_file_close);
+    f.insert("fileReadLine".into(), fn_file_read_line);
+    f.insert("fileWriteLine".into(), fn_file_write_line);
+    f.insert("fileIsEOF".into(), fn_file_is_eof);
+    f.insert("fileUpload".into(), fn_file_upload);
+    f.insert("fileUploadAll".into(), fn_file_upload_all);
+    f.insert("__cffile_upload".into(), fn_cffile_upload);
 
     // ---- Additional builtins ----
     f.insert("encodeForURL".into(), fn_encode_for_url);
@@ -375,6 +443,21 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("__cftransaction_commit".into(), fn_cftransaction_commit_stub);
     f.insert("__cftransaction_rollback".into(), fn_cftransaction_rollback_stub);
     f.insert("cfdirectory".into(), fn_cfdirectory);
+    f.insert("__cflog".into(), fn_cflog_stub);
+    f.insert("__cfsetting".into(), fn_cfsetting_stub);
+    f.insert("__cflock_start".into(), fn_cflock_start_stub);
+    f.insert("__cflock_end".into(), fn_cflock_end_stub);
+    f.insert("__cfcookie".into(), fn_cfcookie_stub);
+
+    // ---- Session & Auth functions (VM-intercepted) ----
+    f.insert("sessionInvalidate".into(), fn_session_stub);
+    f.insert("sessionRotate".into(), fn_session_stub);
+    f.insert("sessionGetMetaData".into(), fn_session_stub);
+    f.insert("getAuthUser".into(), fn_session_stub);
+    f.insert("isUserInRole".into(), fn_session_stub);
+    f.insert("isUserLoggedIn".into(), fn_session_stub);
+    f.insert("__cfloginuser".into(), fn_session_stub);
+    f.insert("__cflogout".into(), fn_session_stub);
 
     // ---- HTTP functions ----
     #[cfg(feature = "http")]
@@ -4246,7 +4329,7 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
     let (url, method, headers, body, timeout_secs) = match &arg {
         CfmlValue::String(url) => (url.clone(), "GET".to_string(), HashMap::new(), None, 30u64),
         CfmlValue::Struct(opts) => {
-            let url = opts.iter()
+            let mut url = opts.iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("url"))
                 .map(|(_, v)| v.as_string())
                 .unwrap_or_default();
@@ -4254,15 +4337,72 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
                 .find(|(k, _)| k.eq_ignore_ascii_case("method"))
                 .map(|(_, v)| v.as_string().to_uppercase())
                 .unwrap_or_else(|| "GET".to_string());
-            let hdrs: HashMap<String, String> = opts.iter()
+            let mut hdrs: HashMap<String, String> = opts.iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("headers"))
                 .and_then(|(_,v)| if let CfmlValue::Struct(h) = v {
                     Some(h.iter().map(|(k, v)| (k.clone(), v.as_string())).collect())
                 } else { None })
                 .unwrap_or_default();
+            // Process cfhttpparam params array
+            if let Some((_, CfmlValue::Array(params))) = opts.iter().find(|(k, _)| k.eq_ignore_ascii_case("params")) {
+                for param in params {
+                    if let CfmlValue::Struct(p) = param {
+                        let ptype = p.iter().find(|(k, _)| k.eq_ignore_ascii_case("type"))
+                            .map(|(_, v)| v.as_string().to_lowercase()).unwrap_or_default();
+                        let pname = p.iter().find(|(k, _)| k.eq_ignore_ascii_case("name"))
+                            .map(|(_, v)| v.as_string()).unwrap_or_default();
+                        let pvalue = p.iter().find(|(k, _)| k.eq_ignore_ascii_case("value"))
+                            .map(|(_, v)| v.as_string()).unwrap_or_default();
+                        match ptype.as_str() {
+                            "header" => { hdrs.insert(pname, pvalue); }
+                            "cookie" => { hdrs.entry("Cookie".to_string()).and_modify(|v| { v.push_str(&format!("; {}={}", pname, pvalue)); }).or_insert(format!("{}={}", pname, pvalue)); }
+                            "url" => {
+                                let sep = if url.contains('?') { "&" } else { "?" };
+                                url = format!("{}{}{}={}", url, sep, pname, pvalue);
+                            }
+                            _ => {} // formfield, body, xml, file handled below
+                        }
+                    }
+                }
+            }
             let body = opts.iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("body"))
                 .and_then(|(_, v)| if matches!(v, CfmlValue::Null) { None } else { Some(v.as_string()) });
+            // Build body from formfield/body/xml params if no explicit body
+            let body = if body.is_none() {
+                if let Some((_, CfmlValue::Array(params))) = opts.iter().find(|(k, _)| k.eq_ignore_ascii_case("params")) {
+                    let mut form_parts = Vec::new();
+                    let mut xml_body = None;
+                    for param in params {
+                        if let CfmlValue::Struct(p) = param {
+                            let ptype = p.iter().find(|(k, _)| k.eq_ignore_ascii_case("type"))
+                                .map(|(_, v)| v.as_string().to_lowercase()).unwrap_or_default();
+                            let pname = p.iter().find(|(k, _)| k.eq_ignore_ascii_case("name"))
+                                .map(|(_, v)| v.as_string()).unwrap_or_default();
+                            let pvalue = p.iter().find(|(k, _)| k.eq_ignore_ascii_case("value"))
+                                .map(|(_, v)| v.as_string()).unwrap_or_default();
+                            match ptype.as_str() {
+                                "formfield" => form_parts.push(format!("{}={}", pname, pvalue)),
+                                "body" => xml_body = Some(pvalue),
+                                "xml" => xml_body = Some(pvalue),
+                                _ => {}
+                            }
+                        }
+                    }
+                    if let Some(xml) = xml_body {
+                        Some(xml)
+                    } else if !form_parts.is_empty() {
+                        hdrs.entry("Content-Type".to_string()).or_insert("application/x-www-form-urlencoded".to_string());
+                        Some(form_parts.join("&"))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                body
+            };
             let timeout = opts.iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("timeout"))
                 .map(|(_, v)| match v { CfmlValue::Int(i) => *i as u64, CfmlValue::Double(d) => *d as u64, CfmlValue::String(s) => s.parse().unwrap_or(30), _ => 30 })
@@ -6619,4 +6759,759 @@ fn fn_xml_transform_stub(_args: Vec<CfmlValue>) -> CfmlResult {
 #[cfg(feature = "xml")]
 fn fn_xml_validate_stub(_args: Vec<CfmlValue>) -> CfmlResult {
     Err(CfmlError::runtime("xmlValidate() is not supported (requires schema validation engine)".to_string()))
+}
+
+// ======================================================================
+// NEW BUILT-IN FUNCTION IMPLEMENTATIONS
+// ======================================================================
+
+// ---- String functions ----
+
+fn fn_uc_first(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0);
+    if s.is_empty() {
+        return Ok(CfmlValue::String(s));
+    }
+    let mut chars = s.chars();
+    let first = chars.next().unwrap().to_uppercase().to_string();
+    Ok(CfmlValue::String(first + chars.as_str()))
+}
+
+fn fn_js_string_format(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0);
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    Ok(CfmlValue::String(escaped))
+}
+
+fn fn_re_escape(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0);
+    Ok(CfmlValue::String(regex::escape(&s)))
+}
+
+fn fn_get_token(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0);
+    let index = get_int(&args, 1) as usize;
+    let delims = if args.len() > 2 { get_str(&args, 2) } else { " \t\n\r".to_string() };
+    let tokens: Vec<&str> = s.split(|c: char| delims.contains(c))
+        .filter(|t| !t.is_empty())
+        .collect();
+    if index >= 1 && index <= tokens.len() {
+        Ok(CfmlValue::String(tokens[index - 1].to_string()))
+    } else {
+        Ok(CfmlValue::String(String::new()))
+    }
+}
+
+fn fn_new_line(_args: Vec<CfmlValue>) -> CfmlResult {
+    Ok(CfmlValue::String("\n".to_string()))
+}
+
+// ---- Array functions ----
+
+fn fn_array_index_exists(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.get(0) {
+        Some(CfmlValue::Array(arr)) => {
+            let idx = get_int(&args, 1) as usize;
+            Ok(CfmlValue::Bool(idx >= 1 && idx <= arr.len()))
+        }
+        _ => Err(CfmlError::runtime("arrayIndexExists() requires an array".to_string())),
+    }
+}
+
+fn fn_array_resize(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.get(0) {
+        Some(CfmlValue::Array(arr)) => {
+            let size = get_int(&args, 1) as usize;
+            let mut new_arr = arr.clone();
+            while new_arr.len() < size {
+                new_arr.push(CfmlValue::String(String::new()));
+            }
+            Ok(CfmlValue::Array(new_arr))
+        }
+        _ => Err(CfmlError::runtime("arrayResize() requires an array".to_string())),
+    }
+}
+
+fn fn_array_median(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.get(0) {
+        Some(CfmlValue::Array(arr)) => {
+            if arr.is_empty() {
+                return Err(CfmlError::runtime("Cannot get median of empty array".to_string()));
+            }
+            let mut nums: Vec<f64> = arr.iter().map(|v| match v {
+                CfmlValue::Int(i) => *i as f64,
+                CfmlValue::Double(d) => *d,
+                CfmlValue::String(s) => s.parse().unwrap_or(0.0),
+                _ => 0.0,
+            }).collect();
+            nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mid = nums.len() / 2;
+            let median = if nums.len() % 2 == 0 {
+                (nums[mid - 1] + nums[mid]) / 2.0
+            } else {
+                nums[mid]
+            };
+            Ok(CfmlValue::Double(median))
+        }
+        _ => Err(CfmlError::runtime("arrayMedian() requires an array".to_string())),
+    }
+}
+
+fn fn_array_mid(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.get(0) {
+        Some(CfmlValue::Array(arr)) => {
+            let start = (get_int(&args, 1) as usize).saturating_sub(1);
+            let count = get_int(&args, 2) as usize;
+            let end = std::cmp::min(start + count, arr.len());
+            if start >= arr.len() {
+                return Ok(CfmlValue::Array(Vec::new()));
+            }
+            Ok(CfmlValue::Array(arr[start..end].to_vec()))
+        }
+        _ => Err(CfmlError::runtime("arrayMid() requires an array".to_string())),
+    }
+}
+
+fn fn_array_splice(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.get(0) {
+        Some(CfmlValue::Array(arr)) => {
+            let index = (get_int(&args, 1) as usize).saturating_sub(1);
+            let delete_count = if args.len() > 2 { get_int(&args, 2) as usize } else { arr.len() - index };
+            let mut new_arr = arr.clone();
+            let end = std::cmp::min(index + delete_count, new_arr.len());
+            let removed: Vec<CfmlValue> = if index < new_arr.len() {
+                new_arr.drain(index..end).collect()
+            } else {
+                Vec::new()
+            };
+            // Insert replacement elements if provided
+            if let Some(CfmlValue::Array(replacements)) = args.get(3) {
+                for (i, val) in replacements.iter().enumerate() {
+                    let pos = std::cmp::min(index + i, new_arr.len());
+                    new_arr.insert(pos, val.clone());
+                }
+            }
+            // Return removed elements (mutating the original would require VM support)
+            Ok(CfmlValue::Array(removed))
+        }
+        _ => Err(CfmlError::runtime("arraySplice() requires an array".to_string())),
+    }
+}
+
+fn fn_array_range(args: Vec<CfmlValue>) -> CfmlResult {
+    let from = get_int(&args, 0);
+    let to = get_int(&args, 1);
+    let mut result = Vec::new();
+    if from <= to {
+        for i in from..=to {
+            result.push(CfmlValue::Int(i));
+        }
+    } else {
+        for i in (to..=from).rev() {
+            result.push(CfmlValue::Int(i));
+        }
+    }
+    Ok(CfmlValue::Array(result))
+}
+
+fn fn_array_to_struct(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.get(0) {
+        Some(CfmlValue::Array(arr)) => {
+            let mut map = HashMap::new();
+            for (i, val) in arr.iter().enumerate() {
+                map.insert((i + 1).to_string(), val.clone());
+            }
+            Ok(CfmlValue::Struct(map))
+        }
+        _ => Err(CfmlError::runtime("arrayToStruct() requires an array".to_string())),
+    }
+}
+
+fn fn_array_delete_no_case(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.get(0) {
+        Some(CfmlValue::Array(arr)) => {
+            let target = get_str(&args, 1).to_lowercase();
+            let new_arr: Vec<CfmlValue> = arr.iter()
+                .filter(|v| v.as_string().to_lowercase() != target)
+                .cloned()
+                .collect();
+            let removed = arr.len() != new_arr.len();
+            Ok(CfmlValue::Bool(removed))
+        }
+        _ => Err(CfmlError::runtime("arrayDeleteNoCase() requires an array".to_string())),
+    }
+}
+
+// ---- Struct functions ----
+
+fn fn_struct_to_sorted(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.get(0) {
+        Some(CfmlValue::Struct(s)) => {
+            let mut keys: Vec<String> = s.keys().cloned().collect();
+            let sort_type = get_str(&args, 1).to_lowercase();
+            if sort_type == "textnocase" {
+                keys.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+            } else {
+                keys.sort();
+            }
+            let mut result = HashMap::new();
+            for key in keys {
+                if let Some(val) = s.get(&key) {
+                    result.insert(key, val.clone());
+                }
+            }
+            Ok(CfmlValue::Struct(result))
+        }
+        _ => Err(CfmlError::runtime("structToSorted() requires a struct".to_string())),
+    }
+}
+
+fn fn_struct_is_ordered(_args: Vec<CfmlValue>) -> CfmlResult {
+    // Rust HashMap is not ordered, so always return false
+    Ok(CfmlValue::Bool(false))
+}
+
+fn fn_struct_is_case_sensitive(_args: Vec<CfmlValue>) -> CfmlResult {
+    // CFML structs are case-insensitive by default
+    Ok(CfmlValue::Bool(false))
+}
+
+fn fn_struct_to_query_string(args: Vec<CfmlValue>) -> CfmlResult {
+    fn url_enc(s: &str) -> String {
+        let mut result = String::new();
+        for c in s.chars() {
+            match c {
+                'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '*' => result.push(c),
+                ' ' => result.push_str("%20"),
+                _ => {
+                    for b in c.to_string().as_bytes() {
+                        result.push_str(&format!("%{:02X}", b));
+                    }
+                }
+            }
+        }
+        result
+    }
+    match args.get(0) {
+        Some(CfmlValue::Struct(s)) => {
+            let delim = if args.len() > 1 { get_str(&args, 1) } else { "&".to_string() };
+            let pairs: Vec<String> = s.iter()
+                .map(|(k, v)| format!("{}={}", url_enc(k), url_enc(&v.as_string())))
+                .collect();
+            Ok(CfmlValue::String(pairs.join(&delim)))
+        }
+        _ => Err(CfmlError::runtime("structToQueryString() requires a struct".to_string())),
+    }
+}
+
+// ---- Conversion functions ----
+
+fn fn_create_time_span(args: Vec<CfmlValue>) -> CfmlResult {
+    let days = get_float(&args, 0);
+    let hours = get_float(&args, 1);
+    let minutes = get_float(&args, 2);
+    let seconds = get_float(&args, 3);
+    let total_days = days + hours / 24.0 + minutes / 1440.0 + seconds / 86400.0;
+    Ok(CfmlValue::Double(total_days))
+}
+
+fn fn_yes_no_format(args: Vec<CfmlValue>) -> CfmlResult {
+    let val = args.get(0).unwrap_or(&CfmlValue::Bool(false));
+    let result = match val {
+        CfmlValue::Bool(b) => if *b { "Yes" } else { "No" },
+        CfmlValue::Int(i) => if *i != 0 { "Yes" } else { "No" },
+        CfmlValue::Double(d) => if *d != 0.0 { "Yes" } else { "No" },
+        CfmlValue::String(s) => {
+            let lower = s.to_lowercase();
+            if lower == "yes" || lower == "true" || s.parse::<f64>().map(|n| n != 0.0).unwrap_or(false) {
+                "Yes"
+            } else {
+                "No"
+            }
+        }
+        _ => "No",
+    };
+    Ok(CfmlValue::String(result.to_string()))
+}
+
+fn fn_true_false_format(args: Vec<CfmlValue>) -> CfmlResult {
+    let val = args.get(0).unwrap_or(&CfmlValue::Bool(false));
+    let result = match val {
+        CfmlValue::Bool(b) => *b,
+        CfmlValue::Int(i) => *i != 0,
+        CfmlValue::Double(d) => *d != 0.0,
+        CfmlValue::String(s) => {
+            let lower = s.to_lowercase();
+            lower == "yes" || lower == "true" || s.parse::<f64>().map(|n| n != 0.0).unwrap_or(false)
+        }
+        _ => false,
+    };
+    Ok(CfmlValue::String(if result { "true" } else { "false" }.to_string()))
+}
+
+fn fn_null_value(_args: Vec<CfmlValue>) -> CfmlResult {
+    Ok(CfmlValue::Null)
+}
+
+fn fn_increment_value(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.get(0) {
+        Some(CfmlValue::Int(i)) => Ok(CfmlValue::Int(i + 1)),
+        Some(CfmlValue::Double(d)) => Ok(CfmlValue::Double(d + 1.0)),
+        Some(v) => {
+            let n = v.as_string().parse::<f64>().unwrap_or(0.0);
+            if n.fract() == 0.0 { Ok(CfmlValue::Int(n as i64 + 1)) }
+            else { Ok(CfmlValue::Double(n + 1.0)) }
+        }
+        _ => Ok(CfmlValue::Int(1)),
+    }
+}
+
+fn fn_decrement_value(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.get(0) {
+        Some(CfmlValue::Int(i)) => Ok(CfmlValue::Int(i - 1)),
+        Some(CfmlValue::Double(d)) => Ok(CfmlValue::Double(d - 1.0)),
+        Some(v) => {
+            let n = v.as_string().parse::<f64>().unwrap_or(0.0);
+            if n.fract() == 0.0 { Ok(CfmlValue::Int(n as i64 - 1)) }
+            else { Ok(CfmlValue::Double(n - 1.0)) }
+        }
+        _ => Ok(CfmlValue::Int(-1)),
+    }
+}
+
+fn fn_de(args: Vec<CfmlValue>) -> CfmlResult {
+    // DE() - delay evaluation, returns the string as-is
+    Ok(CfmlValue::String(get_str(&args, 0)))
+}
+
+fn fn_dollar_format(args: Vec<CfmlValue>) -> CfmlResult {
+    let num = get_float(&args, 0);
+    let abs = num.abs();
+    let formatted = format!("{:.2}", abs);
+    // Add comma separators to integer part
+    let parts: Vec<&str> = formatted.split('.').collect();
+    let int_part = parts[0];
+    let dec_part = parts.get(1).unwrap_or(&"00");
+    let int_with_commas = {
+        let chars: Vec<char> = int_part.chars().rev().collect();
+        let mut result = String::new();
+        for (i, c) in chars.iter().enumerate() {
+            if i > 0 && i % 3 == 0 {
+                result.push(',');
+            }
+            result.push(*c);
+        }
+        result.chars().rev().collect::<String>()
+    };
+    if num < 0.0 {
+        Ok(CfmlValue::String(format!("(${}. {})", int_with_commas, dec_part)))
+    } else {
+        Ok(CfmlValue::String(format!("${}.{}", int_with_commas, dec_part)))
+    }
+}
+
+// ---- Query functions ----
+
+fn fn_query_column_exists(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.get(0) {
+        Some(CfmlValue::Query(q)) => {
+            let col = get_str(&args, 1).to_uppercase();
+            let exists = q.columns.iter().any(|c| c.to_uppercase() == col);
+            Ok(CfmlValue::Bool(exists))
+        }
+        _ => Err(CfmlError::runtime("queryColumnExists() requires a query".to_string())),
+    }
+}
+
+fn fn_query_slice(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.get(0) {
+        Some(CfmlValue::Query(q)) => {
+            let offset = (get_int(&args, 1) as usize).saturating_sub(1);
+            let length = if args.len() > 2 {
+                get_int(&args, 2) as usize
+            } else {
+                q.rows.len().saturating_sub(offset)
+            };
+            let end = std::cmp::min(offset + length, q.rows.len());
+            let sliced_rows = if offset < q.rows.len() {
+                q.rows[offset..end].to_vec()
+            } else {
+                Vec::new()
+            };
+            Ok(CfmlValue::Query(CfmlQuery {
+                columns: q.columns.clone(),
+                rows: sliced_rows,
+                sql: None,
+            }))
+        }
+        _ => Err(CfmlError::runtime("querySlice() requires a query".to_string())),
+    }
+}
+
+fn fn_query_get_result(_args: Vec<CfmlValue>) -> CfmlResult {
+    // Returns metadata about last query execution
+    let mut result = HashMap::new();
+    result.insert("sql".to_string(), CfmlValue::String(String::new()));
+    result.insert("cached".to_string(), CfmlValue::Bool(false));
+    result.insert("executionTime".to_string(), CfmlValue::Int(0));
+    result.insert("recordCount".to_string(), CfmlValue::Int(0));
+    Ok(CfmlValue::Struct(result))
+}
+
+fn fn_query_column_data(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.get(0) {
+        Some(CfmlValue::Query(q)) => {
+            let col = get_str(&args, 1);
+            let col_upper = col.to_uppercase();
+            let actual_col = q.columns.iter()
+                .find(|c| c.to_uppercase() == col_upper)
+                .cloned()
+                .unwrap_or(col);
+            let values: Vec<CfmlValue> = q.rows.iter()
+                .map(|row| {
+                    row.iter()
+                        .find(|(k, _)| k.to_uppercase() == actual_col.to_uppercase())
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or(CfmlValue::String(String::new()))
+                })
+                .collect();
+            Ok(CfmlValue::Array(values))
+        }
+        _ => Err(CfmlError::runtime("queryColumnData() requires a query".to_string())),
+    }
+}
+
+fn fn_query_current_row(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.get(0) {
+        Some(CfmlValue::Query(_)) => Ok(CfmlValue::Int(0)),
+        _ => Ok(CfmlValue::Int(0)),
+    }
+}
+
+// ---- List functions ----
+
+fn fn_list_avg(args: Vec<CfmlValue>) -> CfmlResult {
+    let list = get_str(&args, 0);
+    let delim = get_delimiter(&args, 1);
+    let items: Vec<&str> = cfml_list_split(&list, &delim);
+    if items.is_empty() {
+        return Ok(CfmlValue::Int(0));
+    }
+    let sum: f64 = items.iter()
+        .map(|s| s.trim().parse::<f64>().unwrap_or(0.0))
+        .sum();
+    Ok(CfmlValue::Double(sum / items.len() as f64))
+}
+
+fn fn_list_item_trim(args: Vec<CfmlValue>) -> CfmlResult {
+    let list = get_str(&args, 0);
+    let delim = get_delimiter(&args, 1);
+    let items: Vec<&str> = cfml_list_split(&list, &delim);
+    let trimmed: Vec<String> = items.iter().map(|s| s.trim().to_string()).collect();
+    Ok(CfmlValue::String(trimmed.join(&delim)))
+}
+
+fn fn_list_index_exists(args: Vec<CfmlValue>) -> CfmlResult {
+    let list = get_str(&args, 0);
+    let idx = get_int(&args, 1) as usize;
+    let delim = get_delimiter(&args, 2);
+    let items: Vec<&str> = cfml_list_split(&list, &delim);
+    Ok(CfmlValue::Bool(idx >= 1 && idx <= items.len()))
+}
+
+// ---- System functions ----
+
+fn fn_get_file_from_path(args: Vec<CfmlValue>) -> CfmlResult {
+    let path = get_str(&args, 0);
+    let file_name = std::path::Path::new(&path)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+    Ok(CfmlValue::String(file_name))
+}
+
+fn fn_get_canonical_path(args: Vec<CfmlValue>) -> CfmlResult {
+    let path = get_str(&args, 0);
+    match std::fs::canonicalize(&path) {
+        Ok(p) => Ok(CfmlValue::String(p.to_string_lossy().to_string())),
+        Err(_) => Ok(CfmlValue::String(path)),
+    }
+}
+
+fn fn_system_output(args: Vec<CfmlValue>) -> CfmlResult {
+    let msg = get_str(&args, 0);
+    let add_newline = args.get(1).map(|v| match v {
+        CfmlValue::Bool(b) => *b,
+        _ => true,
+    }).unwrap_or(true);
+    if add_newline {
+        eprintln!("{}", msg);
+    } else {
+        eprint!("{}", msg);
+    }
+    Ok(CfmlValue::Null)
+}
+
+fn fn_write_log(args: Vec<CfmlValue>) -> CfmlResult {
+    let text = get_str(&args, 0);
+    eprintln!("[LOG] {}", text);
+    Ok(CfmlValue::Null)
+}
+
+fn fn_set_locale(args: Vec<CfmlValue>) -> CfmlResult {
+    let _locale = get_str(&args, 0);
+    // Stub - return the locale that was set
+    Ok(CfmlValue::String(get_str(&args, 0)))
+}
+
+fn fn_get_locale(_args: Vec<CfmlValue>) -> CfmlResult {
+    Ok(CfmlValue::String("en_US".to_string()))
+}
+
+fn fn_set_time_zone(args: Vec<CfmlValue>) -> CfmlResult {
+    let _tz = get_str(&args, 0);
+    Ok(CfmlValue::Null)
+}
+
+fn fn_application_stop(_args: Vec<CfmlValue>) -> CfmlResult {
+    Ok(CfmlValue::Null)
+}
+
+fn fn_get_application_metadata(_args: Vec<CfmlValue>) -> CfmlResult {
+    let mut meta = HashMap::new();
+    meta.insert("name".to_string(), CfmlValue::String(String::new()));
+    Ok(CfmlValue::Struct(meta))
+}
+
+fn fn_trace(args: Vec<CfmlValue>) -> CfmlResult {
+    let text = get_str(&args, 0);
+    eprintln!("[TRACE] {}", text);
+    Ok(CfmlValue::Null)
+}
+
+// ---- File functions ----
+
+fn fn_file_read_binary(args: Vec<CfmlValue>) -> CfmlResult {
+    let path = get_str(&args, 0);
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(CfmlValue::Binary(bytes)),
+        Err(e) => Err(CfmlError::runtime(format!("fileReadBinary(): {}", e))),
+    }
+}
+
+fn fn_file_get_mime_type(args: Vec<CfmlValue>) -> CfmlResult {
+    let path = get_str(&args, 0);
+    let ext = std::path::Path::new(&path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let mime = match ext.as_str() {
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" => "application/javascript",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "txt" => "text/plain",
+        "csv" => "text/csv",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "gz" | "gzip" => "application/gzip",
+        "tar" => "application/x-tar",
+        "mp3" => "audio/mpeg",
+        "mp4" => "video/mp4",
+        "wav" => "audio/wav",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    };
+    Ok(CfmlValue::String(mime.to_string()))
+}
+
+fn fn_directory_rename(args: Vec<CfmlValue>) -> CfmlResult {
+    let old_path = get_str(&args, 0);
+    let new_path = get_str(&args, 1);
+    match std::fs::rename(&old_path, &new_path) {
+        Ok(_) => Ok(CfmlValue::Null),
+        Err(e) => Err(CfmlError::runtime(format!("directoryRename(): {}", e))),
+    }
+}
+
+fn fn_directory_copy(args: Vec<CfmlValue>) -> CfmlResult {
+    let src = get_str(&args, 0);
+    let dst = get_str(&args, 1);
+    fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let ty = entry.file_type()?;
+            let dest_path = dst.join(entry.file_name());
+            if ty.is_dir() {
+                copy_dir_recursive(&entry.path(), &dest_path)?;
+            } else {
+                std::fs::copy(entry.path(), &dest_path)?;
+            }
+        }
+        Ok(())
+    }
+    match copy_dir_recursive(std::path::Path::new(&src), std::path::Path::new(&dst)) {
+        Ok(_) => Ok(CfmlValue::Null),
+        Err(e) => Err(CfmlError::runtime(format!("directoryCopy(): {}", e))),
+    }
+}
+
+fn fn_file_open(args: Vec<CfmlValue>) -> CfmlResult {
+    // Returns the file path as a handle identifier (actual file handle management would need VM support)
+    let path = get_str(&args, 0);
+    let _mode = if args.len() > 1 { get_str(&args, 1) } else { "read".to_string() };
+    // Return a struct representing the file handle
+    let mut handle = HashMap::new();
+    handle.insert("path".to_string(), CfmlValue::String(path));
+    handle.insert("isOpen".to_string(), CfmlValue::Bool(true));
+    handle.insert("line".to_string(), CfmlValue::Int(0));
+    Ok(CfmlValue::Struct(handle))
+}
+
+fn fn_file_close(_args: Vec<CfmlValue>) -> CfmlResult {
+    // Stub - actual file handle management needs VM support
+    Ok(CfmlValue::Null)
+}
+
+fn fn_file_read_line(args: Vec<CfmlValue>) -> CfmlResult {
+    // Simplified: reads the Nth line from the file indicated by the handle
+    match args.get(0) {
+        Some(CfmlValue::Struct(handle)) => {
+            let path = handle.get("path").map(|v| v.as_string()).unwrap_or_default();
+            let line_num = handle.get("line").map(|v| match v {
+                CfmlValue::Int(i) => *i as usize,
+                _ => 0,
+            }).unwrap_or(0);
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    let lines: Vec<&str> = content.lines().collect();
+                    if line_num < lines.len() {
+                        Ok(CfmlValue::String(lines[line_num].to_string()))
+                    } else {
+                        Ok(CfmlValue::String(String::new()))
+                    }
+                }
+                Err(e) => Err(CfmlError::runtime(format!("fileReadLine(): {}", e))),
+            }
+        }
+        _ => Err(CfmlError::runtime("fileReadLine() requires a file handle".to_string())),
+    }
+}
+
+fn fn_file_write_line(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.get(0) {
+        Some(CfmlValue::Struct(handle)) => {
+            let path = handle.get("path").map(|v| v.as_string()).unwrap_or_default();
+            let data = get_str(&args, 1);
+            use std::io::Write;
+            match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                Ok(mut f) => {
+                    writeln!(f, "{}", data).map_err(|e| CfmlError::runtime(format!("fileWriteLine(): {}", e)))?;
+                    Ok(CfmlValue::Null)
+                }
+                Err(e) => Err(CfmlError::runtime(format!("fileWriteLine(): {}", e))),
+            }
+        }
+        _ => Err(CfmlError::runtime("fileWriteLine() requires a file handle".to_string())),
+    }
+}
+
+fn fn_file_is_eof(args: Vec<CfmlValue>) -> CfmlResult {
+    match args.get(0) {
+        Some(CfmlValue::Struct(handle)) => {
+            let path = handle.get("path").map(|v| v.as_string()).unwrap_or_default();
+            let line_num = handle.get("line").map(|v| match v {
+                CfmlValue::Int(i) => *i as usize,
+                _ => 0,
+            }).unwrap_or(0);
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    let line_count = content.lines().count();
+                    Ok(CfmlValue::Bool(line_num >= line_count))
+                }
+                Err(_) => Ok(CfmlValue::Bool(true)),
+            }
+        }
+        _ => Ok(CfmlValue::Bool(true)),
+    }
+}
+
+// ---- VM Stub functions for tag infrastructure ----
+
+fn fn_cflog_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    // VM intercepts this - log message to stderr as fallback
+    Ok(CfmlValue::Null)
+}
+
+fn fn_cfsetting_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    // VM intercepts this
+    Ok(CfmlValue::Null)
+}
+
+fn fn_cflock_start_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    // VM intercepts this
+    Ok(CfmlValue::Null)
+}
+
+fn fn_cflock_end_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    // VM intercepts this
+    Ok(CfmlValue::Null)
+}
+
+fn fn_cfcookie_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    // VM intercepts this
+    Ok(CfmlValue::Null)
+}
+
+// ---- File Upload functions ----
+
+/// fileUpload(destination, formField, accept, nameConflict)
+fn fn_file_upload(args: Vec<CfmlValue>) -> CfmlResult {
+    let destination = get_str(&args, 0);
+    let _form_field = get_str(&args, 1);
+    let _accept = if args.len() > 2 { get_str(&args, 2) } else { String::new() };
+    let name_conflict = if args.len() > 3 { get_str(&args, 3).to_lowercase() } else { "error".to_string() };
+
+    // This is a stub — real implementation requires VM access to the form scope
+    // to find the uploaded file's temp path. The VM intercepts this.
+    let mut result = HashMap::new();
+    result.insert("serverDirectory".to_string(), CfmlValue::String(destination));
+    result.insert("nameConflict".to_string(), CfmlValue::String(name_conflict));
+    result.insert("fileWasSaved".to_string(), CfmlValue::Bool(false));
+    Ok(CfmlValue::Struct(result))
+}
+
+/// fileUploadAll(destination, accept, nameConflict)
+fn fn_file_upload_all(args: Vec<CfmlValue>) -> CfmlResult {
+    let destination = get_str(&args, 0);
+    let _accept = if args.len() > 1 { get_str(&args, 1) } else { String::new() };
+    let _name_conflict = if args.len() > 2 { get_str(&args, 2).to_lowercase() } else { "error".to_string() };
+
+    let mut result = HashMap::new();
+    result.insert("serverDirectory".to_string(), CfmlValue::String(destination));
+    result.insert("fileWasSaved".to_string(), CfmlValue::Bool(false));
+    Ok(CfmlValue::Struct(result))
+}
+
+/// __cffile_upload(destination, formField, accept, nameConflict) - generated by <cffile action="upload">
+fn fn_cffile_upload(args: Vec<CfmlValue>) -> CfmlResult {
+    fn_file_upload(args)
+}
+
+/// Stub for session/auth functions — VM intercepts these
+fn fn_session_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Ok(CfmlValue::Null)
 }

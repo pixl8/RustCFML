@@ -159,9 +159,14 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
             "cfinterface" => return ("}\n".to_string(), close_end - start),
             "cftry" => return (String::new(), close_end - start), // try block closed by catch
             "cfcatch" => return ("}\n".to_string(), close_end - start),
+            "cffinally" => return ("}\n".to_string(), close_end - start),
             "cfscript" => return (String::new(), close_end - start),
             "cfsavecontent" => return (String::new(), close_end - start),
             "cftransaction" => return (String::new(), close_end - start),
+            "cfwhile" => return ("}\n".to_string(), close_end - start),
+            "cfsilent" => return (String::new(), close_end - start),
+            "cflock" => return (String::new(), close_end - start),
+            "cfswitch" => return (String::new(), close_end - start),
             _ => return (String::new(), close_end - start),
         }
     }
@@ -351,18 +356,38 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
             let result_var = attrs.get("result").cloned().unwrap_or("cfhttp".to_string());
             let timeout = attrs.get("timeout").cloned();
             let charset = attrs.get("charset").cloned();
+            let username = attrs.get("username").cloned();
+            let password = attrs.get("password").cloned();
+            let useragent = attrs.get("useragent").cloned();
+            let proxyserver = attrs.get("proxyserver").cloned();
 
             let mut opts = Vec::new();
-            opts.push(format!("url: \"{}\"", url));
+            let url_stripped = strip_hashes(&url);
+            if url != url_stripped {
+                opts.push(format!("url: {}", url_stripped));
+            } else {
+                opts.push(format!("url: \"{}\"", url));
+            }
             opts.push(format!("method: \"{}\"", method));
-            if let Some(t) = timeout {
-                opts.push(format!("timeout: {}", t));
-            }
-            if let Some(c) = charset {
-                opts.push(format!("charset: \"{}\"", c));
-            }
+            if let Some(t) = timeout { opts.push(format!("timeout: {}", t)); }
+            if let Some(c) = charset { opts.push(format!("charset: \"{}\"", c)); }
+            if let Some(u) = username { opts.push(format!("username: \"{}\"", u)); }
+            if let Some(p) = password { opts.push(format!("password: \"{}\"", p)); }
+            if let Some(u) = useragent { opts.push(format!("useragent: \"{}\"", u)); }
+            if let Some(p) = proxyserver { opts.push(format!("proxyserver: \"{}\"", p)); }
 
-            (format!("{} = cfhttp({{ {} }});\n", result_var, opts.join(", ")), tag_end - start)
+            // Check for body with <cfhttpparam> child tags
+            if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cfhttp") {
+                let body: String = chars[tag_end..end_tag_pos].iter().collect();
+                let close_end = find_tag_end(chars, end_tag_pos, len);
+                let params = parse_cfhttpparam_tags(&body);
+                if !params.is_empty() {
+                    opts.push(format!("params: [{}]", params.join(", ")));
+                }
+                (format!("{} = cfhttp({{ {} }});\n", result_var, opts.join(", ")), close_end - start)
+            } else {
+                (format!("{} = cfhttp({{ {} }});\n", result_var, opts.join(", ")), tag_end - start)
+            }
         }
         "cfquery" => {
             let name = attrs.get("name").cloned().unwrap_or("queryResult".to_string());
@@ -579,6 +604,135 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
                         (format!("__cftransaction_start(\"begin\");\n"), tag_end - start)
                     }
                 }
+            }
+        }
+        "cfswitch" => {
+            let expression = attrs.get("expression").cloned().unwrap_or_default();
+            let expression = strip_hashes(&expression);
+            if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cfswitch") {
+                let body: String = chars[tag_end..end_tag_pos].iter().collect();
+                let close_end = find_tag_end(chars, end_tag_pos, len);
+                let switch_body = parse_cfswitch_body(&body);
+                (format!("switch ({}) {{\n{}}}\n", expression, switch_body), close_end - start)
+            } else {
+                (format!("switch ({}) {{\n", expression), tag_end - start)
+            }
+        }
+        "cfbreak" => {
+            ("break;\n".to_string(), tag_end - start)
+        }
+        "cfcontinue" => {
+            ("continue;\n".to_string(), tag_end - start)
+        }
+        "cfwhile" => {
+            let condition = attrs.get("condition").cloned().unwrap_or("true".to_string());
+            let condition = strip_hashes(&condition);
+            (format!("while ({}) {{\n", condition), tag_end - start)
+        }
+        "cffinally" => {
+            ("finally {\n".to_string(), tag_end - start)
+        }
+        "cfrethrow" => {
+            ("rethrow;\n".to_string(), tag_end - start)
+        }
+        "cfloginuser" => {
+            let name = attrs.get("name").cloned().unwrap_or_default();
+            let password = attrs.get("password").cloned().unwrap_or_default();
+            let roles = attrs.get("roles").cloned().unwrap_or_default();
+            (format!("__cfloginuser(\"{}\", \"{}\", \"{}\");\n", name, password, roles), tag_end - start)
+        }
+        "cflogout" => {
+            ("__cflogout();\n".to_string(), tag_end - start)
+        }
+        "cflog" => {
+            let mut parts = Vec::new();
+            for (k, v) in &attrs {
+                let val = strip_hashes(v);
+                if val != *v {
+                    parts.push(format!("{}: {}", k, val));
+                } else {
+                    parts.push(format!("{}: \"{}\"", k, v.replace('"', "\\\"")));
+                }
+            }
+            (format!("__cflog({{ {} }});\n", parts.join(", ")), tag_end - start)
+        }
+        "cfsetting" => {
+            let mut parts = Vec::new();
+            for (k, v) in &attrs {
+                let lower = v.to_lowercase();
+                if lower == "true" || lower == "yes" {
+                    parts.push(format!("{}: true", k));
+                } else if lower == "false" || lower == "no" {
+                    parts.push(format!("{}: false", k));
+                } else if v.parse::<f64>().is_ok() {
+                    parts.push(format!("{}: {}", k, v));
+                } else {
+                    parts.push(format!("{}: \"{}\"", k, v.replace('"', "\\\"")));
+                }
+            }
+            (format!("__cfsetting({{ {} }});\n", parts.join(", ")), tag_end - start)
+        }
+        "cfsilent" => {
+            if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cfsilent") {
+                let body: String = chars[tag_end..end_tag_pos].iter().collect();
+                let close_end = find_tag_end(chars, end_tag_pos, len);
+                let body_script = tags_to_script(&body);
+                (format!("__cfsavecontent_start();\n{}__cfsavecontent_end();\n", body_script), close_end - start)
+            } else {
+                (String::new(), tag_end - start)
+            }
+        }
+        "cfcookie" => {
+            let mut parts = Vec::new();
+            for (k, v) in &attrs {
+                let lower = v.to_lowercase();
+                if k == "secure" || k == "httponly" {
+                    if lower == "true" || lower == "yes" {
+                        parts.push(format!("{}: true", k));
+                    } else {
+                        parts.push(format!("{}: false", k));
+                    }
+                } else if v.parse::<f64>().is_ok() {
+                    parts.push(format!("{}: {}", k, v));
+                } else {
+                    let val = strip_hashes(v);
+                    if val != *v {
+                        parts.push(format!("{}: {}", k, val));
+                    } else {
+                        parts.push(format!("{}: \"{}\"", k, v.replace('"', "\\\"")));
+                    }
+                }
+            }
+            (format!("__cfcookie({{ {} }});\n", parts.join(", ")), tag_end - start)
+        }
+        "cffile" => {
+            parse_cffile_tag(&attrs, tag_end - start)
+        }
+        "cflock" => {
+            if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cflock") {
+                let body: String = chars[tag_end..end_tag_pos].iter().collect();
+                let close_end = find_tag_end(chars, end_tag_pos, len);
+                let body_script = tags_to_script(&body);
+                let mut lock_parts = Vec::new();
+                for (k, v) in &attrs {
+                    let lower = v.to_lowercase();
+                    if v.parse::<f64>().is_ok() {
+                        lock_parts.push(format!("{}: {}", k, v));
+                    } else if lower == "true" || lower == "yes" {
+                        lock_parts.push(format!("{}: true", k));
+                    } else if lower == "false" || lower == "no" {
+                        lock_parts.push(format!("{}: false", k));
+                    } else {
+                        lock_parts.push(format!("{}: \"{}\"", k, v.replace('"', "\\\"")));
+                    }
+                }
+                let lock_args = format!("{{ {} }}", lock_parts.join(", "));
+                (format!(
+                    "__cflock_start({});\ntry {{\n{}\n__cflock_end({});\n}} catch(any __lock_e) {{\n__cflock_end({});\nthrow __lock_e;\n}}\n",
+                    lock_args, body_script, lock_args, lock_args
+                ), close_end - start)
+            } else {
+                (String::new(), tag_end - start)
             }
         }
         "cfinvoke" => {
@@ -969,6 +1123,169 @@ fn parse_cfloop_tag(
     }
 }
 
+/// Parse the body of a <cfswitch> tag, scanning for <cfcase> and <cfdefaultcase>
+fn parse_cfswitch_body(body: &str) -> String {
+    let mut result = String::new();
+    let chars: Vec<char> = body.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        // Skip whitespace
+        while i < len && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= len { break; }
+
+        // Look for <cfcase or <cfdefaultcase
+        if chars[i] == '<' {
+            let ahead: String = chars[i..std::cmp::min(i + 16, len)].iter().collect();
+            let ahead_lower = ahead.to_lowercase();
+
+            if ahead_lower.starts_with("<cfdefaultcase") {
+                // Find end of opening tag
+                let tag_content_start = i + 1;
+                let mut j = tag_content_start;
+                while j < len && chars[j].is_alphanumeric() { j += 1; }
+                let (_attrs, tag_end) = parse_tag_attributes(&chars, j, len);
+                // Find closing </cfdefaultcase>
+                if let Some(close_pos) = find_closing_tag(&chars, tag_end, len, "cfdefaultcase") {
+                    let case_body: String = chars[tag_end..close_pos].iter().collect();
+                    let case_script = tags_to_script(&case_body);
+                    result.push_str(&format!("default: \n{}", case_script));
+                    let close_end = find_tag_end(&chars, close_pos, len);
+                    i = close_end;
+                } else {
+                    i += 1;
+                }
+            } else if ahead_lower.starts_with("<cfcase") {
+                // Parse attributes for value
+                let tag_content_start = i + 1;
+                let mut j = tag_content_start;
+                while j < len && chars[j].is_alphanumeric() { j += 1; }
+                let (case_attrs, tag_end) = parse_tag_attributes(&chars, j, len);
+                let value = case_attrs.get("value").cloned().unwrap_or_default();
+                // Find closing </cfcase>
+                if let Some(close_pos) = find_closing_tag(&chars, tag_end, len, "cfcase") {
+                    let case_body: String = chars[tag_end..close_pos].iter().collect();
+                    let case_script = tags_to_script(&case_body);
+                    // Value can be comma-separated for multiple case values
+                    let values: Vec<&str> = value.split(',').map(|v| v.trim()).filter(|v| !v.is_empty()).collect();
+                    let quoted_values: Vec<String> = values.iter().map(|v| {
+                        let v = strip_hashes(v);
+                        if v.parse::<f64>().is_ok() {
+                            v
+                        } else {
+                            format!("\"{}\"", v.replace('"', "\\\""))
+                        }
+                    }).collect();
+                    result.push_str(&format!("case {}: \n{}break;\n", quoted_values.join(", "), case_script));
+                    let close_end = find_tag_end(&chars, close_pos, len);
+                    i = close_end;
+                } else {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    result
+}
+
+/// Parse <cffile> tag and convert to appropriate function calls
+fn parse_cffile_tag(
+    attrs: &std::collections::HashMap<String, String>,
+    consumed: usize,
+) -> (String, usize) {
+    let action = attrs.get("action").cloned().unwrap_or("read".to_string()).to_lowercase();
+
+    match action.as_str() {
+        "read" => {
+            let file = attrs.get("file").cloned().unwrap_or_default();
+            let file = strip_hashes(&file);
+            let variable = attrs.get("variable").cloned().unwrap_or("cffile".to_string());
+            let file_expr = if file.contains('.') || file.contains('(') {
+                file
+            } else {
+                format!("\"{}\"", file.replace('"', "\\\""))
+            };
+            (format!("{} = fileRead({});\n", variable, file_expr), consumed)
+        }
+        "readbinary" => {
+            let file = attrs.get("file").cloned().unwrap_or_default();
+            let file = strip_hashes(&file);
+            let variable = attrs.get("variable").cloned().unwrap_or("cffile".to_string());
+            let file_expr = if file.contains('.') || file.contains('(') {
+                file
+            } else {
+                format!("\"{}\"", file.replace('"', "\\\""))
+            };
+            (format!("{} = fileReadBinary({});\n", variable, file_expr), consumed)
+        }
+        "write" => {
+            let file = attrs.get("file").cloned().unwrap_or_default();
+            let file = strip_hashes(&file);
+            let output = attrs.get("output").cloned().unwrap_or_default();
+            let output = strip_hashes(&output);
+            let file_expr = if file.contains('.') || file.contains('(') { file } else { format!("\"{}\"", file.replace('"', "\\\"")) };
+            let output_expr = if output.contains('.') || output.contains('(') || output.contains('"') { output } else { format!("\"{}\"", output.replace('"', "\\\"")) };
+            (format!("fileWrite({}, {});\n", file_expr, output_expr), consumed)
+        }
+        "append" => {
+            let file = attrs.get("file").cloned().unwrap_or_default();
+            let file = strip_hashes(&file);
+            let output = attrs.get("output").cloned().unwrap_or_default();
+            let output = strip_hashes(&output);
+            let file_expr = if file.contains('.') || file.contains('(') { file } else { format!("\"{}\"", file.replace('"', "\\\"")) };
+            let output_expr = if output.contains('.') || output.contains('(') || output.contains('"') { output } else { format!("\"{}\"", output.replace('"', "\\\"")) };
+            (format!("fileAppend({}, {});\n", file_expr, output_expr), consumed)
+        }
+        "copy" => {
+            let source = attrs.get("source").cloned().unwrap_or_default();
+            let source = strip_hashes(&source);
+            let dest = attrs.get("destination").cloned().unwrap_or_default();
+            let dest = strip_hashes(&dest);
+            let src_expr = if source.contains('.') || source.contains('(') { source } else { format!("\"{}\"", source.replace('"', "\\\"")) };
+            let dst_expr = if dest.contains('.') || dest.contains('(') { dest } else { format!("\"{}\"", dest.replace('"', "\\\"")) };
+            (format!("fileCopy({}, {});\n", src_expr, dst_expr), consumed)
+        }
+        "move" | "rename" => {
+            let source = attrs.get("source").cloned().unwrap_or_default();
+            let source = strip_hashes(&source);
+            let dest = attrs.get("destination").cloned().unwrap_or_default();
+            let dest = strip_hashes(&dest);
+            let src_expr = if source.contains('.') || source.contains('(') { source } else { format!("\"{}\"", source.replace('"', "\\\"")) };
+            let dst_expr = if dest.contains('.') || dest.contains('(') { dest } else { format!("\"{}\"", dest.replace('"', "\\\"")) };
+            (format!("fileMove({}, {});\n", src_expr, dst_expr), consumed)
+        }
+        "delete" => {
+            let file = attrs.get("file").cloned().unwrap_or_default();
+            let file = strip_hashes(&file);
+            let file_expr = if file.contains('.') || file.contains('(') { file } else { format!("\"{}\"", file.replace('"', "\\\"")) };
+            (format!("fileDelete({});\n", file_expr), consumed)
+        }
+        "upload" => {
+            let mut parts = Vec::new();
+            for (k, v) in attrs {
+                if k == "action" { continue; }
+                let val = strip_hashes(v);
+                if val != *v {
+                    parts.push(format!("{}: {}", k, val));
+                } else {
+                    parts.push(format!("{}: \"{}\"", k, v.replace('"', "\\\"")));
+                }
+            }
+            (format!("__cffile_upload({{ {} }});\n", parts.join(", ")), consumed)
+        }
+        _ => {
+            (String::new(), consumed)
+        }
+    }
+}
+
 /// Extract datasource from the first <cfquery> tag in a body string
 fn extract_datasource_from_body(body: &str) -> Option<String> {
     let lower = body.to_lowercase();
@@ -1125,6 +1442,75 @@ fn process_sql_hashes(sql: &str) -> String {
     } else {
         parts.join(" & ")
     }
+}
+
+/// Parse <cfhttpparam> tags from the body of a <cfhttp> tag.
+/// Returns a vector of struct literal strings like: { type: "header", name: "X-Custom", value: "foo" }
+fn parse_cfhttpparam_tags(body: &str) -> Vec<String> {
+    let mut params = Vec::new();
+    let chars: Vec<char> = body.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        if i + 13 < len && chars[i] == '<' {
+            let ahead: String = chars[i..std::cmp::min(i + 13, len)].iter().collect();
+            if ahead.to_lowercase().starts_with("<cfhttpparam") {
+                let next_after = chars.get(i + 12);
+                if next_after == Some(&' ') || next_after == Some(&'>') || next_after == Some(&'/') || next_after == Some(&'\t') || next_after == Some(&'\n') {
+                    let name_end = i + 12;
+                    let (tag_attrs, _) = parse_tag_attributes(&chars, name_end, len);
+
+                    let mut parts = Vec::new();
+                    if let Some(t) = tag_attrs.get("type") {
+                        parts.push(format!("type: \"{}\"", t.to_lowercase()));
+                    }
+                    if let Some(n) = tag_attrs.get("name") {
+                        let stripped = strip_hashes(n);
+                        if stripped != *n {
+                            parts.push(format!("name: {}", stripped));
+                        } else {
+                            parts.push(format!("name: \"{}\"", n));
+                        }
+                    }
+                    if let Some(v) = tag_attrs.get("value") {
+                        let stripped = strip_hashes(v);
+                        if stripped != *v {
+                            parts.push(format!("value: {}", stripped));
+                        } else {
+                            parts.push(format!("value: \"{}\"", v));
+                        }
+                    }
+                    if let Some(f) = tag_attrs.get("file") {
+                        let stripped = strip_hashes(f);
+                        if stripped != *f {
+                            parts.push(format!("file: {}", stripped));
+                        } else {
+                            parts.push(format!("file: \"{}\"", f));
+                        }
+                    }
+                    if let Some(e) = tag_attrs.get("encoded") {
+                        parts.push(format!("encoded: \"{}\"", e));
+                    }
+                    if let Some(m) = tag_attrs.get("mimetype") {
+                        parts.push(format!("mimeType: \"{}\"", m));
+                    }
+
+                    params.push(format!("{{ {} }}", parts.join(", ")));
+
+                    // Skip to end of tag
+                    while i < len && chars[i] != '>' {
+                        i += 1;
+                    }
+                    if i < len { i += 1; }
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    params
 }
 
 #[cfg(test)]
