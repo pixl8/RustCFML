@@ -25,8 +25,8 @@ run `rustup update stable`.
 Clone the repository and build:
 
 ```plaintext
-git clone https://github.com/rustcfml/rustcfml
-cd rustcfml/RustCFML
+git clone https://github.com/pixl8/RustCFML.git
+cd RustCFML
 cargo build --release
 ```
 
@@ -67,7 +67,7 @@ cfml&gt; exit
 
 ### Web Server Mode
 
-Serve `.cfm` files over HTTP with built-in CGI, URL, Form, Request, and Application scopes:
+Serve `.cfm` files over HTTP with built-in CGI, URL, Form, Cookie, Session, Request, and Application scopes:
 
 ```plaintext
 # Serve the current directory on port 8500 (default)
@@ -99,6 +99,12 @@ writeOutput(cgi.query_string);      // name=World
 
 // POST form data
 writeOutput(form.username);
+
+// Cookie scope (from request headers)
+writeOutput(cookie.CFID);
+
+// Session scope (server-side, per-user via CFID cookie)
+session.username = "Alex";
 
 // Application scope (persists across requests)
 application.hitCount = (application.hitCount ?: 0) + 1;
@@ -333,7 +339,7 @@ cargo run -- examples/08_builtins.cfm         # Built-in functions
 *   **Full CFScript parser** with proper operator precedence
 *   **CFML Tag preprocessor** — automatic tag-to-script conversion
 *   **Stack-based bytecode VM** for execution
-*   **250+ built-in functions** across strings, arrays, structs, math, dates, lists, JSON, queries, and type checking
+*   **340+ built-in functions** across strings, arrays, structs, math, dates, lists, JSON, queries, file I/O, conversion, and type checking
 *   **Member functions** — `"hello".ucase()`, `[1,2,3].len()`, `{a:1}.keyList()`
 *   **Higher-order functions** — `arrayMap`, `arrayFilter`, `arrayReduce`, `arraySome`, `arrayEvery`, `structEach`, `structReduce`, `listMap`, `listFilter`, etc. with closure support
 *   **Method chaining** — `"hello world".ucase().reverse()`
@@ -356,11 +362,14 @@ cargo run -- examples/08_builtins.cfm         # Built-in functions
 *   **Implicit property accessors** — `getXxx()`/`setXxx()` auto-generated for component properties
 *   **onMissingMethod** — fallback handler for undefined method calls on components
 *   **Application.cfc lifecycle** — `onApplicationStart`, `onRequestStart`, `onRequest`, `onRequestEnd`, `onError`
-*   **Scopes** — `local`, `variables`, `arguments`, `request` (per-request), `application` (persistent), `server` (read-only)
+*   **Scopes** — `local`, `variables`, `arguments`, `request` (per-request), `application` (persistent), `server` (read-only), `session` (server-side via CFID cookie), `cookie` (from request headers)
 *   **Component mappings** — virtual path resolution via `this.mappings` in Application.cfc
-*   **CFML tags** — `<cfset>`, `<cfoutput>`, `<cfif>`, `<cfloop>`, `<cffunction>`, `<cfscript>`, `<cftry>`, `<cfthrow>`, `<cfinclude>`, `<cfdump>`, `<cfparam>`, `<cfabort>`, `<cfhttp>`, `<cflocation>`, `<cfheader>`, `<cfcontent>`, `<cfinvoke>`, `<cfsavecontent>`, and more
-*   **HTTP client** — `cfhttp` tag and function for GET/POST/PUT/DELETE/PATCH requests
-*   **Database connectivity** — `queryExecute()` with SQLite, MySQL, and PostgreSQL support
+*   **45+ CFML tags** — `<cfset>`, `<cfoutput>`, `<cfif>`, `<cfloop>`, `<cffunction>`, `<cfscript>`, `<cftry>/<cfcatch>/<cffinally>`, `<cfthrow>/<cfrethrow>`, `<cfswitch>/<cfcase>`, `<cfbreak>`, `<cfcontinue>`, `<cfwhile>`, `<cfinclude>`, `<cfdump>`, `<cfparam>`, `<cfabort>`, `<cfhttp>/<cfhttpparam>`, `<cfquery>/<cfqueryparam>`, `<cftransaction>`, `<cflocation>`, `<cfheader>`, `<cfcontent>`, `<cfinvoke>`, `<cfsavecontent>`, `<cflock>`, `<cfsilent>`, `<cflog>`, `<cfsetting>`, `<cfcookie>`, `<cffile>`, `<cfloginuser>/<cflogout>`, and more
+*   **HTTP client** — `cfhttp` tag and function for GET/POST/PUT/DELETE/PATCH requests with `cfhttpparam` support (headers, formfields, URL params, body, cookies)
+*   **Database connectivity** — `queryExecute()` with SQLite, MySQL, PostgreSQL, and MSSQL support; connection pooling, `cfqueryparam`, `cftransaction`
+*   **Session management** — server-side sessions via CFID cookie, `sessionInvalidate()`, `sessionRotate()`
+*   **Authentication** — `cfloginuser`, `cflogout`, `getAuthUser()`, `isUserLoggedIn()`, `isUserInRole()`
+*   **File uploads** — multipart/form-data parsing, `fileUpload()`, `fileUploadAll()`, `<cffile action="upload">`
 *   **Query higher-order functions** — `queryEach`, `queryMap`, `queryFilter`, `queryReduce`, `querySort`, `querySome`, `queryEvery`
 *   **Security** — `encrypt()`/`decrypt()` (AES, DES, DESEDE, Blowfish), `hmac()`, `generateSecretKey()`, Base64/Hex/UU encoding
 *   **XML** — `xmlParse()`, `xmlSearch()`, `isXML()` via quick-xml
@@ -374,11 +383,12 @@ cargo run -- examples/08_builtins.cfm         # Built-in functions
 
 ### Planned / In Progress
 
-*   **Interface enforcement** — `implements` keyword (parsed but not enforced)
-*   **Session scope** — per-user session management
+*   **Custom tags** — `cfmodule`, `cf_` prefix tags, tag libraries
+*   **Email** — `cfmail`, `cfmailparam`, `cfmailpart`
+*   **Caching** — `cfcache`, `cacheGet()`, `cachePut()`
 *   **Threading** — `cfthread` equivalent
-*   **JIT compilation** — compile hot functions to native code
-*   **Package manager integration** — install CFML packages
+*   **Stored procedures** — `cfstoredproc`
+*   **OS commands** — `cfexecute`
 
 ## Architecture
 
@@ -411,7 +421,7 @@ RustCFML/
 │   ├── cfml-compiler/   # Lexer, Parser, AST, Tag Preprocessor
 │   ├── cfml-codegen/    # Bytecode compiler (AST → BytecodeOp)
 │   ├── cfml-vm/         # Stack-based bytecode execution engine
-│   ├── cfml-stdlib/     # 250+ built-in functions
+│   ├── cfml-stdlib/     # 340+ built-in functions
 │   ├── cli/             # Command-line interface (rustcfml binary)
 │   └── wasm/            # WebAssembly target via wasm-bindgen
 ├── examples/            # Example .cfm files
@@ -509,10 +519,10 @@ unit tests, integration tests, and test individual features.
 ## Disclaimer
 
 RustCFML is in active development. The interpreter covers a substantial portion
-of the CFML language — including components with inheritance, application
-lifecycle, closures with mutation, and 250+ built-in functions — and can run
-real CFScript and tag-based CFML code including frameworks like Taffy.
-It is not yet production-ready.
+of the CFML language — including 340+ built-in functions, 45+ tags, components with
+inheritance, application lifecycle, sessions, database connectivity, closures with
+mutation, and file uploads — and can run real CFScript and tag-based CFML code
+including frameworks like Taffy. It is not yet production-ready.
 
 Contributions are welcome!
 
