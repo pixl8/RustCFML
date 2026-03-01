@@ -12,18 +12,14 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: x86_64-apple-darwin
-            os: macos-13
-            folder: macos/x86_64
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            folder: macos/aarch64
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            folder: linux/x86_64
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
-            folder: linux/aarch64
+          - os: macos-13
+            name: macos-x86_64
+          - os: macos-latest
+            name: macos-aarch64
+          - os: ubuntu-latest
+            name: linux-x86_64
+          - os: ubuntu-24.04-arm
+            name: linux-aarch64
 
     runs-on: ${{ matrix.os }}
 
@@ -39,7 +35,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.folder }}
+          name: ${{ matrix.name }}
           path: target/release/rustcfml
 
   release:
@@ -54,10 +50,9 @@ jobs:
       - name: Rename binaries
         run: |
           mkdir -p release
-          for folder in macos/x86_64 macos/aarch64 linux/x86_64 linux/aarch64; do
-            name="rustcfml-$(echo $folder | tr '/' '-')"
-            cp "artifacts/${folder}/rustcfml" "release/${name}"
-            chmod +x "release/${name}"
+          for name in macos-x86_64 macos-aarch64 linux-x86_64 linux-aarch64; do
+            cp "artifacts/${name}/rustcfml" "release/rustcfml-${name}"
+            chmod +x "release/rustcfml-${name}"
           done
 
       - name: Create GitHub Release
