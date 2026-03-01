@@ -12,8 +12,6 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-13
-            name: macos-x86_64
           - os: macos-latest
             name: macos-aarch64
           - os: ubuntu-latest
@@ -50,7 +48,7 @@ jobs:
       - name: Rename binaries
         run: |
           mkdir -p release
-          for name in macos-x86_64 macos-aarch64 linux-x86_64 linux-aarch64; do
+          for name in macos-aarch64 linux-x86_64 linux-aarch64; do
             cp "artifacts/${name}/rustcfml" "release/rustcfml-${name}"
             chmod +x "release/rustcfml-${name}"
           done
