@@ -17,6 +17,7 @@ cfml-common = { workspace = true }
 cfml-compiler = { workspace = true }
 cfml-codegen = { workspace = true }
 cfml-vm = { workspace = true }
+indexmap = { workspace = true }
 cfml-stdlib = { workspace = true, features = ["all-databases", "xml"] }
 log = { workspace = true }
 env_logger = "0.11"

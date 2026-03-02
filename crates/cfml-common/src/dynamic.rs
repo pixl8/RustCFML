@@ -1,6 +1,7 @@
 //! Dynamic value types for CFML runtime
 
 use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
@@ -12,7 +13,7 @@ pub enum CfmlValue {
     Double(f64),
     String(String),
     Array(Vec<CfmlValue>),
-    Struct(HashMap<String, CfmlValue>),
+    Struct(IndexMap<String, CfmlValue>),
     Closure(Box<CfmlClosure>),
     Component(Box<CfmlComponent>),
     Function(CfmlFunction),
@@ -44,7 +45,16 @@ impl CfmlValue {
             CfmlValue::Bool(b) => *b,
             CfmlValue::Int(i) => *i != 0,
             CfmlValue::Double(d) => *d != 0.0,
-            CfmlValue::String(s) => !s.is_empty(),
+            CfmlValue::String(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    return false;
+                }
+                match trimmed.to_lowercase().as_str() {
+                    "false" | "no" | "0" => false,
+                    _ => true,
+                }
+            }
             CfmlValue::Array(a) => !a.is_empty(),
             CfmlValue::Struct(s) => !s.is_empty(),
             CfmlValue::Closure(_) => true,
@@ -128,7 +138,7 @@ impl fmt::Display for CfmlValue {
 pub struct CfmlClosure {
     pub params: Vec<String>,
     pub body: Box<CfmlClosureBody>,
-    pub captured_vars: HashMap<String, CfmlValue>,
+    pub captured_vars: IndexMap<String, CfmlValue>,
 }
 
 #[derive(Debug, Clone)]
@@ -147,7 +157,7 @@ pub enum CfmlStatement {
 #[derive(Debug, Clone)]
 pub struct CfmlComponent {
     pub name: String,
-    pub properties: HashMap<String, CfmlValue>,
+    pub properties: IndexMap<String, CfmlValue>,
     pub methods: HashMap<String, CfmlFunction>,
     pub extends: Option<String>,
     pub implements: Vec<String>,
@@ -157,7 +167,7 @@ impl CfmlComponent {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            properties: HashMap::new(),
+            properties: IndexMap::new(),
             methods: HashMap::new(),
             extends: None,
             implements: Vec::new(),
@@ -174,7 +184,7 @@ pub struct CfmlFunction {
     pub access: CfmlAccess,
     /// Captured scope for closures — shared mutable environment so multiple
     /// invocations (and sibling closures) see each other's mutations.
-    pub captured_scope: Option<Arc<RwLock<HashMap<String, CfmlValue>>>>,
+    pub captured_scope: Option<Arc<RwLock<IndexMap<String, CfmlValue>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -196,7 +206,7 @@ pub enum CfmlAccess {
 #[derive(Debug, Clone)]
 pub struct CfmlQuery {
     pub columns: Vec<String>,
-    pub rows: Vec<HashMap<String, CfmlValue>>,
+    pub rows: Vec<IndexMap<String, CfmlValue>>,
     pub sql: Option<String>,
 }
 

@@ -44,6 +44,7 @@ pub enum Token {
     StarEqual,
     SlashEqual,
     AmpEqual,
+    PercentEqual,
     PlusPlus,
     MinusMinus,
 
@@ -123,6 +124,7 @@ pub enum Token {
     IsKeyword,  // IS
 
     // Other
+    Lock,
     Include,
     Import,
     Output,
@@ -185,6 +187,7 @@ impl Token {
             "true" | "yes" => Some(Token::True),
             "false" | "no" => Some(Token::False),
             "null" => Some(Token::Null),
+            "lock" => Some(Token::Lock),
             "include" => Some(Token::Include),
             "import" => Some(Token::Import),
             "output" => Some(Token::Output),

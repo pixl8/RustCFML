@@ -94,7 +94,7 @@ pub fn tags_to_script(source: &str) -> String {
             let text: String = chars[start..i].iter().collect();
             if !text.is_empty() && text.trim().len() > 0 {
                 // Output plain text
-                let escaped = text.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r");
+                let escaped = text.replace('\\', "\\\\").replace('"', "\"\"").replace('\n', "\\n").replace('\r', "\\r");
                 result.push_str(&format!("writeOutput(\"{}\");", escaped));
             }
         }
@@ -140,7 +140,7 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
     // Extract tag name
     let name_start = if is_closing { start + 2 } else { start + 1 };
     let mut name_end = name_start;
-    while name_end < len && chars[name_end].is_alphanumeric() {
+    while name_end < len && (chars[name_end].is_alphanumeric() || chars[name_end] == '_') {
         name_end += 1;
     }
     let tag_name: String = chars[name_start..name_end].iter().collect();
@@ -272,16 +272,25 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
         "cfthrow" => {
             let message = attrs.get("message").cloned().unwrap_or("An error occurred".to_string());
             let message = strip_hashes(&message);
-            // message is always a string — quote it directly (escape internal quotes)
-            let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
-            (format!("throw(\"{}\");\n", escaped), tag_end - start)
+            let escaped_msg = message.replace('\\', "\\\\").replace('"', "\\\"");
+
+            let type_ = attrs.get("type").cloned().unwrap_or("Application".to_string());
+            let escaped_type = strip_hashes(&type_).replace('\\', "\\\\").replace('"', "\\\"");
+
+            let detail = attrs.get("detail").cloned().unwrap_or_default();
+            let escaped_detail = strip_hashes(&detail).replace('\\', "\\\\").replace('"', "\\\"");
+
+            let errorcode = attrs.get("errorcode").cloned().unwrap_or_default();
+            let escaped_errorcode = strip_hashes(&errorcode).replace('\\', "\\\\").replace('"', "\\\"");
+
+            (format!("throw(\"{}\", \"{}\", \"{}\", \"{}\");\n", escaped_msg, escaped_type, escaped_detail, escaped_errorcode), tag_end - start)
         }
         "cftry" => {
             ("try {\n".to_string(), tag_end - start)
         }
         "cfcatch" => {
             let catch_type = attrs.get("type").cloned().unwrap_or("any".to_string());
-            (format!("}} catch ({} e) {{\n", catch_type), tag_end - start)
+            (format!("}} catch ({} cfcatch) {{\n", catch_type), tag_end - start)
         }
         "cfabort" => {
             ("__cfabort();\n".to_string(), tag_end - start)
@@ -289,7 +298,13 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
         "cfparam" => {
             let name = attrs.get("name").cloned().unwrap_or_default();
             let default = attrs.get("default").cloned().unwrap_or("\"\"".to_string());
-            let default = strip_hashes(&default);
+            // If default contains #expr#, strip hashes to get the expression.
+            // Otherwise treat it as a string literal and quote it.
+            let default = if default.contains('#') {
+                strip_hashes(&default)
+            } else {
+                quote_if_needed(&default)
+            };
             // Clean name - remove scope prefix quotes and strip hash expressions
             let clean_name = strip_hashes(&name.replace('"', "").replace('\'', ""));
             (
@@ -777,9 +792,92 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
                 (format!("{};\n", call), tag_end - start)
             }
         }
+        "cfmodule" => {
+            // <cfmodule template="path.cfm" attr1="val1"> or <cfmodule name="dot.path" attr1="val1">
+            let template = attrs.get("template").cloned();
+            let name_attr = attrs.get("name").cloned();
+            let uses_template = template.is_some();
+
+            let path_expr = if let Some(t) = template {
+                let t = strip_hashes(&t);
+                format!("\"{}\"", t.replace('"', "\\\""))
+            } else if let Some(n) = name_attr {
+                let n = strip_hashes(&n);
+                format!("\"__name:{}\"", n.replace('"', "\\\""))
+            } else {
+                return ("".to_string(), tag_end - start); // missing required attr
+            };
+
+            // Build attributes struct from non-reserved attrs
+            // "template" is always reserved; "name" only reserved in name= form
+            let mut attr_parts = Vec::new();
+            for (k, v) in &attrs {
+                let kl = k.to_lowercase();
+                if kl == "template" {
+                    continue;
+                }
+                if kl == "name" && !uses_template {
+                    continue;
+                }
+                let val = strip_hashes(v);
+                attr_parts.push(format!("{}: {}", k, quote_if_needed(&val)));
+            }
+            let attrs_expr = format!("{{ {} }}", attr_parts.join(", "));
+
+            // Check for body (closing </cfmodule>)
+            let tag_name_full = "cfmodule";
+            if let Some(body_start) = find_closing_tag(chars, tag_end, len, tag_name_full) {
+                // Body tag: emit start, recursively preprocess body, then end marker
+                let body_chars = &chars[tag_end..body_start];
+                let body_source: String = body_chars.iter().collect();
+                let body_script = tags_to_script(&body_source);
+                let close_end = find_tag_end(chars, body_start, len);
+                let result = format!(
+                    "__cfcustomtag_start({}, {});\n{}\n__cfcustomtag_end();\n",
+                    path_expr, attrs_expr, body_script
+                );
+                (result, close_end - start)
+            } else {
+                // Self-closing
+                let result = format!("__cfcustomtag({}, {});\n", path_expr, attrs_expr);
+                (result, tag_end - start)
+            }
+        }
         _ => {
-            // Unknown tag, skip it
-            (String::new(), tag_end - start)
+            if tag_lower.starts_with("cf_") {
+                // Custom tag: <cf_tagname attr1="val1">
+                let custom_tag_name = &tag_lower[3..]; // strip "cf_"
+                let path_expr = format!("\"__cf_:{}\"", custom_tag_name);
+
+                // Build attributes struct from all attrs
+                let mut attr_parts = Vec::new();
+                for (k, v) in &attrs {
+                    let val = strip_hashes(v);
+                    attr_parts.push(format!("{}: {}", k, quote_if_needed(&val)));
+                }
+                let attrs_expr = format!("{{ {} }}", attr_parts.join(", "));
+
+                // Check for body (closing </cf_tagname>)
+                let tag_name_full = format!("cf_{}", custom_tag_name);
+                if let Some(body_start) = find_closing_tag(chars, tag_end, len, &tag_name_full) {
+                    let body_chars = &chars[tag_end..body_start];
+                    let body_source: String = body_chars.iter().collect();
+                    let body_script = tags_to_script(&body_source);
+                    let close_end = find_tag_end(chars, body_start, len);
+                    let result = format!(
+                        "__cfcustomtag_start({}, {});\n{}\n__cfcustomtag_end();\n",
+                        path_expr, attrs_expr, body_script
+                    );
+                    (result, close_end - start)
+                } else {
+                    // Self-closing
+                    let result = format!("__cfcustomtag({}, {});\n", path_expr, attrs_expr);
+                    (result, tag_end - start)
+                }
+            } else {
+                // Unknown tag, skip it
+                (String::new(), tag_end - start)
+            }
         }
     }
 }
@@ -983,14 +1081,36 @@ fn strip_hashes(s: &str) -> String {
 }
 
 fn find_closing_tag(chars: &[char], start: usize, len: usize, tag_name: &str) -> Option<usize> {
-    let target = format!("</{}", tag_name);
-    let target_lower = target.to_lowercase();
+    let close_target = format!("</{}", tag_name);
+    let close_lower = close_target.to_lowercase();
+    let open_target = format!("<{}", tag_name);
+    let open_lower = open_target.to_lowercase();
+    let mut depth = 0;
     let mut i = start;
     while i < len {
-        if chars[i] == '<' && chars.get(i + 1) == Some(&'/') {
-            let remaining: String = chars[i..].iter().take(target.len() + 1).collect();
-            if remaining.to_lowercase().starts_with(&target_lower) {
-                return Some(i);
+        if chars[i] == '<' {
+            if chars.get(i + 1) == Some(&'/') {
+                // Potential closing tag
+                let remaining: String = chars[i..].iter().take(close_target.len() + 1).collect();
+                if remaining.to_lowercase().starts_with(&close_lower) {
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                    depth -= 1;
+                    i += close_target.len();
+                    continue;
+                }
+            } else {
+                // Potential opening tag (same name = nested)
+                let remaining: String = chars[i..].iter().take(open_target.len() + 1).collect();
+                let rem_lower = remaining.to_lowercase();
+                if rem_lower.starts_with(&open_lower) {
+                    // Verify it's actually a tag (next char is space, >, or /)
+                    let next_char = remaining.chars().nth(open_target.len());
+                    if matches!(next_char, Some(' ') | Some('>') | Some('/') | Some('\t') | Some('\n') | Some('\r') | None) {
+                        depth += 1;
+                    }
+                }
             }
         }
         i += 1;
@@ -1077,7 +1197,13 @@ fn parse_cfloop_tag(
         let index = strip_hashes(index);
         (format!("for (var {} in {}) {{\n", index, array), consumed)
     } else if let (Some(list), Some(index)) = (attrs.get("list"), attrs.get("index")) {
-        let list = strip_hashes(list);
+        // If the list contains #expr#, strip hashes to get the expression.
+        // Otherwise treat it as a string literal and quote it.
+        let list = if list.contains('#') {
+            strip_hashes(list)
+        } else {
+            quote_if_needed(list)
+        };
         let index = strip_hashes(index);
         let delimiters = attrs
             .get("delimiters")

@@ -170,6 +170,63 @@ impl Parser {
         }
 
         if self.match_token(&Token::Throw) {
+            // throw(...) with parens = function call form (VM-intercepted)
+            if self.check(&Token::LParen) {
+                self.consume(&Token::LParen)?;
+
+                // Check if first arg is named (identifier followed by =)
+                let is_named = matches!(self.peek(0), Token::Identifier(_))
+                    && matches!(self.peek(1), Token::Equal);
+
+                let arguments = if is_named {
+                    // Parse named args like throw(message="oops", type="custom")
+                    // Convert to positional: throw("oops", "custom", "", "")
+                    let mut named: Vec<(String, Expression)> = Vec::new();
+                    loop {
+                        let key = self.extract_identifier()?.to_lowercase();
+                        self.consume(&Token::Equal)?;
+                        let value = self.parse_expression()?;
+                        named.push((key, value));
+                        if !self.match_token(&Token::Comma) {
+                            break;
+                        }
+                        // Check if next arg is also named
+                        if !matches!(self.peek(0), Token::Identifier(_)) || !matches!(self.peek(1), Token::Equal) {
+                            break;
+                        }
+                    }
+                    // Map to positional: message, type, detail, errorcode
+                    let get_arg = |name: &str| -> Expression {
+                        named.iter()
+                            .find(|(k, _)| k == name)
+                            .map(|(_, v)| v.clone())
+                            .unwrap_or(Expression::Literal(Literal {
+                                value: LiteralValue::String(String::new()),
+                                location: stmt_loc,
+                            }))
+                    };
+                    vec![get_arg("message"), get_arg("type"), get_arg("detail"), get_arg("errorcode")]
+                } else {
+                    self.parse_arguments()?
+                };
+
+                self.consume(&Token::RParen)?;
+                self.match_token(&Token::Semicolon);
+
+                let throw_ident = Expression::Identifier(Identifier {
+                    name: "throw".to_string(),
+                    location: stmt_loc,
+                });
+                let call_expr = Expression::FunctionCall(Box::new(FunctionCall {
+                    name: Box::new(throw_ident),
+                    arguments,
+                    location: stmt_loc,
+                }));
+                return Ok(CfmlNode::Statement(Statement::Expression(ExpressionStatement {
+                    expr: call_expr,
+                    location: stmt_loc,
+                })));
+            }
             return Ok(CfmlNode::Statement(Statement::Throw(self.parse_throw()?)));
         }
 
@@ -218,6 +275,11 @@ impl Parser {
                     interface: self.parse_interface()?,
                 },
             )));
+        }
+
+        // cfscript lock block: lock name="x" type="exclusive" timeout="5" { body }
+        if self.match_token(&Token::Lock) {
+            return self.parse_lock(stmt_loc);
         }
 
         if self.match_token(&Token::Include) {
@@ -317,6 +379,7 @@ impl Parser {
             Token::StarEqual => Some(AssignOp::StarEqual),
             Token::SlashEqual => Some(AssignOp::SlashEqual),
             Token::AmpEqual => Some(AssignOp::ConcatEqual),
+            Token::PercentEqual => Some(AssignOp::PercentEqual),
             _ => None,
         }
     }
@@ -491,7 +554,7 @@ impl Parser {
             let is_ident_start = matches!(self.peek(la), Token::Identifier(_) | Token::Local
                 | Token::Param | Token::Output | Token::Required | Token::Default
                 | Token::Include | Token::Import | Token::Property | Token::Abstract
-                | Token::Final | Token::Static);
+                | Token::Final | Token::Static | Token::Lock);
             if is_ident_start {
                 la += 1;
                 // Skip dotted parts: .ident .ident ...
@@ -755,6 +818,91 @@ impl Parser {
         })
     }
 
+    /// Parse cfscript lock block: lock name="x" type="exclusive" timeout="5" { body }
+    /// Desugars to: __cflock_start({name:"x", type:"exclusive", timeout:5}); try { body } finally { __cflock_end("x"); }
+    fn parse_lock(&mut self, loc: SourceLocation) -> Result<CfmlNode, ParseError> {
+        // Parse key=value attributes before the block
+        let mut attrs: Vec<(String, Expression)> = Vec::new();
+        while let Token::Identifier(_) = self.peek(0) {
+            if matches!(self.peek(1), Token::Equal) {
+                let key = self.extract_identifier()?;
+                self.consume(&Token::Equal)?;
+                let value = self.parse_expression()?;
+                attrs.push((key, value));
+            } else {
+                break;
+            }
+        }
+
+        // Parse the block body
+        let body = self.parse_block()?;
+
+        // Extract lock name for __cflock_end
+        let lock_name_expr = attrs.iter()
+            .find(|(k, _)| k.to_lowercase() == "name")
+            .map(|(_, v)| v.clone())
+            .unwrap_or(Expression::Literal(Literal {
+                value: LiteralValue::String("default".to_string()),
+                location: loc,
+            }));
+
+        // Build struct literal for __cflock_start argument
+        let struct_pairs: Vec<(Expression, Expression)> = attrs.iter().map(|(k, v)| {
+            (Expression::Literal(Literal {
+                value: LiteralValue::String(k.clone()),
+                location: loc,
+            }), v.clone())
+        }).collect();
+
+        let attrs_struct = Expression::Struct(Struct {
+            pairs: struct_pairs,
+            ordered: false,
+            location: loc,
+        });
+
+        // __cflock_start(attrs)
+        let lock_start = Statement::Expression(ExpressionStatement {
+            expr: Expression::FunctionCall(Box::new(FunctionCall {
+                name: Box::new(Expression::Identifier(Identifier {
+                    name: "__cflock_start".to_string(),
+                    location: loc,
+                })),
+                arguments: vec![attrs_struct],
+                location: loc,
+            })),
+            location: loc,
+        });
+
+        // __cflock_end(name)
+        let lock_end = Statement::Expression(ExpressionStatement {
+            expr: Expression::FunctionCall(Box::new(FunctionCall {
+                name: Box::new(Expression::Identifier(Identifier {
+                    name: "__cflock_end".to_string(),
+                    location: loc,
+                })),
+                arguments: vec![lock_name_expr],
+                location: loc,
+            })),
+            location: loc,
+        });
+
+        // try { body } finally { __cflock_end(name) }
+        let try_stmt = Statement::Try(Try {
+            body,
+            catches: vec![],
+            finally_body: Some(vec![lock_end]),
+            location: loc,
+        });
+
+        // Wrap as Output block: __cflock_start; try { ... } finally { __cflock_end }
+        let output = Statement::Output(Output {
+            body: vec![lock_start, try_stmt],
+            location: loc,
+        });
+
+        Ok(CfmlNode::Statement(output))
+    }
+
     fn parse_throw(&mut self) -> Result<Throw, ParseError> {
         let loc = self.current_location();
         let message = if !self.check(&Token::Semicolon) && !self.is_at_end() {
@@ -863,16 +1011,38 @@ impl Parser {
         let mut implements = Vec::new();
 
         if self.match_token(&Token::Extends) {
-            extends = self.extract_dotted_identifier().ok();
+            // Handle both `extends Animal` and `extends="Animal"` syntax
+            if self.match_token(&Token::Equal) {
+                if let Token::String(val) = self.peek(0).clone() {
+                    self.advance();
+                    extends = Some(val);
+                }
+            } else {
+                extends = self.extract_dotted_identifier().ok();
+            }
         }
 
         if self.match_token(&Token::Implements) {
-            loop {
-                if let Ok(iface) = self.extract_dotted_identifier() {
-                    implements.push(iface);
+            // Handle both `implements IFoo` and `implements="IFoo"` syntax
+            if self.match_token(&Token::Equal) {
+                if let Token::String(val) = self.peek(0).clone() {
+                    self.advance();
+                    // May be comma-separated: "IFoo,IBar"
+                    for iface in val.split(',') {
+                        let trimmed = iface.trim().to_string();
+                        if !trimmed.is_empty() {
+                            implements.push(trimmed);
+                        }
+                    }
                 }
-                if !self.match_token(&Token::Comma) {
-                    break;
+            } else {
+                loop {
+                    if let Ok(iface) = self.extract_dotted_identifier() {
+                        implements.push(iface);
+                    }
+                    if !self.match_token(&Token::Comma) {
+                        break;
+                    }
                 }
             }
         }
@@ -1181,6 +1351,7 @@ impl Parser {
             Token::Abstract => { self.advance(); Ok("abstract".to_string()) }
             Token::Final => { self.advance(); Ok("final".to_string()) }
             Token::Static => { self.advance(); Ok("static".to_string()) }
+            Token::Lock => { self.advance(); Ok("lock".to_string()) }
             _ => Err(self.parse_error("Expected identifier")),
         }
     }
@@ -1230,6 +1401,7 @@ impl Parser {
             Token::Final => Some("final".to_string()),
             Token::Required => Some("required".to_string()),
             Token::Default => Some("default".to_string()),
+            Token::Lock => Some("lock".to_string()),
             _ => None,
         }
     }
@@ -1848,6 +2020,10 @@ impl Parser {
             })),
             Token::Static => Ok(Expression::Identifier(Identifier {
                 name: "static".to_string(),
+                location: self.current_location(),
+            })),
+            Token::Lock => Ok(Expression::Identifier(Identifier {
+                name: "lock".to_string(),
                 location: self.current_location(),
             })),
             Token::This => Ok(Expression::This(This {

@@ -164,7 +164,13 @@ impl Lexer {
                     self.add_token(Token::Slash);
                 }
             }
-            '%' => self.add_token(Token::Percent),
+            '%' => {
+                if self.match_char('=') {
+                    self.add_token(Token::PercentEqual);
+                } else {
+                    self.add_token(Token::Percent);
+                }
+            }
 
             '&' => {
                 if self.match_char('&') {
@@ -247,7 +253,19 @@ impl Lexer {
             let mut current_str = String::new();
             let mut has_interpolation = false;
 
-            while !self.is_at_end() && self.current() != quote {
+            while !self.is_at_end() {
+                // Check for closing quote (but doubled quote "" is an escape)
+                if self.current() == quote {
+                    if self.peek(1) == quote {
+                        // Doubled quote: "" → literal "
+                        current_str.push(quote);
+                        self.advance(); // skip first quote
+                        self.advance(); // skip second quote
+                        continue;
+                    } else {
+                        break; // End of string
+                    }
+                }
                 if self.current() == '\\' {
                     // CFML: only \n, \t, \r, \\, \# are recognized escape sequences.
                     // \" is NOT an escape — CFML uses "" for embedded quotes.
@@ -299,13 +317,7 @@ impl Lexer {
                         parts.push((true, expr_str));
                     }
                 } else {
-                    // CFML: doubled quote acts as escape
-                    if self.current() == quote && self.peek(0) == quote {
-                        current_str.push(quote);
-                        self.advance();
-                    } else {
-                        current_str.push(self.current());
-                    }
+                    current_str.push(self.current());
                     self.advance();
                 }
             }
@@ -365,7 +377,19 @@ impl Lexer {
         } else {
             // Single-quoted strings: no interpolation
             let mut value = String::new();
-            while !self.is_at_end() && self.current() != quote {
+            while !self.is_at_end() {
+                // Check for closing quote (but doubled quote '' is an escape)
+                if self.current() == quote {
+                    if self.peek(1) == quote {
+                        // Doubled quote: '' → literal '
+                        value.push(quote);
+                        self.advance(); // skip first quote
+                        self.advance(); // skip second quote
+                        continue;
+                    } else {
+                        break; // End of string
+                    }
+                }
                 if self.current() == '\\' {
                     // CFML: only \n, \t, \r, \\, \# are recognized escape sequences.
                     // \' is NOT an escape — CFML uses '' for embedded quotes.
@@ -388,12 +412,7 @@ impl Lexer {
                         }
                     }
                 } else {
-                    if self.current() == quote && self.peek(0) == quote {
-                        value.push(quote);
-                        self.advance();
-                    } else {
-                        value.push(self.current());
-                    }
+                    value.push(self.current());
                 }
                 self.advance();
             }

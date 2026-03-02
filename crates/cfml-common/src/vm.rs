@@ -1,7 +1,7 @@
 //! Virtual machine types and context
 
 use crate::dynamic::CfmlValue;
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 pub type CfmlResult = Result<CfmlValue, CfmlError>;
 
@@ -72,11 +72,11 @@ impl std::fmt::Display for CfmlError {
 }
 
 pub struct CfmlContext {
-    pub scopes: Vec<HashMap<String, CfmlValue>>,
+    pub scopes: Vec<IndexMap<String, CfmlValue>>,
     pub this: Option<CfmlValue>,
     pub super_scope: Option<CfmlValue>,
-    pub variables: HashMap<String, CfmlValue>,
-    pub local_vars: HashMap<String, CfmlValue>,
+    pub variables: IndexMap<String, CfmlValue>,
+    pub local_vars: IndexMap<String, CfmlValue>,
     pub output_buffer: String,
     pub output_enabled: bool,
 }
@@ -87,15 +87,15 @@ impl CfmlContext {
             scopes: Vec::new(),
             this: None,
             super_scope: None,
-            variables: HashMap::new(),
-            local_vars: HashMap::new(),
+            variables: IndexMap::new(),
+            local_vars: IndexMap::new(),
             output_buffer: String::new(),
             output_enabled: true,
         }
     }
 
     pub fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(IndexMap::new());
     }
 
     pub fn pop_scope(&mut self) {
@@ -139,7 +139,7 @@ pub struct CfmlFrame {
     pub name: String,
     pub ip: usize,
     pub stack: Vec<CfmlValue>,
-    pub locals: HashMap<String, CfmlValue>,
+    pub locals: IndexMap<String, CfmlValue>,
 }
 
 impl CfmlFrame {
@@ -148,7 +148,7 @@ impl CfmlFrame {
             name,
             ip: 0,
             stack: Vec::new(),
-            locals: HashMap::new(),
+            locals: IndexMap::new(),
         }
     }
 }

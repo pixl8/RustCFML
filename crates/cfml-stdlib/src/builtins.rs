@@ -17,6 +17,7 @@
 use cfml_common::dynamic::{CfmlAccess, CfmlClosureBody, CfmlFunction, CfmlQuery, CfmlValue};
 use cfml_common::vm::{CfmlError, CfmlResult};
 use std::collections::HashMap;
+use indexmap::IndexMap;
 use regex::Regex;
 use serde_json;
 use chrono::{NaiveDateTime, NaiveDate, NaiveTime, Datelike, Timelike};
@@ -24,8 +25,8 @@ use chrono::{NaiveDateTime, NaiveDate, NaiveTime, Datelike, Timelike};
 pub type BuiltinFunction = fn(Vec<CfmlValue>) -> CfmlResult;
 
 /// Returns all builtin functions as CfmlValue::Function references for the globals table
-pub fn get_builtins() -> HashMap<String, CfmlValue> {
-    let mut builtins = HashMap::new();
+pub fn get_builtins() -> IndexMap<String, CfmlValue> {
+    let mut builtins = IndexMap::new();
     for (name, _) in get_builtin_functions() {
         builtins.insert(name.clone(), create_builtin_func(name.as_str()));
     }
@@ -76,6 +77,8 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("stripCr".into(), fn_strip_cr);
     f.insert("toBase64".into(), fn_to_base64);
     f.insert("toBinary".into(), fn_to_binary);
+    f.insert("binaryEncode".into(), fn_binary_encode);
+    f.insert("binaryDecode".into(), fn_binary_decode);
     f.insert("urlEncodedFormat".into(), fn_url_encode);
     f.insert("urlDecode".into(), fn_url_decode);
     f.insert("htmlEditFormat".into(), fn_html_edit_format);
@@ -459,6 +462,22 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("__cfloginuser".into(), fn_session_stub);
     f.insert("__cflogout".into(), fn_session_stub);
 
+    // ---- Variable scope functions (VM-intercepted) ----
+    f.insert("setVariable".into(), fn_session_stub);
+    f.insert("getVariable".into(), fn_session_stub);
+
+    // ---- throw() function form (VM-intercepted) ----
+    f.insert("throw".into(), fn_session_stub);
+
+    // ---- Struct metadata functions ----
+    f.insert("structGetMetadata".into(), fn_struct_get_metadata);
+    f.insert("structSetMetadata".into(), fn_struct_set_metadata);
+
+    // ---- File attribute functions ----
+    f.insert("fileSetAccessMode".into(), fn_file_set_access_mode);
+    f.insert("fileSetAttribute".into(), fn_file_set_attribute);
+    f.insert("fileSetLastModified".into(), fn_file_set_last_modified);
+
     // ---- HTTP functions ----
     #[cfg(feature = "http")]
     f.insert("cfhttp".into(), fn_cfhttp);
@@ -534,8 +553,8 @@ fn get_delimiter(args: &[CfmlValue], idx: usize) -> String {
         .unwrap_or_else(|| ",".to_string())
 }
 
-/// Case-insensitive key lookup for CFML structs. Returns the actual key in the HashMap.
-fn struct_find_key_ci<'a>(s: &'a HashMap<String, CfmlValue>, key: &str) -> Option<&'a str> {
+/// Case-insensitive key lookup for CFML structs. Returns the actual key in the IndexMap.
+fn struct_find_key_ci<'a>(s: &'a IndexMap<String, CfmlValue>, key: &str) -> Option<&'a str> {
     if s.contains_key(key) {
         return Some(s.keys().find(|k| *k == key).unwrap());
     }
@@ -624,6 +643,7 @@ fn fn_len(args: Vec<CfmlValue>) -> CfmlResult {
         Some(CfmlValue::String(s)) => Ok(CfmlValue::Int(s.len() as i64)),
         Some(CfmlValue::Array(a)) => Ok(CfmlValue::Int(a.len() as i64)),
         Some(CfmlValue::Struct(s)) => Ok(CfmlValue::Int(s.len() as i64)),
+        Some(CfmlValue::Binary(b)) => Ok(CfmlValue::Int(b.len() as i64)),
         _ => Ok(CfmlValue::Int(0)),
     }
 }
@@ -913,13 +933,13 @@ fn re_find_impl(args: Vec<CfmlValue>, case_insensitive: bool) -> CfmlResult {
                     len_arr.push(CfmlValue::Int(0));
                 }
             }
-            let mut result = HashMap::new();
+            let mut result = IndexMap::new();
             result.insert("POS".to_string(), CfmlValue::Array(pos_arr));
             result.insert("MATCH".to_string(), CfmlValue::Array(match_arr));
             result.insert("LEN".to_string(), CfmlValue::Array(len_arr));
             Ok(CfmlValue::Struct(result))
         } else {
-            let mut result = HashMap::new();
+            let mut result = IndexMap::new();
             result.insert("POS".to_string(), CfmlValue::Array(vec![CfmlValue::Int(0)]));
             result.insert("MATCH".to_string(), CfmlValue::Array(vec![CfmlValue::String(String::new())]));
             result.insert("LEN".to_string(), CfmlValue::Array(vec![CfmlValue::Int(0)]));
@@ -1055,6 +1075,77 @@ fn fn_to_binary(args: Vec<CfmlValue>) -> CfmlResult {
         i += 4;
     }
     Ok(CfmlValue::Binary(bytes))
+}
+
+fn fn_binary_encode(args: Vec<CfmlValue>) -> CfmlResult {
+    let bytes = match args.first() {
+        Some(CfmlValue::Binary(b)) => b.clone(),
+        Some(other) => other.as_string().into_bytes(),
+        None => Vec::new(),
+    };
+    let encoding = get_str(&args, 1).to_lowercase();
+    match encoding.as_str() {
+        "hex" => {
+            let hex: String = bytes.iter().map(|b| format!("{:02X}", b)).collect();
+            Ok(CfmlValue::String(hex))
+        }
+        "base64" => {
+            let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut result = String::new();
+            for chunk in bytes.chunks(3) {
+                let b0 = chunk[0] as u32;
+                let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+                let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+                let n = (b0 << 16) | (b1 << 8) | b2;
+                result.push(alphabet[((n >> 18) & 63) as usize] as char);
+                result.push(alphabet[((n >> 12) & 63) as usize] as char);
+                if chunk.len() > 1 { result.push(alphabet[((n >> 6) & 63) as usize] as char); } else { result.push('='); }
+                if chunk.len() > 2 { result.push(alphabet[(n & 63) as usize] as char); } else { result.push('='); }
+            }
+            Ok(CfmlValue::String(result))
+        }
+        _ => Err(CfmlError::runtime(format!("Unsupported encoding: {}", encoding))),
+    }
+}
+
+fn fn_binary_decode(args: Vec<CfmlValue>) -> CfmlResult {
+    let input = get_str(&args, 0);
+    let encoding = get_str(&args, 1).to_lowercase();
+    match encoding.as_str() {
+        "hex" => {
+            let hex = input.trim();
+            let mut bytes = Vec::new();
+            let chars: Vec<char> = hex.chars().collect();
+            let mut i = 0;
+            while i + 1 < chars.len() {
+                let high = chars[i].to_digit(16).unwrap_or(0) as u8;
+                let low = chars[i + 1].to_digit(16).unwrap_or(0) as u8;
+                bytes.push((high << 4) | low);
+                i += 2;
+            }
+            Ok(CfmlValue::Binary(bytes))
+        }
+        "base64" => {
+            let table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut bytes = Vec::new();
+            let chars: Vec<u8> = input.bytes().filter(|&b| b != b'\n' && b != b'\r' && b != b' ').collect();
+            let mut i = 0;
+            while i < chars.len() {
+                if i + 1 >= chars.len() { break; }
+                let b0 = table.iter().position(|&c| c == chars[i]).unwrap_or(0) as u32;
+                let b1 = table.iter().position(|&c| c == chars[i + 1]).unwrap_or(0) as u32;
+                let b2 = if i + 2 < chars.len() && chars[i + 2] != b'=' { table.iter().position(|&c| c == chars[i + 2]).unwrap_or(0) as u32 } else { 0 };
+                let b3 = if i + 3 < chars.len() && chars[i + 3] != b'=' { table.iter().position(|&c| c == chars[i + 3]).unwrap_or(0) as u32 } else { 0 };
+                let triple = (b0 << 18) | (b1 << 12) | (b2 << 6) | b3;
+                bytes.push(((triple >> 16) & 0xFF) as u8);
+                if i + 2 < chars.len() && chars[i + 2] != b'=' { bytes.push(((triple >> 8) & 0xFF) as u8); }
+                if i + 3 < chars.len() && chars[i + 3] != b'=' { bytes.push((triple & 0xFF) as u8); }
+                i += 4;
+            }
+            Ok(CfmlValue::Binary(bytes))
+        }
+        _ => Err(CfmlError::runtime(format!("Unsupported encoding: {}", encoding))),
+    }
 }
 
 fn fn_url_encode(args: Vec<CfmlValue>) -> CfmlResult {
@@ -1767,7 +1858,7 @@ fn fn_is_empty(args: Vec<CfmlValue>) -> CfmlResult {
 // ===============================================
 
 fn fn_struct_new(_args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(CfmlValue::Struct(HashMap::new()))
+    Ok(CfmlValue::Struct(IndexMap::new()))
 }
 
 fn fn_struct_count(args: Vec<CfmlValue>) -> CfmlResult {
@@ -1813,7 +1904,7 @@ fn fn_struct_delete(args: Vec<CfmlValue>) -> CfmlResult {
             let key = args[1].as_string();
             if let Some(actual_key) = struct_find_key_ci(&result, &key) {
                 let owned_key = actual_key.to_string();
-                result.remove(&owned_key);
+                result.shift_remove(&owned_key);
             }
             return Ok(CfmlValue::Struct(result));
         }
@@ -1835,7 +1926,7 @@ fn fn_struct_insert(args: Vec<CfmlValue>) -> CfmlResult {
             if let Some(actual_key) = struct_find_key_ci(&result, &key) {
                 if actual_key != key {
                     let owned_key = actual_key.to_string();
-                    result.remove(&owned_key);
+                    result.shift_remove(&owned_key);
                 }
             }
             result.insert(key, args[2].clone());
@@ -1876,7 +1967,7 @@ fn fn_struct_find_key(args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn struct_find_key_recursive(
-    s: &HashMap<String, CfmlValue>,
+    s: &IndexMap<String, CfmlValue>,
     search_key: &str,
     path: &str,
     scope: &str,
@@ -1886,7 +1977,7 @@ fn struct_find_key_recursive(
     for (k, v) in s {
         let current_path = if path.is_empty() { k.clone() } else { format!("{}.{}", path, k) };
         if k.to_lowercase() == search_lower {
-            let mut result_struct = HashMap::new();
+            let mut result_struct = IndexMap::new();
             result_struct.insert("owner".to_string(), CfmlValue::Struct(s.clone()));
             result_struct.insert("path".to_string(), CfmlValue::String(current_path.clone()));
             result_struct.insert("value".to_string(), v.clone());
@@ -1923,7 +2014,7 @@ fn fn_struct_find_value(args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn struct_find_value_recursive(
-    s: &HashMap<String, CfmlValue>,
+    s: &IndexMap<String, CfmlValue>,
     search_value: &str,
     path: &str,
     scope: &str,
@@ -1933,7 +2024,7 @@ fn struct_find_value_recursive(
     for (k, v) in s {
         let current_path = if path.is_empty() { k.clone() } else { format!("{}.{}", path, k) };
         if v.as_string().to_lowercase() == search_lower {
-            let mut result_struct = HashMap::new();
+            let mut result_struct = IndexMap::new();
             result_struct.insert("owner".to_string(), CfmlValue::Struct(s.clone()));
             result_struct.insert("path".to_string(), CfmlValue::String(current_path.clone()));
             result_struct.insert("key".to_string(), CfmlValue::String(k.clone()));
@@ -1957,13 +2048,13 @@ fn struct_find_value_recursive(
 }
 
 fn fn_struct_clear(_args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(CfmlValue::Struct(HashMap::new()))
+    Ok(CfmlValue::Struct(IndexMap::new()))
 }
 
 fn fn_struct_copy(args: Vec<CfmlValue>) -> CfmlResult {
     match args.first() {
         Some(CfmlValue::Struct(s)) => Ok(CfmlValue::Struct(s.clone())),
-        _ => Ok(CfmlValue::Struct(HashMap::new())),
+        _ => Ok(CfmlValue::Struct(IndexMap::new())),
     }
 }
 
@@ -1980,7 +2071,7 @@ fn fn_struct_append(args: Vec<CfmlValue>) -> CfmlResult {
             return Ok(CfmlValue::Struct(result));
         }
     }
-    Ok(args.into_iter().next().unwrap_or(CfmlValue::Struct(HashMap::new())))
+    Ok(args.into_iter().next().unwrap_or(CfmlValue::Struct(IndexMap::new())))
 }
 
 fn fn_struct_is_empty(args: Vec<CfmlValue>) -> CfmlResult {
@@ -2026,9 +2117,9 @@ fn fn_is_struct(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_struct_get(args: Vec<CfmlValue>) -> CfmlResult {
     let path = get_str(&args, 0);
     let parts: Vec<&str> = path.split('.').collect();
-    let mut current = CfmlValue::Struct(HashMap::new());
+    let mut current = CfmlValue::Struct(IndexMap::new());
     for part in parts.iter().rev() {
-        let mut s = HashMap::new();
+        let mut s = IndexMap::new();
         s.insert(part.to_string(), current);
         current = CfmlValue::Struct(s);
     }
@@ -2084,7 +2175,7 @@ fn fn_struct_equals(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_struct_key_translate(args: Vec<CfmlValue>) -> CfmlResult {
     if let Some(CfmlValue::Struct(s)) = args.first() {
         let retain = args.get(1).map(|v| v.is_true()).unwrap_or(false);
-        let mut result = HashMap::new();
+        let mut result = IndexMap::new();
         for (k, v) in s {
             let new_key = if retain { k.clone() } else { k.to_lowercase() };
             result.insert(new_key, v.clone());
@@ -2147,7 +2238,11 @@ fn fn_is_query(args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn fn_is_object(args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(CfmlValue::Bool(matches!(args.first(), Some(CfmlValue::Component(_)))))
+    Ok(CfmlValue::Bool(match args.first() {
+        Some(CfmlValue::Component(_)) => true,
+        Some(CfmlValue::Struct(s)) => s.contains_key("__name"),
+        _ => false,
+    }))
 }
 
 fn fn_is_binary(args: Vec<CfmlValue>) -> CfmlResult {
@@ -3139,7 +3234,7 @@ fn fn_get_tick_count(_args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_get_function_list(_args: Vec<CfmlValue>) -> CfmlResult {
     // Return a struct of all registered builtin function names
     // Keys are function names, values are empty strings (matching CFML behavior)
-    let mut result = std::collections::HashMap::new();
+    let mut result = IndexMap::new();
     for (name, _) in get_builtin_functions() {
         result.insert(name, CfmlValue::String(String::new()));
     }
@@ -3154,7 +3249,7 @@ fn fn_get_context_root(_args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_get_page_context(_args: Vec<CfmlValue>) -> CfmlResult {
     // Stub: getPageContext() returns a Java PageContext in ACF/Lucee.
     // We return a struct with common methods as stubs.
-    let mut ctx = std::collections::HashMap::new();
+    let mut ctx = IndexMap::new();
     ctx.insert("getRequest".to_string(), CfmlValue::Null);
     ctx.insert("getResponse".to_string(), CfmlValue::Null);
     Ok(CfmlValue::Struct(ctx))
@@ -3485,7 +3580,7 @@ fn serde_json_to_cfml(value: serde_json::Value) -> CfmlValue {
             CfmlValue::Array(arr.into_iter().map(serde_json_to_cfml).collect())
         }
         serde_json::Value::Object(obj) => {
-            let mut map = HashMap::new();
+            let mut map = IndexMap::new();
             for (k, v) in obj {
                 map.insert(k, serde_json_to_cfml(v));
             }
@@ -3528,7 +3623,7 @@ fn fn_query_add_row(args: Vec<CfmlValue>) -> CfmlResult {
             match &args[1] {
                 CfmlValue::Int(n) => *n as usize,
                 CfmlValue::Struct(data) => {
-                    let mut row = HashMap::new();
+                    let mut row = IndexMap::new();
                     for (k, v) in data {
                         row.insert(k.clone(), v.clone());
                     }
@@ -3540,7 +3635,7 @@ fn fn_query_add_row(args: Vec<CfmlValue>) -> CfmlResult {
                         if let CfmlValue::Struct(data) = item {
                             result.rows.push(data.clone());
                         } else {
-                            result.rows.push(HashMap::new());
+                            result.rows.push(IndexMap::new());
                         }
                     }
                     return Ok(CfmlValue::Query(result));
@@ -3551,7 +3646,7 @@ fn fn_query_add_row(args: Vec<CfmlValue>) -> CfmlResult {
             1
         };
         for _ in 0..num_rows {
-            result.rows.push(HashMap::new());
+            result.rows.push(IndexMap::new());
         }
         Ok(CfmlValue::Query(result))
     } else {
@@ -3680,7 +3775,7 @@ fn fn_query_delete_column(args: Vec<CfmlValue>) -> CfmlResult {
             for row in &mut result.rows {
                 let key_to_remove: Option<String> = row.keys().find(|k| k.to_lowercase() == col_name).cloned();
                 if let Some(key) = key_to_remove {
-                    row.remove(&key);
+                    row.shift_remove(&key);
                 }
             }
             return Ok(CfmlValue::Query(result));
@@ -3721,7 +3816,7 @@ fn fn_sleep(args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
-    let mut meta = HashMap::new();
+    let mut meta = IndexMap::new();
     if let Some(val) = args.first() {
         match val {
             CfmlValue::Struct(s) => {
@@ -3735,7 +3830,7 @@ fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
                 // Extract __extends info
                 if let Some(CfmlValue::Array(chain)) = s.get("__extends_chain") {
                     if let Some(first) = chain.first() {
-                        let mut extends_meta = HashMap::new();
+                        let mut extends_meta = IndexMap::new();
                         extends_meta.insert("name".to_string(), first.clone());
                         meta.insert("extends".to_string(), CfmlValue::Struct(extends_meta));
                     }
@@ -3756,7 +3851,7 @@ fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
                 for (k, v) in s {
                     if k.starts_with("__") { continue; }
                     if let CfmlValue::Function(f) = v {
-                        let mut func_meta = HashMap::new();
+                        let mut func_meta = IndexMap::new();
                         func_meta.insert("name".to_string(), CfmlValue::String(k.clone()));
                         func_meta.insert("access".to_string(), CfmlValue::String(
                             match f.access {
@@ -3771,7 +3866,7 @@ fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
                         }
                         // Parameter details
                         let params: Vec<CfmlValue> = f.params.iter().map(|p| {
-                            let mut pm = HashMap::new();
+                            let mut pm = IndexMap::new();
                             pm.insert("name".to_string(), CfmlValue::String(p.name.clone()));
                             if let Some(ref t) = p.param_type {
                                 pm.insert("type".to_string(), CfmlValue::String(t.clone()));
@@ -3798,7 +3893,7 @@ fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
                 for (k, v) in s {
                     if k.starts_with("__") { continue; }
                     if matches!(v, CfmlValue::Function(_)) { continue; }
-                    let mut prop_meta = HashMap::new();
+                    let mut prop_meta = IndexMap::new();
                     prop_meta.insert("name".to_string(), CfmlValue::String(k.clone()));
                     prop_meta.insert("type".to_string(), CfmlValue::String(v.type_name().to_string()));
                     properties.push(CfmlValue::Struct(prop_meta));
@@ -3819,7 +3914,7 @@ fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
                     meta.insert("returnType".to_string(), CfmlValue::String(rt.clone()));
                 }
                 let params: Vec<CfmlValue> = f.params.iter().map(|p| {
-                    let mut pm = HashMap::new();
+                    let mut pm = IndexMap::new();
                     pm.insert("name".to_string(), CfmlValue::String(p.name.clone()));
                     if let Some(ref t) = p.param_type {
                         pm.insert("type".to_string(), CfmlValue::String(t.clone()));
@@ -3918,7 +4013,7 @@ fn fn_create_object(args: Vec<CfmlValue>) -> CfmlResult {
     if args.len() >= 2 {
         let obj_type = args[0].as_string().to_lowercase();
         if obj_type == "component" {
-            let mut s = HashMap::new();
+            let mut s = IndexMap::new();
             s.insert("__createObject".to_string(), CfmlValue::String(args[1].as_string()));
             return Ok(CfmlValue::Struct(s));
         }
@@ -4185,7 +4280,7 @@ fn fn_get_file_info(args: Vec<CfmlValue>) -> CfmlResult {
     let meta = std::fs::metadata(path)
         .map_err(|e| CfmlError::runtime(format!("getFileInfo: {}", e)))?;
 
-    let mut info = HashMap::new();
+    let mut info = IndexMap::new();
     info.insert("name".to_string(), CfmlValue::String(
         path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
     ));
@@ -4238,7 +4333,7 @@ fn fn_get_current_template_path(_args: Vec<CfmlValue>) -> CfmlResult {
 
 fn fn_get_component_metadata(_args: Vec<CfmlValue>) -> CfmlResult {
     // Stub — VM intercepts this call to resolve component metadata
-    Ok(CfmlValue::Struct(HashMap::new()))
+    Ok(CfmlValue::Struct(IndexMap::new()))
 }
 
 // ===============================================
@@ -4441,7 +4536,7 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
         request.call()
     };
 
-    let mut result_struct: HashMap<String, CfmlValue> = HashMap::new();
+    let mut result_struct: IndexMap<String, CfmlValue> = IndexMap::new();
 
     match response {
         Ok(resp) => {
@@ -4450,7 +4545,7 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
             let http_version = resp.http_version().to_string();
             let content_type = resp.content_type().to_string();
 
-            let mut resp_headers: HashMap<String, CfmlValue> = HashMap::new();
+            let mut resp_headers: IndexMap<String, CfmlValue> = IndexMap::new();
             for name in resp.headers_names() {
                 if let Some(val) = resp.header(&name) {
                     resp_headers.insert(name, CfmlValue::String(val.to_string()));
@@ -4477,7 +4572,7 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
             let http_version = resp.http_version().to_string();
             let content_type = resp.content_type().to_string();
 
-            let mut resp_headers: HashMap<String, CfmlValue> = HashMap::new();
+            let mut resp_headers: IndexMap<String, CfmlValue> = IndexMap::new();
             for name in resp.headers_names() {
                 if let Some(val) = resp.header(&name) {
                     resp_headers.insert(name, CfmlValue::String(val.to_string()));
@@ -4506,7 +4601,7 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
             result_struct.insert("fileContent".to_string(), CfmlValue::String(String::new()));
             result_struct.insert("mimeType".to_string(), CfmlValue::String(String::new()));
             result_struct.insert("charset".to_string(), CfmlValue::String("UTF-8".to_string()));
-            result_struct.insert("responseHeader".to_string(), CfmlValue::Struct(HashMap::new()));
+            result_struct.insert("responseHeader".to_string(), CfmlValue::Struct(IndexMap::new()));
             result_struct.insert("errorDetail".to_string(), CfmlValue::String(e.to_string()));
             result_struct.insert("HTTP_Version".to_string(), CfmlValue::String(String::new()));
         }
@@ -4981,9 +5076,9 @@ fn execute_sqlite(path: &str, sql: &str, params_arg: &CfmlValue, return_type: &s
             .map(|i| stmt.column_name(i).unwrap_or("?").to_string())
             .collect();
 
-        let rows_result: Result<Vec<HashMap<String, CfmlValue>>, _> = stmt
+        let rows_result: Result<Vec<IndexMap<String, CfmlValue>>, _> = stmt
             .query_map(rusqlite::params_from_iter(bound_params.iter()), |row| {
-                let mut row_map = HashMap::new();
+                let mut row_map = IndexMap::new();
                 for (i, col) in columns.iter().enumerate() {
                     let val: SqlValue = row.get_unwrap(i);
                     row_map.insert(col.clone(), sqlite_to_cfml(val));
@@ -5117,9 +5212,9 @@ fn execute_mysql(url: &str, sql: &str, params_arg: &CfmlValue, return_type: &str
             vec![]
         };
 
-        let mut rows: Vec<HashMap<String, CfmlValue>> = Vec::with_capacity(result.len());
+        let mut rows: Vec<IndexMap<String, CfmlValue>> = Vec::with_capacity(result.len());
         for row in &result {
-            let mut row_map = HashMap::new();
+            let mut row_map = IndexMap::new();
             for (i, col) in columns.iter().enumerate() {
                 let val: mysql::Value = row.get(i).unwrap_or(mysql::Value::NULL);
                 row_map.insert(col.clone(), mysql_value_to_cfml(val));
@@ -5202,9 +5297,9 @@ fn execute_postgres(url: &str, sql: &str, params_arg: &CfmlValue, return_type: &
             vec![]
         };
 
-        let mut result_rows: Vec<HashMap<String, CfmlValue>> = Vec::with_capacity(rows.len());
+        let mut result_rows: Vec<IndexMap<String, CfmlValue>> = Vec::with_capacity(rows.len());
         for row in &rows {
-            let mut row_map = HashMap::new();
+            let mut row_map = IndexMap::new();
             for (i, col) in columns.iter().enumerate() {
                 let val = postgres_row_to_cfml(row, i);
                 row_map.insert(col.clone(), val);
@@ -5452,9 +5547,9 @@ fn execute_mssql(url: &str, sql: &str, params_arg: &CfmlValue, return_type: &str
                 vec![]
             };
 
-            let mut rows: Vec<HashMap<String, CfmlValue>> = Vec::with_capacity(result.len());
+            let mut rows: Vec<IndexMap<String, CfmlValue>> = Vec::with_capacity(result.len());
             for row in &result {
-                let mut row_map = HashMap::new();
+                let mut row_map = IndexMap::new();
                 for (i, col) in columns.iter().enumerate() {
                     let val = mssql_column_to_cfml(row.get::<'_, &str, _>(i));
                     row_map.insert(col.clone(), val);
@@ -5710,9 +5805,9 @@ fn execute_sqlite_with_conn(conn: &rusqlite::Connection, sql: &str, params_arg: 
         let columns: Vec<String> = (0..column_count)
             .map(|i| stmt.column_name(i).unwrap_or("?").to_string())
             .collect();
-        let rows_result: Result<Vec<HashMap<String, CfmlValue>>, _> = stmt
+        let rows_result: Result<Vec<IndexMap<String, CfmlValue>>, _> = stmt
             .query_map(rusqlite::params_from_iter(bound_params.iter()), |row| {
-                let mut row_map = HashMap::new();
+                let mut row_map = IndexMap::new();
                 for (i, col) in columns.iter().enumerate() {
                     let val: SqlValue = row.get_unwrap(i);
                     row_map.insert(col.clone(), sqlite_to_cfml(val));
@@ -5762,9 +5857,9 @@ fn execute_mysql_with_conn(conn: &mut mysql::PooledConn, sql: &str, params_arg: 
         } else {
             vec![]
         };
-        let mut rows: Vec<HashMap<String, CfmlValue>> = Vec::with_capacity(result.len());
+        let mut rows: Vec<IndexMap<String, CfmlValue>> = Vec::with_capacity(result.len());
         for row in &result {
-            let mut row_map = HashMap::new();
+            let mut row_map = IndexMap::new();
             for (i, col) in columns.iter().enumerate() {
                 let val: mysql::Value = row.get(i).unwrap_or(mysql::Value::NULL);
                 row_map.insert(col.clone(), mysql_value_to_cfml(val));
@@ -5798,9 +5893,9 @@ fn execute_postgres_with_conn(client: &mut postgres::Client, sql: &str, params_a
         } else {
             vec![]
         };
-        let mut result_rows: Vec<HashMap<String, CfmlValue>> = Vec::with_capacity(rows.len());
+        let mut result_rows: Vec<IndexMap<String, CfmlValue>> = Vec::with_capacity(rows.len());
         for row in &rows {
-            let mut row_map = HashMap::new();
+            let mut row_map = IndexMap::new();
             for (i, col) in columns.iter().enumerate() {
                 let val = postgres_row_to_cfml(row, i);
                 row_map.insert(col.clone(), val);
@@ -5820,7 +5915,7 @@ fn execute_postgres_with_conn(client: &mut postgres::Client, sql: &str, params_a
 // -----------------------------------------------
 
 #[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
-fn build_query_result(columns: Vec<String>, rows: Vec<HashMap<String, CfmlValue>>, sql: &str, return_type: &str) -> CfmlResult {
+fn build_query_result(columns: Vec<String>, rows: Vec<IndexMap<String, CfmlValue>>, sql: &str, return_type: &str) -> CfmlResult {
     if return_type == "array" {
         let arr: Vec<CfmlValue> = rows.into_iter()
             .map(|r| CfmlValue::Struct(r))
@@ -5838,7 +5933,7 @@ fn build_query_result(columns: Vec<String>, rows: Vec<HashMap<String, CfmlValue>
 
 #[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
 fn build_mutation_result(affected: i64, last_id: i64) -> CfmlResult {
-    let mut result = HashMap::new();
+    let mut result = IndexMap::new();
     result.insert("recordCount".to_string(), CfmlValue::Int(affected));
     result.insert("generatedKey".to_string(), CfmlValue::Int(last_id));
     Ok(CfmlValue::Struct(result))
@@ -5911,7 +6006,7 @@ fn fn_cfdirectory(args: Vec<CfmlValue>) -> CfmlResult {
     };
 
     // Case-insensitive key lookup helper
-    fn get_ci<'a>(s: &'a HashMap<String, CfmlValue>, key: &str) -> Option<&'a CfmlValue> {
+    fn get_ci<'a>(s: &'a IndexMap<String, CfmlValue>, key: &str) -> Option<&'a CfmlValue> {
         let key_lower = key.to_lowercase();
         for (k, v) in s {
             if k.to_lowercase() == key_lower {
@@ -5952,7 +6047,7 @@ fn fn_cfdirectory(args: Vec<CfmlValue>) -> CfmlResult {
                 "size".to_string(),
                 "datelastmodified".to_string(),
             ];
-            let mut rows: Vec<HashMap<String, CfmlValue>> = Vec::new();
+            let mut rows: Vec<IndexMap<String, CfmlValue>> = Vec::new();
 
             fn matches_glob(name: &str, pattern: &str) -> bool {
                 if pattern == "*" {
@@ -5969,7 +6064,7 @@ fn fn_cfdirectory(args: Vec<CfmlValue>) -> CfmlResult {
                 dir: &Path,
                 filter: &str,
                 recurse: bool,
-                rows: &mut Vec<HashMap<String, CfmlValue>>,
+                rows: &mut Vec<IndexMap<String, CfmlValue>>,
             ) -> Result<(), CfmlError> {
                 let entries = fs::read_dir(dir).map_err(|e| {
                     CfmlError::runtime(format!("cfdirectory: cannot read directory: {}", e))
@@ -6013,7 +6108,7 @@ fn fn_cfdirectory(args: Vec<CfmlValue>) -> CfmlResult {
                     let should_include = is_dir || matches_glob(&name, filter);
 
                     if should_include {
-                        let mut row = HashMap::new();
+                        let mut row = IndexMap::new();
                         row.insert("name".into(), CfmlValue::String(name.clone()));
                         row.insert(
                             "directory".into(),
@@ -6577,20 +6672,20 @@ fn fn_xml_parse(args: Vec<CfmlValue>) -> CfmlResult {
     let xml_str = get_str(&args, 0);
     let mut reader = Reader::from_str(&xml_str);
 
-    let mut stack: Vec<HashMap<String, CfmlValue>> = Vec::new();
-    let mut root: Option<HashMap<String, CfmlValue>> = None;
+    let mut stack: Vec<IndexMap<String, CfmlValue>> = Vec::new();
+    let mut root: Option<IndexMap<String, CfmlValue>> = None;
 
     loop {
         match reader.read_event() {
             Ok(Event::Start(ref e)) => {
-                let mut element = HashMap::new();
+                let mut element = IndexMap::new();
                 let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 element.insert("xmlName".to_string(), CfmlValue::String(tag_name));
                 element.insert("xmlType".to_string(), CfmlValue::String("ELEMENT".to_string()));
                 element.insert("xmlText".to_string(), CfmlValue::String(String::new()));
                 element.insert("xmlChildren".to_string(), CfmlValue::Array(Vec::new()));
 
-                let mut attrs = HashMap::new();
+                let mut attrs = IndexMap::new();
                 for attr in e.attributes().flatten() {
                     let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
                     let val = String::from_utf8_lossy(&attr.value).to_string();
@@ -6612,14 +6707,14 @@ fn fn_xml_parse(args: Vec<CfmlValue>) -> CfmlResult {
                 }
             }
             Ok(Event::Empty(ref e)) => {
-                let mut element = HashMap::new();
+                let mut element = IndexMap::new();
                 let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 element.insert("xmlName".to_string(), CfmlValue::String(tag_name));
                 element.insert("xmlType".to_string(), CfmlValue::String("ELEMENT".to_string()));
                 element.insert("xmlText".to_string(), CfmlValue::String(String::new()));
                 element.insert("xmlChildren".to_string(), CfmlValue::Array(Vec::new()));
 
-                let mut attrs = HashMap::new();
+                let mut attrs = IndexMap::new();
                 for attr in e.attributes().flatten() {
                     let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
                     let val = String::from_utf8_lossy(&attr.value).to_string();
@@ -6655,7 +6750,7 @@ fn fn_xml_parse(args: Vec<CfmlValue>) -> CfmlResult {
 
     match root {
         Some(root_element) => {
-            let mut doc = HashMap::new();
+            let mut doc = IndexMap::new();
             doc.insert("xmlRoot".to_string(), CfmlValue::Struct(root_element));
             doc.insert("xmlType".to_string(), CfmlValue::String("DOCUMENT".to_string()));
             Ok(CfmlValue::Struct(doc))
@@ -6923,7 +7018,7 @@ fn fn_array_range(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_array_to_struct(args: Vec<CfmlValue>) -> CfmlResult {
     match args.get(0) {
         Some(CfmlValue::Array(arr)) => {
-            let mut map = HashMap::new();
+            let mut map = IndexMap::new();
             for (i, val) in arr.iter().enumerate() {
                 map.insert((i + 1).to_string(), val.clone());
             }
@@ -6960,7 +7055,7 @@ fn fn_struct_to_sorted(args: Vec<CfmlValue>) -> CfmlResult {
             } else {
                 keys.sort();
             }
-            let mut result = HashMap::new();
+            let mut result = IndexMap::new();
             for key in keys {
                 if let Some(val) = s.get(&key) {
                     result.insert(key, val.clone());
@@ -7156,7 +7251,7 @@ fn fn_query_slice(args: Vec<CfmlValue>) -> CfmlResult {
 
 fn fn_query_get_result(_args: Vec<CfmlValue>) -> CfmlResult {
     // Returns metadata about last query execution
-    let mut result = HashMap::new();
+    let mut result = IndexMap::new();
     result.insert("sql".to_string(), CfmlValue::String(String::new()));
     result.insert("cached".to_string(), CfmlValue::Bool(false));
     result.insert("executionTime".to_string(), CfmlValue::Int(0));
@@ -7284,7 +7379,7 @@ fn fn_application_stop(_args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn fn_get_application_metadata(_args: Vec<CfmlValue>) -> CfmlResult {
-    let mut meta = HashMap::new();
+    let mut meta = IndexMap::new();
     meta.insert("name".to_string(), CfmlValue::String(String::new()));
     Ok(CfmlValue::Struct(meta))
 }
@@ -7374,7 +7469,7 @@ fn fn_file_open(args: Vec<CfmlValue>) -> CfmlResult {
     let path = get_str(&args, 0);
     let _mode = if args.len() > 1 { get_str(&args, 1) } else { "read".to_string() };
     // Return a struct representing the file handle
-    let mut handle = HashMap::new();
+    let mut handle = IndexMap::new();
     handle.insert("path".to_string(), CfmlValue::String(path));
     handle.insert("isOpen".to_string(), CfmlValue::Bool(true));
     handle.insert("line".to_string(), CfmlValue::Int(0));
@@ -7487,7 +7582,7 @@ fn fn_file_upload(args: Vec<CfmlValue>) -> CfmlResult {
 
     // This is a stub — real implementation requires VM access to the form scope
     // to find the uploaded file's temp path. The VM intercepts this.
-    let mut result = HashMap::new();
+    let mut result = IndexMap::new();
     result.insert("serverDirectory".to_string(), CfmlValue::String(destination));
     result.insert("nameConflict".to_string(), CfmlValue::String(name_conflict));
     result.insert("fileWasSaved".to_string(), CfmlValue::Bool(false));
@@ -7500,7 +7595,7 @@ fn fn_file_upload_all(args: Vec<CfmlValue>) -> CfmlResult {
     let _accept = if args.len() > 1 { get_str(&args, 1) } else { String::new() };
     let _name_conflict = if args.len() > 2 { get_str(&args, 2).to_lowercase() } else { "error".to_string() };
 
-    let mut result = HashMap::new();
+    let mut result = IndexMap::new();
     result.insert("serverDirectory".to_string(), CfmlValue::String(destination));
     result.insert("fileWasSaved".to_string(), CfmlValue::Bool(false));
     Ok(CfmlValue::Struct(result))
@@ -7513,5 +7608,95 @@ fn fn_cffile_upload(args: Vec<CfmlValue>) -> CfmlResult {
 
 /// Stub for session/auth functions — VM intercepts these
 fn fn_session_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Ok(CfmlValue::Null)
+}
+
+// ===============================================
+// STRUCT METADATA FUNCTIONS
+// ===============================================
+
+fn fn_struct_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.is_empty() {
+        return Err(CfmlError::runtime("structGetMetadata requires a struct argument".to_string()));
+    }
+    // All RustCFML structs are unordered and case-insensitive
+    let mut meta = IndexMap::new();
+    meta.insert("ordered".to_string(), CfmlValue::Bool(false));
+    meta.insert("casesensitive".to_string(), CfmlValue::Bool(false));
+    Ok(CfmlValue::Struct(meta))
+}
+
+fn fn_struct_set_metadata(_args: Vec<CfmlValue>) -> CfmlResult {
+    // No-op: we don't support ordered/case-sensitive structs yet
+    Ok(CfmlValue::Null)
+}
+
+// ===============================================
+// FILE ATTRIBUTE FUNCTIONS
+// ===============================================
+
+fn fn_file_set_access_mode(args: Vec<CfmlValue>) -> CfmlResult {
+    let path = get_str(&args, 0);
+    let mode_str = get_str(&args, 1);
+    if path.is_empty() || mode_str.is_empty() {
+        return Err(CfmlError::runtime("fileSetAccessMode requires path and mode arguments".to_string()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = u32::from_str_radix(&mode_str, 8)
+            .map_err(|_| CfmlError::runtime(format!("Invalid mode '{}': expected octal like '644'", mode_str)))?;
+        let perms = std::fs::Permissions::from_mode(mode);
+        std::fs::set_permissions(&path, perms)
+            .map_err(|e| CfmlError::runtime(format!("fileSetAccessMode failed: {}", e)))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode_str;
+        // On non-Unix platforms, this is a no-op
+    }
+    Ok(CfmlValue::Null)
+}
+
+fn fn_file_set_attribute(args: Vec<CfmlValue>) -> CfmlResult {
+    let path = get_str(&args, 0);
+    let attribute = get_str(&args, 1).to_lowercase();
+    if path.is_empty() {
+        return Err(CfmlError::runtime("fileSetAttribute requires path and attribute arguments".to_string()));
+    }
+    let metadata = std::fs::metadata(&path)
+        .map_err(|e| CfmlError::runtime(format!("fileSetAttribute failed: {}", e)))?;
+    let mut perms = metadata.permissions();
+    match attribute.as_str() {
+        "readonly" => perms.set_readonly(true),
+        "normal" => perms.set_readonly(false),
+        _ => {} // Ignore unsupported attributes
+    }
+    std::fs::set_permissions(&path, perms)
+        .map_err(|e| CfmlError::runtime(format!("fileSetAttribute failed: {}", e)))?;
+    Ok(CfmlValue::Null)
+}
+
+fn fn_file_set_last_modified(args: Vec<CfmlValue>) -> CfmlResult {
+    let path = get_str(&args, 0);
+    if path.is_empty() {
+        return Err(CfmlError::runtime("fileSetLastModified requires a path argument".to_string()));
+    }
+    // Parse the date argument — try to parse as date string, or use current time
+    let modified_time = if let Some(date_val) = args.get(1) {
+        let date_str = date_val.as_string();
+        if let Some(dt) = parse_cfml_date(&date_str) {
+            let secs = dt.and_utc().timestamp();
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64)
+        } else {
+            std::time::SystemTime::now()
+        }
+    } else {
+        std::time::SystemTime::now()
+    };
+    let file = std::fs::File::open(&path)
+        .map_err(|e| CfmlError::runtime(format!("fileSetLastModified failed: {}", e)))?;
+    file.set_modified(modified_time)
+        .map_err(|e| CfmlError::runtime(format!("fileSetLastModified failed: {}", e)))?;
     Ok(CfmlValue::Null)
 }

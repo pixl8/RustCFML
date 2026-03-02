@@ -2,6 +2,7 @@ mod rewrite;
 
 use clap::Parser;
 use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -140,7 +141,7 @@ fn execute_code(source: &str, debug: bool) {
 }
 
 fn execute_code_with_file(source: &str, debug: bool, source_file: Option<String>) {
-    match compile_and_run(source, debug, source_file, HashMap::new(), None, None, None) {
+    match compile_and_run(source, debug, source_file, IndexMap::new(), None, None, None) {
         Ok(response) => {
             if !response.output.is_empty() {
                 print!("{}", response.output);
@@ -159,7 +160,7 @@ fn compile_and_run_with_session(
     source: &str,
     debug: bool,
     source_file: Option<String>,
-    extra_globals: HashMap<String, CfmlValue>,
+    extra_globals: IndexMap<String, CfmlValue>,
     server_state: Option<&ServerState>,
     http_request_data: Option<CfmlValue>,
     session_id: Option<String>,
@@ -171,7 +172,7 @@ fn compile_and_run(
     source: &str,
     debug: bool,
     source_file: Option<String>,
-    extra_globals: HashMap<String, CfmlValue>,
+    extra_globals: IndexMap<String, CfmlValue>,
     server_state: Option<&ServerState>,
     http_request_data: Option<CfmlValue>,
     session_id: Option<String>,
@@ -269,9 +270,9 @@ fn compile_and_run(
     vm.query_execute_fn = Some(cfml_stdlib::builtins::fn_query_execute);
 
     // Ensure web scopes always exist (CFML guarantees url/cgi/form are always defined)
-    vm.globals.entry("url".to_string()).or_insert_with(|| CfmlValue::Struct(HashMap::new()));
-    vm.globals.entry("cgi".to_string()).or_insert_with(|| CfmlValue::Struct(HashMap::new()));
-    vm.globals.entry("form".to_string()).or_insert_with(|| CfmlValue::Struct(HashMap::new()));
+    vm.globals.entry("url".to_string()).or_insert_with(|| CfmlValue::Struct(IndexMap::new()));
+    vm.globals.entry("cgi".to_string()).or_insert_with(|| CfmlValue::Struct(IndexMap::new()));
+    vm.globals.entry("form".to_string()).or_insert_with(|| CfmlValue::Struct(IndexMap::new()));
 
     // Inject extra globals (web scopes, etc.) — overrides defaults above in serve mode
     for (name, value) in extra_globals {
@@ -701,11 +702,11 @@ fn build_web_scopes(
     path_info: &str,
     query_string: &str,
     port: u16,
-) -> (HashMap<String, CfmlValue>, CfmlValue) {
-    let mut globals = HashMap::new();
+) -> (IndexMap<String, CfmlValue>, CfmlValue) {
+    let mut globals = IndexMap::new();
 
     // CGI scope
-    let mut cgi = HashMap::new();
+    let mut cgi = IndexMap::new();
     cgi.insert("request_method".to_string(), CfmlValue::String(method.to_string()));
     let path_info = if path_info.is_empty() { "/" } else { path_info };
     cgi.insert("path_info".to_string(), CfmlValue::String(path_info.to_string()));
@@ -746,13 +747,13 @@ fn build_web_scopes(
     } else if method == "POST" && content_type.starts_with("multipart/form-data") {
         parse_multipart_sync(&content_type, body)
     } else {
-        HashMap::new()
+        IndexMap::new()
     };
     globals.insert("form".to_string(), CfmlValue::Struct(form_scope));
 
     // Cookie scope — parsed from Cookie header
     let cookie_scope = {
-        let mut cookies = HashMap::new();
+        let mut cookies = IndexMap::new();
         for (name, value) in headers {
             if name.to_lowercase() == "cookie" {
                 for cookie in value.split(';') {
@@ -770,12 +771,12 @@ fn build_web_scopes(
     globals.insert("cookie".to_string(), CfmlValue::Struct(cookie_scope));
 
     // Build full HTTP request data
-    let mut headers_struct = HashMap::new();
+    let mut headers_struct = IndexMap::new();
     for (name, value) in headers {
         headers_struct.insert(name.clone(), CfmlValue::String(value.clone()));
     }
 
-    let mut http_request_data = HashMap::new();
+    let mut http_request_data = IndexMap::new();
     http_request_data.insert("headers".to_string(), CfmlValue::Struct(headers_struct));
     http_request_data.insert("content".to_string(), CfmlValue::String(raw_body));
     http_request_data.insert("method".to_string(), CfmlValue::String(method.to_string()));
@@ -785,8 +786,8 @@ fn build_web_scopes(
 }
 
 /// Parse a query string like "name=World&id=1" into a HashMap.
-fn parse_query_string(qs: &str) -> HashMap<String, CfmlValue> {
-    let mut map = HashMap::new();
+fn parse_query_string(qs: &str) -> IndexMap<String, CfmlValue> {
+    let mut map = IndexMap::new();
     if qs.is_empty() {
         return map;
     }
@@ -836,8 +837,8 @@ fn url_decode(s: &str) -> String {
 /// Parse multipart/form-data body synchronously.
 /// Extracts form fields and file uploads into the form scope.
 /// File uploads are stored as structs with file metadata + temp path.
-fn parse_multipart_sync(content_type: &str, body: &[u8]) -> HashMap<String, CfmlValue> {
-    let mut form = HashMap::new();
+fn parse_multipart_sync(content_type: &str, body: &[u8]) -> IndexMap<String, CfmlValue> {
+    let mut form = IndexMap::new();
 
     // Extract boundary from content-type
     let boundary = content_type
@@ -923,7 +924,7 @@ fn parse_multipart_sync(content_type: &str, body: &[u8]) -> HashMap<String, Cfml
             let temp_path = temp_dir.join(format!("cfupload_{}", fname));
             let _ = std::fs::write(&temp_path, part_body.as_bytes());
 
-            let mut file_info = HashMap::new();
+            let mut file_info = IndexMap::new();
             file_info.insert("serverFile".to_string(), CfmlValue::String(fname.clone()));
             file_info.insert("clientFile".to_string(), CfmlValue::String(fname.clone()));
             file_info.insert("serverDirectory".to_string(), CfmlValue::String(temp_dir.to_string_lossy().to_string()));

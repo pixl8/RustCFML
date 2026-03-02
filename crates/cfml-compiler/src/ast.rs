@@ -139,6 +139,7 @@ pub enum AssignOp {
     MinusEqual,
     StarEqual,
     SlashEqual,
+    PercentEqual,
     ConcatEqual,
 }
 

@@ -6,6 +6,8 @@ pub struct CfmlCompiler {
     pub program: BytecodeProgram,
     /// Stack of (break_placeholder_indices, continue_placeholder_indices) for loops
     loop_stack: Vec<(Vec<usize>, Vec<usize>)>,
+    /// Finally body to emit before rethrow (set when inside try-catch-finally)
+    current_finally: Option<Vec<Statement>>,
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +141,9 @@ pub enum BytecodeOp {
 
     // Safe variable load: returns Null for undefined vars (used by Elvis, null-safe, isNull)
     TryLoadLocal(String),
+
+    // Declare a variable as function-local (var keyword) — prevents writeback to parent scope
+    DeclareLocal(String),
 }
 
 impl CfmlCompiler {
@@ -153,6 +158,7 @@ impl CfmlCompiler {
                 }],
             },
             loop_stack: Vec::new(),
+            current_finally: None,
         }
     }
 
@@ -247,7 +253,9 @@ impl CfmlCompiler {
                     "structappend" | "structinsert" | "structdelete" | "structupdate" |
                     "structclear" | "arrayclear" | "arrayappend" | "arrayprepend" |
                     "arrayinsert" | "arrayinsertat" | "arraydeleteat" | "arraysort" |
-                    "arrayresize" | "arrayswap" | "arrayreverse" | "arrayset"
+                    "arrayresize" | "arrayswap" | "arrayreverse" | "arrayset" |
+                    "queryaddrow" | "querysetcell" | "queryaddcolumn" |
+                    "querydeleterow" | "querydeletecolumn" | "querysort"
                 ) && !call.arguments.is_empty();
             }
         }
@@ -289,6 +297,22 @@ impl CfmlCompiler {
                 instructions.push(BytecodeOp::SetProperty(access.member.clone()));
                 Self::emit_nested_writeback(&access.object, instructions);
             }
+            Expression::ArrayAccess(access) => {
+                // Stack has [modified_value]. We need to write it back into the parent collection.
+                // Load the parent collection, then the index, then SetIndex, then recurse.
+                // e.g. for `a.b[0][1] = val`: after inner SetIndex, stack has modified inner array.
+                // We need to: load a.b[0], swap, push 0-index, SetIndex → modified a.b, then write back a.b.
+                Self::emit_load_for_writeback(&access.array, instructions);
+                Self::compile_expression_static(&access.index, instructions);
+                // Stack: [modified_value, parent_collection, index]
+                // We need: [value_to_set, collection, index] for SetIndex
+                // Rearrange: rotate so modified_value goes under collection
+                // Actually SetIndex wants [value, collection, index] bottom-to-top
+                // Current: [modified_value, parent_collection, index]
+                // That's already correct for SetIndex
+                instructions.push(BytecodeOp::SetIndex);
+                Self::emit_nested_writeback(&access.array, instructions);
+            }
             _ => {
                 instructions.push(BytecodeOp::Pop);
             }
@@ -309,8 +333,39 @@ impl CfmlCompiler {
                 Self::emit_load_for_writeback(&access.object, instructions);
                 instructions.push(BytecodeOp::GetProperty(access.member.clone()));
             }
+            Expression::ArrayAccess(access) => {
+                // For nested access like loading "s.a[0]", we load s.a then get index 0
+                Self::emit_load_for_writeback(&access.array, instructions);
+                Self::compile_expression_static(&access.index, instructions);
+                instructions.push(BytecodeOp::GetIndex);
+            }
             _ => {
                 // Can't load this expression for writeback
+                instructions.push(BytecodeOp::Null);
+            }
+        }
+    }
+
+    /// Static helper to compile an expression into instructions (for use in static methods)
+    fn compile_expression_static(expr: &Expression, instructions: &mut Vec<BytecodeOp>) {
+        match expr {
+            Expression::Literal(lit) => {
+                match &lit.value {
+                    LiteralValue::String(s) => instructions.push(BytecodeOp::String(s.clone())),
+                    LiteralValue::Int(i) => instructions.push(BytecodeOp::Integer(*i)),
+                    LiteralValue::Double(d) => instructions.push(BytecodeOp::Double(*d)),
+                    LiteralValue::Bool(b) => instructions.push(if *b { BytecodeOp::True } else { BytecodeOp::False }),
+                    LiteralValue::Null => instructions.push(BytecodeOp::Null),
+                }
+            }
+            Expression::Identifier(ident) => {
+                instructions.push(BytecodeOp::LoadLocal(ident.name.clone()));
+            }
+            Expression::This(_) => {
+                instructions.push(BytecodeOp::LoadLocal("this".to_string()));
+            }
+            _ => {
+                // For complex expressions, emit Null as fallback
                 instructions.push(BytecodeOp::Null);
             }
         }
@@ -383,6 +438,7 @@ impl CfmlCompiler {
                 }
             }
             Statement::Var(var) => {
+                instructions.push(BytecodeOp::DeclareLocal(var.name.clone()));
                 if let Some(value) = &var.value {
                     self.compile_expression(value, instructions);
                 } else {
@@ -438,6 +494,17 @@ impl CfmlCompiler {
                         let len = instructions.len();
                         instructions.swap(len - 2, len - 1);
                         instructions.push(BytecodeOp::Div);
+                    }
+                    AssignOp::PercentEqual => {
+                        match &assign.target {
+                            AssignTarget::Variable(name) => {
+                                instructions.push(BytecodeOp::LoadLocal(name.clone()));
+                            }
+                            _ => {}
+                        }
+                        let len = instructions.len();
+                        instructions.swap(len - 2, len - 1);
+                        instructions.push(BytecodeOp::Mod);
                     }
                     AssignOp::ConcatEqual => {
                         match &assign.target {
@@ -532,6 +599,12 @@ impl CfmlCompiler {
                 instructions.push(BytecodeOp::Throw);
             }
             Statement::Rethrow(_loc) => {
+                // Emit finally body before rethrow if we're inside a try-catch-finally
+                if let Some(ref finally_body) = self.current_finally.clone() {
+                    for s in finally_body {
+                        self.compile_statement(s, instructions);
+                    }
+                }
                 instructions.push(BytecodeOp::Rethrow);
             }
             Statement::FunctionDecl(func_decl) => {
@@ -557,6 +630,12 @@ impl CfmlCompiler {
             }
             Statement::Exit => {
                 instructions.push(BytecodeOp::Halt);
+            }
+            Statement::Output(output) => {
+                // Compile each statement in the output block body
+                for body_stmt in &output.body {
+                    self.compile_statement(body_stmt, instructions);
+                }
             }
             _ => {}
         }
@@ -863,6 +942,12 @@ impl CfmlCompiler {
         let catch_start = instructions.len();
         instructions[try_start_idx] = BytecodeOp::TryStart(catch_start);
 
+        // Set current_finally so that rethrow can emit finally body first
+        let prev_finally = self.current_finally.take();
+        if let Some(ref finally_body) = try_stmt.finally_body {
+            self.current_finally = Some(finally_body.clone());
+        }
+
         for catch in &try_stmt.catches {
             // The error value will be on the stack
             instructions.push(BytecodeOp::StoreLocal(catch.var_name.clone()));
@@ -871,6 +956,9 @@ impl CfmlCompiler {
                 self.compile_statement(s, instructions);
             }
         }
+
+        // Restore previous finally context
+        self.current_finally = prev_finally;
 
         let end_pos = instructions.len();
         instructions[jump_over_catch] = BytecodeOp::Jump(end_pos);
@@ -886,6 +974,27 @@ impl CfmlCompiler {
     fn compile_function_decl(&mut self, func: &Function, instructions: &mut Vec<BytecodeOp>) {
         // Compile the function body into a separate BytecodeFunction
         let mut func_instructions = Vec::new();
+
+        // Emit default parameter value preamble:
+        // For each param with a default, if the arg is null, assign the default
+        // and also update the arguments scope
+        for param in &func.params {
+            if let Some(ref default_expr) = param.default {
+                func_instructions.push(BytecodeOp::LoadLocal(param.name.clone()));
+                func_instructions.push(BytecodeOp::IsNull);
+                let jump_idx = func_instructions.len();
+                func_instructions.push(BytecodeOp::JumpIfFalse(0)); // placeholder
+                // Set the local variable
+                self.compile_expression(default_expr, &mut func_instructions);
+                func_instructions.push(BytecodeOp::StoreLocal(param.name.clone()));
+                // Also update the arguments scope
+                func_instructions.push(BytecodeOp::LoadLocal("arguments".to_string()));
+                func_instructions.push(BytecodeOp::LoadLocal(param.name.clone()));
+                func_instructions.push(BytecodeOp::SetProperty(param.name.clone()));
+                func_instructions.push(BytecodeOp::StoreLocal("arguments".to_string()));
+                func_instructions[jump_idx] = BytecodeOp::JumpIfFalse(func_instructions.len());
+            }
+        }
 
         for s in &func.body {
             self.compile_statement(s, &mut func_instructions);
@@ -1480,6 +1589,23 @@ impl CfmlCompiler {
             Expression::Closure(closure) => {
                 // Compile closure body into separate function
                 let mut func_instructions = Vec::new();
+                // Emit default parameter value preamble for closures
+                for param in &closure.params {
+                    if let Some(ref default_expr) = param.default {
+                        func_instructions.push(BytecodeOp::LoadLocal(param.name.clone()));
+                        func_instructions.push(BytecodeOp::IsNull);
+                        let jump_idx = func_instructions.len();
+                        func_instructions.push(BytecodeOp::JumpIfFalse(0));
+                        self.compile_expression(default_expr, &mut func_instructions);
+                        func_instructions.push(BytecodeOp::StoreLocal(param.name.clone()));
+                        // Also update the arguments scope
+                        func_instructions.push(BytecodeOp::LoadLocal("arguments".to_string()));
+                        func_instructions.push(BytecodeOp::LoadLocal(param.name.clone()));
+                        func_instructions.push(BytecodeOp::SetProperty(param.name.clone()));
+                        func_instructions.push(BytecodeOp::StoreLocal("arguments".to_string()));
+                        func_instructions[jump_idx] = BytecodeOp::JumpIfFalse(func_instructions.len());
+                    }
+                }
                 for s in &closure.body {
                     self.compile_statement(s, &mut func_instructions);
                 }

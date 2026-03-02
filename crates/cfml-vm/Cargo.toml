@@ -11,6 +11,7 @@ license.workspace = true
 [dependencies]
 cfml-common = { workspace = true }
 cfml-compiler = { workspace = true }
+indexmap = { workspace = true }
 cfml-codegen = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
