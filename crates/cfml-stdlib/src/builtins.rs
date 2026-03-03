@@ -248,6 +248,9 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("bitNot".into(), fn_bit_not);
     f.insert("bitSHLN".into(), fn_bit_shln);
     f.insert("bitSHRN".into(), fn_bit_shrn);
+    f.insert("bitMaskRead".into(), fn_bit_mask_read);
+    f.insert("bitMaskSet".into(), fn_bit_mask_set);
+    f.insert("bitMaskClear".into(), fn_bit_mask_clear);
 
     // ---- Date/Time functions ----
     f.insert("now".into(), fn_now);
@@ -328,6 +331,24 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("listIndexExists".into(), fn_list_index_exists);
     f.insert("listReduceRight".into(), fn_list_each);  // VM intercepts
 
+    // ---- String higher-order functions (VM-intercepted stubs) ----
+    f.insert("stringEach".into(), fn_list_each);     // VM intercepts
+    f.insert("stringMap".into(), fn_list_each);      // VM intercepts
+    f.insert("stringFilter".into(), fn_list_each);   // VM intercepts
+    f.insert("stringReduce".into(), fn_list_each);   // VM intercepts
+    f.insert("stringSome".into(), fn_list_each);     // VM intercepts
+    f.insert("stringEvery".into(), fn_list_each);    // VM intercepts
+    f.insert("stringSort".into(), fn_list_each);     // VM intercepts
+
+    // ---- Collection higher-order functions (VM-intercepted stubs) ----
+    f.insert("collectionEach".into(), fn_list_each);    // VM intercepts
+    f.insert("collectionMap".into(), fn_list_each);     // VM intercepts
+    f.insert("collectionFilter".into(), fn_list_each);  // VM intercepts
+    f.insert("collectionReduce".into(), fn_list_each);  // VM intercepts
+    f.insert("collectionSome".into(), fn_list_each);    // VM intercepts
+    f.insert("collectionEvery".into(), fn_list_each);   // VM intercepts
+    f.insert("each".into(), fn_list_each);              // VM intercepts (alias for collectionEach)
+
     // ---- JSON functions ----
     f.insert("serializeJSON".into(), fn_serialize_json);
     f.insert("deserializeJSON".into(), fn_deserialize_json);
@@ -367,6 +388,10 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("queryColumnData".into(), fn_query_column_data as BuiltinFunction);
     f.insert("queryColumnArray".into(), fn_query_column_data as BuiltinFunction);  // alias
     f.insert("queryCurrentRow".into(), fn_query_current_row as BuiltinFunction);
+
+    // ---- Query value list functions ----
+    f.insert("valueList".into(), fn_value_list as BuiltinFunction);
+    f.insert("quotedValueList".into(), fn_quoted_value_list as BuiltinFunction);
 
     // ---- Utility functions ----
     f.insert("evaluate".into(), fn_evaluate);
@@ -493,6 +518,11 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("__cfexecute".into(), fn_cfexecute_stub);
     f.insert("__cfmail".into(), fn_cfmail);
 
+    // ---- cfthread functions (VM-intercepted) ----
+    f.insert("__cfthread_run".into(), fn_cfthread_stub);
+    f.insert("__cfthread_join".into(), fn_cfthread_stub);
+    f.insert("__cfthread_terminate".into(), fn_cfthread_stub);
+
     // ---- Cache functions (VM-intercepted) ----
     f.insert("cachePut".into(), fn_cache_stub);
     f.insert("cacheGet".into(), fn_cache_stub);
@@ -566,7 +596,23 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
         f.insert("isXML".into(), fn_is_xml);
         f.insert("xmlTransform".into(), fn_xml_transform_stub);
         f.insert("xmlValidate".into(), fn_xml_validate_stub);
+        f.insert("xmlNew".into(), fn_xml_new);
+        f.insert("xmlElemNew".into(), fn_xml_elem_new);
+        f.insert("xmlChildPos".into(), fn_xml_child_pos);
+        f.insert("xmlGetNodeType".into(), fn_xml_get_node_type);
+        f.insert("xmlHasChild".into(), fn_xml_has_child);
+        f.insert("isXMLDoc".into(), fn_is_xml_doc);
+        f.insert("isXMLElem".into(), fn_is_xml_elem);
+        f.insert("isXMLNode".into(), fn_is_xml_node);
+        f.insert("isXMLRoot".into(), fn_is_xml_root);
+        f.insert("isXMLAttribute".into(), fn_is_xml_attribute);
+        f.insert("htmlParse".into(), fn_html_parse);
     }
+
+    // ---- Misc functions ----
+    f.insert("soundex".into(), fn_soundex);
+    f.insert("metaphone".into(), fn_metaphone);
+    f.insert("toScript".into(), fn_to_script);
 
     f
 }
@@ -2650,6 +2696,29 @@ fn fn_bit_shrn(args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::Int(get_int(&args, 0) >> get_int(&args, 1)))
 }
 
+fn fn_bit_mask_read(args: Vec<CfmlValue>) -> CfmlResult {
+    let number = get_int(&args, 0);
+    let start = get_int(&args, 1);
+    let length = get_int(&args, 2);
+    Ok(CfmlValue::Int((number >> start) & ((1 << length) - 1)))
+}
+
+fn fn_bit_mask_set(args: Vec<CfmlValue>) -> CfmlResult {
+    let number = get_int(&args, 0);
+    let mask = get_int(&args, 1);
+    let start = get_int(&args, 2);
+    let length = get_int(&args, 3);
+    let clear_mask = ((1i64 << length) - 1) << start;
+    Ok(CfmlValue::Int((number & !clear_mask) | ((mask & ((1 << length) - 1)) << start)))
+}
+
+fn fn_bit_mask_clear(args: Vec<CfmlValue>) -> CfmlResult {
+    let number = get_int(&args, 0);
+    let start = get_int(&args, 1);
+    let length = get_int(&args, 2);
+    Ok(CfmlValue::Int(number & !(((1i64 << length) - 1) << start)))
+}
+
 // ===============================================
 // DATE/TIME HELPERS
 // ===============================================
@@ -4028,8 +4097,7 @@ fn fn_query_set_row(args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn fn_query_ho_stub(_args: Vec<CfmlValue>) -> CfmlResult {
-    // Stub — VM intercepts these before reaching here
-    Ok(CfmlValue::Null)
+    Err(CfmlError::runtime("Query higher-order function requires VM-level closure support and was not intercepted.".to_string()))
 }
 
 // ===============================================
@@ -4037,7 +4105,7 @@ fn fn_query_ho_stub(_args: Vec<CfmlValue>) -> CfmlResult {
 // ===============================================
 
 fn fn_evaluate(_args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(CfmlValue::Null) // Would need embedded parser
+    Err(CfmlError::runtime("evaluate() is not implemented. Use direct variable references or struct bracket notation instead.".to_string()))
 }
 
 fn fn_iif(args: Vec<CfmlValue>) -> CfmlResult {
@@ -7351,6 +7419,421 @@ fn fn_xml_validate_stub(_args: Vec<CfmlValue>) -> CfmlResult {
     Err(CfmlError::runtime("xmlValidate() is not supported (requires schema validation engine)".to_string()))
 }
 
+// ---- XML DOM Functions ----
+
+#[cfg(feature = "xml")]
+fn fn_xml_new(args: Vec<CfmlValue>) -> CfmlResult {
+    let _case_sensitive = args.get(0).map(|v| v.is_true()).unwrap_or(false);
+    let mut doc = IndexMap::new();
+    doc.insert("xmlRoot".to_string(), CfmlValue::String(String::new()));
+    doc.insert("xmlComment".to_string(), CfmlValue::String(String::new()));
+    let mut doc_type = IndexMap::new();
+    doc_type.insert("type".to_string(), CfmlValue::String(String::new()));
+    doc_type.insert("name".to_string(), CfmlValue::String(String::new()));
+    doc.insert("xmlDocType".to_string(), CfmlValue::Struct(doc_type));
+    doc.insert("xmlChildren".to_string(), CfmlValue::Array(Vec::new()));
+    Ok(CfmlValue::Struct(doc))
+}
+
+#[cfg(feature = "xml")]
+fn fn_xml_elem_new(args: Vec<CfmlValue>) -> CfmlResult {
+    let _doc = args.get(0); // xmlDoc (unused but accepted)
+    let (namespace, child_name) = if args.len() >= 3 {
+        (get_str(&args, 1), get_str(&args, 2))
+    } else {
+        (String::new(), get_str(&args, 1))
+    };
+    let mut elem = IndexMap::new();
+    elem.insert("xmlName".to_string(), CfmlValue::String(child_name));
+    elem.insert("xmlNsPrefix".to_string(), CfmlValue::String(String::new()));
+    elem.insert("xmlNsURI".to_string(), CfmlValue::String(namespace));
+    elem.insert("xmlText".to_string(), CfmlValue::String(String::new()));
+    elem.insert("xmlComment".to_string(), CfmlValue::String(String::new()));
+    elem.insert("xmlCData".to_string(), CfmlValue::String(String::new()));
+    elem.insert("xmlAttributes".to_string(), CfmlValue::Struct(IndexMap::new()));
+    elem.insert("xmlChildren".to_string(), CfmlValue::Array(Vec::new()));
+    Ok(CfmlValue::Struct(elem))
+}
+
+#[cfg(feature = "xml")]
+fn fn_xml_child_pos(args: Vec<CfmlValue>) -> CfmlResult {
+    let element = args.get(0).cloned().unwrap_or(CfmlValue::Null);
+    let child_name = get_str(&args, 1).to_lowercase();
+    let nth = get_int(&args, 2) as usize;
+    if let CfmlValue::Struct(ref s) = element {
+        if let Some(CfmlValue::Array(ref children)) = s.get("xmlChildren") {
+            let mut count = 0usize;
+            for (i, child) in children.iter().enumerate() {
+                if let CfmlValue::Struct(ref cs) = child {
+                    if let Some(CfmlValue::String(ref name)) = cs.get("xmlName") {
+                        if name.to_lowercase() == child_name {
+                            count += 1;
+                            if count == nth {
+                                return Ok(CfmlValue::Int((i + 1) as i64));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(CfmlValue::Int(-1))
+}
+
+#[cfg(feature = "xml")]
+fn fn_xml_get_node_type(args: Vec<CfmlValue>) -> CfmlResult {
+    let node = args.get(0).cloned().unwrap_or(CfmlValue::Null);
+    if let CfmlValue::Struct(ref s) = node {
+        if s.contains_key("xmlRoot") {
+            return Ok(CfmlValue::String("DOCUMENT_NODE".to_string()));
+        }
+        if let Some(CfmlValue::String(ref t)) = s.get("xmlType") {
+            let result = match t.to_uppercase().as_str() {
+                "ELEMENT" => "ELEMENT_NODE",
+                "TEXT" => "TEXT_NODE",
+                "COMMENT" => "COMMENT_NODE",
+                "CDATA" => "CDATA_SECTION_NODE",
+                "ATTRIBUTE" | "ATTRIBUTE_NODE" => "ATTRIBUTE_NODE",
+                _ => "ELEMENT_NODE",
+            };
+            return Ok(CfmlValue::String(result.to_string()));
+        }
+        if s.contains_key("xmlName") {
+            return Ok(CfmlValue::String("ELEMENT_NODE".to_string()));
+        }
+    }
+    Ok(CfmlValue::String("UNKNOWN_NODE".to_string()))
+}
+
+#[cfg(feature = "xml")]
+fn fn_xml_has_child(args: Vec<CfmlValue>) -> CfmlResult {
+    let node = args.get(0).cloned().unwrap_or(CfmlValue::Null);
+    if let CfmlValue::Struct(ref s) = node {
+        if let Some(CfmlValue::Array(ref children)) = s.get("xmlChildren") {
+            return Ok(CfmlValue::Bool(!children.is_empty()));
+        }
+    }
+    Ok(CfmlValue::Bool(false))
+}
+
+#[cfg(feature = "xml")]
+fn fn_is_xml_doc(args: Vec<CfmlValue>) -> CfmlResult {
+    let val = args.get(0).cloned().unwrap_or(CfmlValue::Null);
+    if let CfmlValue::Struct(ref s) = val {
+        return Ok(CfmlValue::Bool(s.contains_key("xmlRoot")));
+    }
+    Ok(CfmlValue::Bool(false))
+}
+
+#[cfg(feature = "xml")]
+fn fn_is_xml_elem(args: Vec<CfmlValue>) -> CfmlResult {
+    let val = args.get(0).cloned().unwrap_or(CfmlValue::Null);
+    if let CfmlValue::Struct(ref s) = val {
+        return Ok(CfmlValue::Bool(s.contains_key("xmlName") && s.contains_key("xmlChildren")));
+    }
+    Ok(CfmlValue::Bool(false))
+}
+
+#[cfg(feature = "xml")]
+fn fn_is_xml_node(args: Vec<CfmlValue>) -> CfmlResult {
+    let val = args.get(0).cloned().unwrap_or(CfmlValue::Null);
+    if let CfmlValue::Struct(ref s) = val {
+        return Ok(CfmlValue::Bool(s.contains_key("xmlName") || s.contains_key("xmlRoot")));
+    }
+    Ok(CfmlValue::Bool(false))
+}
+
+#[cfg(feature = "xml")]
+fn fn_is_xml_root(args: Vec<CfmlValue>) -> CfmlResult {
+    let val = args.get(0).cloned().unwrap_or(CfmlValue::Null);
+    if let CfmlValue::Struct(ref s) = val {
+        return Ok(CfmlValue::Bool(s.contains_key("xmlRoot")));
+    }
+    Ok(CfmlValue::Bool(false))
+}
+
+#[cfg(feature = "xml")]
+fn fn_is_xml_attribute(args: Vec<CfmlValue>) -> CfmlResult {
+    let val = args.get(0).cloned().unwrap_or(CfmlValue::Null);
+    if let CfmlValue::Struct(ref s) = val {
+        if let Some(CfmlValue::String(ref t)) = s.get("xmlType") {
+            return Ok(CfmlValue::Bool(t == "ATTRIBUTE_NODE"));
+        }
+    }
+    Ok(CfmlValue::Bool(false))
+}
+
+#[cfg(feature = "xml")]
+fn fn_html_parse(args: Vec<CfmlValue>) -> CfmlResult {
+    let html_str = get_str(&args, 0);
+    // Wrap in XML-compatible form and delegate to xmlParse logic
+    // Simple approach: return a basic struct with the HTML content
+    let mut doc = IndexMap::new();
+    let mut root = IndexMap::new();
+    root.insert("xmlName".to_string(), CfmlValue::String("html".to_string()));
+    root.insert("xmlType".to_string(), CfmlValue::String("ELEMENT".to_string()));
+    root.insert("xmlText".to_string(), CfmlValue::String(html_str));
+    root.insert("xmlChildren".to_string(), CfmlValue::Array(Vec::new()));
+    root.insert("xmlAttributes".to_string(), CfmlValue::Struct(IndexMap::new()));
+    doc.insert("xmlRoot".to_string(), CfmlValue::Struct(root));
+    doc.insert("xmlType".to_string(), CfmlValue::String("DOCUMENT".to_string()));
+    Ok(CfmlValue::Struct(doc))
+}
+
+// ---- Soundex ----
+fn fn_soundex(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0);
+    if s.is_empty() {
+        return Ok(CfmlValue::String(String::new()));
+    }
+    let chars: Vec<char> = s.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+    if chars.is_empty() {
+        return Ok(CfmlValue::String(String::new()));
+    }
+    let first = chars[0].to_ascii_uppercase();
+    let soundex_code = |c: char| -> Option<char> {
+        match c.to_ascii_uppercase() {
+            'B' | 'F' | 'P' | 'V' => Some('1'),
+            'C' | 'G' | 'J' | 'K' | 'Q' | 'S' | 'X' | 'Z' => Some('2'),
+            'D' | 'T' => Some('3'),
+            'L' => Some('4'),
+            'M' | 'N' => Some('5'),
+            'R' => Some('6'),
+            _ => None, // A, E, I, O, U, H, W, Y
+        }
+    };
+    let is_hw = |c: char| -> bool {
+        matches!(c.to_ascii_uppercase(), 'H' | 'W')
+    };
+    let mut result = String::new();
+    result.push(first);
+    let first_code = soundex_code(first);
+    let mut last_code = first_code;
+    for &c in &chars[1..] {
+        if is_hw(c) {
+            // H and W are transparent — don't update last_code
+            continue;
+        }
+        let code = soundex_code(c);
+        if let Some(cd) = code {
+            if code != last_code {
+                result.push(cd);
+                if result.len() == 4 {
+                    break;
+                }
+            }
+            last_code = code;
+        } else {
+            // Vowel resets the last_code so same consonant codes can appear again
+            last_code = None;
+        }
+    }
+    while result.len() < 4 {
+        result.push('0');
+    }
+    Ok(CfmlValue::String(result))
+}
+
+// ---- Metaphone ----
+fn fn_metaphone(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0).to_uppercase();
+    if s.is_empty() {
+        return Ok(CfmlValue::String(String::new()));
+    }
+    let chars: Vec<char> = s.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+    if chars.is_empty() {
+        return Ok(CfmlValue::String(String::new()));
+    }
+    let len = chars.len();
+    let mut result = String::new();
+    let mut i = 0;
+
+    // Drop initial silent letters
+    if len >= 2 {
+        match (chars[0], chars[1]) {
+            ('A', 'E') | ('G', 'N') | ('K', 'N') | ('P', 'N') | ('W', 'R') => i = 1,
+            _ => {}
+        }
+    }
+
+    while i < len {
+        let c = chars[i];
+        let prev = if i > 0 { Some(chars[i - 1]) } else { None };
+        let next = if i + 1 < len { Some(chars[i + 1]) } else { None };
+
+        // Skip duplicate adjacent letters (except C)
+        if c != 'C' && prev == Some(c) {
+            i += 1;
+            continue;
+        }
+
+        match c {
+            'A' | 'E' | 'I' | 'O' | 'U' => {
+                if i == 0 { result.push(c); }
+            }
+            'B' => {
+                if prev != Some('M') || i == 0 {
+                    result.push('B');
+                }
+            }
+            'C' => {
+                if next == Some('H') {
+                    result.push('X');
+                    i += 1;
+                } else if next == Some('I') || next == Some('E') || next == Some('Y') {
+                    if next == Some('I') && i + 2 < len && chars[i + 2] == 'A' {
+                        result.push('X');
+                        i += 2;
+                    } else {
+                        result.push('S');
+                    }
+                } else {
+                    result.push('K');
+                }
+            }
+            'D' => {
+                if next == Some('G') && i + 2 < len && matches!(chars[i + 2], 'I' | 'E' | 'Y') {
+                    result.push('J');
+                } else {
+                    result.push('T');
+                }
+            }
+            'F' => { result.push('F'); }
+            'G' => {
+                if next == Some('H') && i + 2 < len && !"AEIOU".contains(chars[i + 2]) {
+                    i += 1; // silent GH
+                } else if i > 0 && next == Some('N') {
+                    // silent G before N (but not at start)
+                } else if prev == Some('G') {
+                    // skip duplicate
+                } else {
+                    result.push('J');
+                    if next == Some('H') || next == Some('I') || next == Some('E') || next == Some('Y') {
+                        // already pushed J
+                    } else {
+                        result.pop();
+                        result.push('K');
+                    }
+                }
+            }
+            'H' => {
+                if "AEIOU".contains(next.unwrap_or('X')) && (prev.is_none() || !"AEIOU".contains(prev.unwrap())) {
+                    result.push('H');
+                }
+            }
+            'J' => { result.push('J'); }
+            'K' => {
+                if prev != Some('C') {
+                    result.push('K');
+                }
+            }
+            'L' => { result.push('L'); }
+            'M' => { result.push('M'); }
+            'N' => { result.push('N'); }
+            'P' => {
+                if next == Some('H') {
+                    result.push('F');
+                    i += 1;
+                } else {
+                    result.push('P');
+                }
+            }
+            'Q' => { result.push('K'); }
+            'R' => { result.push('R'); }
+            'S' => {
+                if next == Some('H') || (next == Some('I') && i + 2 < len && (chars[i + 2] == 'O' || chars[i + 2] == 'A')) {
+                    result.push('X');
+                    i += 1;
+                } else if next == Some('C') && i + 2 < len && matches!(chars[i + 2], 'I' | 'E' | 'Y') {
+                    result.push('S');
+                    i += 1; // skip C, S already pushed
+                } else {
+                    result.push('S');
+                }
+            }
+            'T' => {
+                if next == Some('H') {
+                    result.push('0'); // theta
+                    i += 1;
+                } else if next == Some('I') && i + 2 < len && (chars[i + 2] == 'O' || chars[i + 2] == 'A') {
+                    result.push('X');
+                } else {
+                    result.push('T');
+                }
+            }
+            'V' => { result.push('F'); }
+            'W' | 'Y' => {
+                if "AEIOU".contains(next.unwrap_or('X')) {
+                    result.push(c);
+                }
+            }
+            'X' => {
+                result.push('K');
+                result.push('S');
+            }
+            'Z' => { result.push('S'); }
+            _ => {}
+        }
+        i += 1;
+    }
+    // Deduplicate consecutive identical characters in output
+    let mut deduped = String::new();
+    for ch in result.chars() {
+        if deduped.chars().last() != Some(ch) {
+            deduped.push(ch);
+        }
+    }
+    Ok(CfmlValue::String(deduped))
+}
+
+// ---- toScript ----
+fn fn_to_script(args: Vec<CfmlValue>) -> CfmlResult {
+    let value = args.get(0).cloned().unwrap_or(CfmlValue::Null);
+    let var_name = get_str(&args, 1);
+
+    fn js_escape(s: &str) -> String {
+        s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r")
+    }
+
+    let script = match &value {
+        CfmlValue::String(s) => format!("var {} = \"{}\";", var_name, js_escape(s)),
+        CfmlValue::Int(n) => format!("var {} = {};", var_name, n),
+        CfmlValue::Double(d) => format!("var {} = {};", var_name, d),
+        CfmlValue::Bool(b) => format!("var {} = {};", var_name, if *b { "true" } else { "false" }),
+        CfmlValue::Array(arr) => {
+            let mut lines = vec![format!("var {} = new Array();", var_name)];
+            for (i, item) in arr.iter().enumerate() {
+                let val_str = match item {
+                    CfmlValue::String(s) => format!("\"{}\"", js_escape(s)),
+                    CfmlValue::Int(n) => n.to_string(),
+                    CfmlValue::Double(d) => d.to_string(),
+                    CfmlValue::Bool(b) => if *b { "true".to_string() } else { "false".to_string() },
+                    _ => format!("\"{}\"", js_escape(&item.as_string())),
+                };
+                lines.push(format!("{}[{}]={};", var_name, i + 1, val_str));
+            }
+            lines.join("\n")
+        }
+        CfmlValue::Struct(s) => {
+            let mut lines = vec![format!("var {} = new Object();", var_name)];
+            for (k, v) in s.iter() {
+                let val_str = match v {
+                    CfmlValue::String(s) => format!("\"{}\"", js_escape(s)),
+                    CfmlValue::Int(n) => n.to_string(),
+                    CfmlValue::Double(d) => d.to_string(),
+                    CfmlValue::Bool(b) => if *b { "true".to_string() } else { "false".to_string() },
+                    _ => format!("\"{}\"", js_escape(&v.as_string())),
+                };
+                lines.push(format!("{}.{}={};", var_name, k, val_str));
+            }
+            lines.join("\n")
+        }
+        CfmlValue::Null => format!("var {} = null;", var_name),
+        _ => format!("var {} = \"{}\";", var_name, js_escape(&value.as_string())),
+    };
+    Ok(CfmlValue::String(script))
+}
+
 // ======================================================================
 // NEW BUILT-IN FUNCTION IMPLEMENTATIONS
 // ======================================================================
@@ -7784,6 +8267,30 @@ fn fn_query_current_row(args: Vec<CfmlValue>) -> CfmlResult {
     }
 }
 
+fn fn_value_list(args: Vec<CfmlValue>) -> CfmlResult {
+    let arr = args.get(0).ok_or_else(|| CfmlError::runtime("valueList() requires a query column".to_string()))?;
+    let delim = args.get(1).map(|v| v.as_string()).unwrap_or_else(|| ",".to_string());
+    match arr {
+        CfmlValue::Array(items) => {
+            let result: Vec<String> = items.iter().map(|v| v.as_string()).collect();
+            Ok(CfmlValue::String(result.join(&delim)))
+        }
+        _ => Ok(CfmlValue::String(arr.as_string()))
+    }
+}
+
+fn fn_quoted_value_list(args: Vec<CfmlValue>) -> CfmlResult {
+    let arr = args.get(0).ok_or_else(|| CfmlError::runtime("quotedValueList() requires a query column".to_string()))?;
+    let delim = args.get(1).map(|v| v.as_string()).unwrap_or_else(|| ",".to_string());
+    match arr {
+        CfmlValue::Array(items) => {
+            let result: Vec<String> = items.iter().map(|v| format!("'{}'", v.as_string())).collect();
+            Ok(CfmlValue::String(result.join(&delim)))
+        }
+        _ => Ok(CfmlValue::String(format!("'{}'", arr.as_string())))
+    }
+}
+
 // ---- List functions ----
 
 fn fn_list_avg(args: Vec<CfmlValue>) -> CfmlResult {
@@ -8050,28 +8557,23 @@ fn fn_file_is_eof(args: Vec<CfmlValue>) -> CfmlResult {
 // ---- VM Stub functions for tag infrastructure ----
 
 fn fn_cflog_stub(_args: Vec<CfmlValue>) -> CfmlResult {
-    // VM intercepts this - log message to stderr as fallback
-    Ok(CfmlValue::Null)
+    Err(CfmlError::runtime("cflog requires VM-level support and was not intercepted.".to_string()))
 }
 
 fn fn_cfsetting_stub(_args: Vec<CfmlValue>) -> CfmlResult {
-    // VM intercepts this
-    Ok(CfmlValue::Null)
+    Err(CfmlError::runtime("cfsetting requires VM-level support and was not intercepted.".to_string()))
 }
 
 fn fn_cflock_start_stub(_args: Vec<CfmlValue>) -> CfmlResult {
-    // VM intercepts this
-    Ok(CfmlValue::Null)
+    Err(CfmlError::runtime("cflock requires VM-level support and was not intercepted.".to_string()))
 }
 
 fn fn_cflock_end_stub(_args: Vec<CfmlValue>) -> CfmlResult {
-    // VM intercepts this
-    Ok(CfmlValue::Null)
+    Err(CfmlError::runtime("cflock requires VM-level support and was not intercepted.".to_string()))
 }
 
 fn fn_cfcookie_stub(_args: Vec<CfmlValue>) -> CfmlResult {
-    // VM intercepts this
-    Ok(CfmlValue::Null)
+    Err(CfmlError::runtime("cfcookie requires VM-level support and was not intercepted.".to_string()))
 }
 
 // ---- File Upload functions ----
@@ -8110,8 +8612,7 @@ fn fn_cffile_upload(args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn fn_cfcache_stub(_args: Vec<CfmlValue>) -> CfmlResult {
-    // VM intercepts this
-    Ok(CfmlValue::Null)
+    Err(CfmlError::runtime("cfcache requires VM-level support and was not intercepted.".to_string()))
 }
 
 fn fn_cfexecute_stub(_args: Vec<CfmlValue>) -> CfmlResult {
@@ -8289,12 +8790,17 @@ fn fn_cfmail(args: Vec<CfmlValue>) -> CfmlResult {
 
 /// Stub for cache functions — VM intercepts these
 fn fn_cache_stub(_args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(CfmlValue::Null)
+    Err(CfmlError::runtime("Cache function requires VM-level support and was not intercepted.".to_string()))
 }
 
 /// Stub for session/auth functions — VM intercepts these
 fn fn_session_stub(_args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(CfmlValue::Null)
+    Err(CfmlError::runtime("Session/auth function requires VM-level support and was not intercepted.".to_string()))
+}
+
+/// Stub for cfthread functions — VM intercepts these
+fn fn_cfthread_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("cfthread function requires VM-level support and was not intercepted.".to_string()))
 }
 
 // ===============================================
@@ -8313,8 +8819,7 @@ fn fn_struct_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn fn_struct_set_metadata(_args: Vec<CfmlValue>) -> CfmlResult {
-    // No-op: we don't support ordered/case-sensitive structs yet
-    Ok(CfmlValue::Null)
+    Err(CfmlError::runtime("structSetMetadata() is not implemented. Ordered/case-sensitive struct metadata is not yet supported.".to_string()))
 }
 
 // ===============================================

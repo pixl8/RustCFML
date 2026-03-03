@@ -1716,6 +1716,12 @@ impl CfmlVirtualMachine {
                 | "structeach" | "structmap" | "structfilter"
                 | "structreduce" | "structsome" | "structevery"
                 | "listeach" | "listmap" | "listfilter" | "listreduce"
+                | "listsome" | "listevery" | "listreduceright"
+                | "stringeach" | "stringmap" | "stringfilter" | "stringreduce"
+                | "stringsome" | "stringevery" | "stringsort"
+                | "collectioneach" | "collectionmap" | "collectionfilter"
+                | "collectionreduce" | "collectionsome" | "collectionevery"
+                | "each"
                 | "queryeach" | "querymap" | "queryfilter" | "queryreduce"
                 | "querysort" | "querysome" | "queryevery"
                 | "createobject"
@@ -1738,7 +1744,8 @@ impl CfmlVirtualMachine {
                 | "__cfcustomtag" | "__cfcustomtag_start" | "__cfcustomtag_end"
                 | "cacheput" | "cacheget" | "cachedelete" | "cacheclear"
                 | "cachekeyexists" | "cachecount" | "cachegetall" | "cachegetallids"
-                | "__cfcache" | "__cfexecute" => {
+                | "__cfcache" | "__cfexecute"
+                | "__cfthread_run" | "__cfthread_join" | "__cfthread_terminate" => {
                     // Will be handled at the end of this function (needs VM access)
                 }
                 _ => {
@@ -2175,6 +2182,507 @@ impl CfmlVirtualMachine {
                         return Ok(acc);
                     }
                     return Ok(CfmlValue::Null);
+                }
+                "listreduceright" => {
+                    if let (Some(list_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        let list = list_val.as_string();
+                        let mut acc = args.get(2).cloned().unwrap_or(CfmlValue::Null);
+                        let delimiter = args.get(3).map(|v| v.as_string()).unwrap_or_else(|| ",".to_string());
+                        let callback = callback.clone();
+                        let items: Vec<&str> = list.split(|c: char| delimiter.contains(c)).filter(|s| !s.is_empty()).collect();
+                        for (i, item) in items.iter().enumerate().rev() {
+                            let cb_args = vec![acc.clone(), CfmlValue::String(item.to_string()), CfmlValue::Int((i + 1) as i64), list_val.clone()];
+                            self.closure_parent_writeback = None;
+                            acc = self.call_function(&callback, cb_args, parent_locals)?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
+                        }
+                        return Ok(acc);
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "listsome" => {
+                    if let (Some(list_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        let list = list_val.as_string();
+                        let delimiter = args.get(2).map(|v| v.as_string()).unwrap_or_else(|| ",".to_string());
+                        let callback = callback.clone();
+                        let items: Vec<&str> = list.split(|c: char| delimiter.contains(c)).filter(|s| !s.is_empty()).collect();
+                        for (i, item) in items.iter().enumerate() {
+                            let cb_args = vec![CfmlValue::String(item.to_string()), CfmlValue::Int((i + 1) as i64), list_val.clone()];
+                            self.closure_parent_writeback = None;
+                            let result = self.call_function(&callback, cb_args, parent_locals)?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
+                            if result.is_true() {
+                                return Ok(CfmlValue::Bool(true));
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Bool(false));
+                }
+                "listevery" => {
+                    if let (Some(list_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        let list = list_val.as_string();
+                        let delimiter = args.get(2).map(|v| v.as_string()).unwrap_or_else(|| ",".to_string());
+                        let callback = callback.clone();
+                        let items: Vec<&str> = list.split(|c: char| delimiter.contains(c)).filter(|s| !s.is_empty()).collect();
+                        for (i, item) in items.iter().enumerate() {
+                            let cb_args = vec![CfmlValue::String(item.to_string()), CfmlValue::Int((i + 1) as i64), list_val.clone()];
+                            self.closure_parent_writeback = None;
+                            let result = self.call_function(&callback, cb_args, parent_locals)?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
+                            if !result.is_true() {
+                                return Ok(CfmlValue::Bool(false));
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Bool(true));
+                }
+                // ---- String Higher-Order Functions ----
+                "stringeach" => {
+                    if let (Some(str_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        let s = str_val.as_string();
+                        let callback = callback.clone();
+                        for (i, ch) in s.chars().enumerate() {
+                            let cb_args = vec![CfmlValue::String(ch.to_string()), CfmlValue::Int((i + 1) as i64), str_val.clone()];
+                            self.closure_parent_writeback = None;
+                            self.call_function(&callback, cb_args, parent_locals)?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "stringmap" => {
+                    if let (Some(str_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        let s = str_val.as_string();
+                        let callback = callback.clone();
+                        let mut result = String::new();
+                        for (i, ch) in s.chars().enumerate() {
+                            let cb_args = vec![CfmlValue::String(ch.to_string()), CfmlValue::Int((i + 1) as i64), str_val.clone()];
+                            self.closure_parent_writeback = None;
+                            let mapped = self.call_function(&callback, cb_args, parent_locals)?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
+                            result.push_str(&mapped.as_string());
+                        }
+                        return Ok(CfmlValue::String(result));
+                    }
+                    return Ok(CfmlValue::String(String::new()));
+                }
+                "stringfilter" => {
+                    if let (Some(str_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        let s = str_val.as_string();
+                        let callback = callback.clone();
+                        let mut result = String::new();
+                        for (i, ch) in s.chars().enumerate() {
+                            let cb_args = vec![CfmlValue::String(ch.to_string()), CfmlValue::Int((i + 1) as i64), str_val.clone()];
+                            self.closure_parent_writeback = None;
+                            let keep = self.call_function(&callback, cb_args, parent_locals)?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
+                            if keep.is_true() {
+                                result.push(ch);
+                            }
+                        }
+                        return Ok(CfmlValue::String(result));
+                    }
+                    return Ok(CfmlValue::String(String::new()));
+                }
+                "stringreduce" => {
+                    if let (Some(str_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        let s = str_val.as_string();
+                        let mut acc = args.get(2).cloned().unwrap_or(CfmlValue::Null);
+                        let callback = callback.clone();
+                        for (i, ch) in s.chars().enumerate() {
+                            let cb_args = vec![acc.clone(), CfmlValue::String(ch.to_string()), CfmlValue::Int((i + 1) as i64), str_val.clone()];
+                            self.closure_parent_writeback = None;
+                            acc = self.call_function(&callback, cb_args, parent_locals)?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
+                        }
+                        return Ok(acc);
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "stringsome" => {
+                    if let (Some(str_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        let s = str_val.as_string();
+                        let callback = callback.clone();
+                        for (i, ch) in s.chars().enumerate() {
+                            let cb_args = vec![CfmlValue::String(ch.to_string()), CfmlValue::Int((i + 1) as i64), str_val.clone()];
+                            self.closure_parent_writeback = None;
+                            let result = self.call_function(&callback, cb_args, parent_locals)?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
+                            if result.is_true() {
+                                return Ok(CfmlValue::Bool(true));
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Bool(false));
+                }
+                "stringevery" => {
+                    if let (Some(str_val), Some(callback)) = (args.get(0), args.get(1)) {
+                        let s = str_val.as_string();
+                        let callback = callback.clone();
+                        for (i, ch) in s.chars().enumerate() {
+                            let cb_args = vec![CfmlValue::String(ch.to_string()), CfmlValue::Int((i + 1) as i64), str_val.clone()];
+                            self.closure_parent_writeback = None;
+                            let result = self.call_function(&callback, cb_args, parent_locals)?;
+                            if let Some(ref wb) = self.closure_parent_writeback {
+                                Self::write_back_to_captured_scope(&callback, wb);
+                            }
+                            if !result.is_true() {
+                                return Ok(CfmlValue::Bool(false));
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Bool(true));
+                }
+                "stringsort" => {
+                    if let Some(str_val) = args.get(0) {
+                        let s = str_val.as_string();
+                        let mut chars: Vec<char> = s.chars().collect();
+                        if let Some(callback) = args.get(1) {
+                            let callback = callback.clone();
+                            // Bubble sort with callback comparator
+                            let len = chars.len();
+                            for i in 0..len {
+                                for j in 0..len - 1 - i {
+                                    let cb_args = vec![
+                                        CfmlValue::String(chars[j].to_string()),
+                                        CfmlValue::String(chars[j + 1].to_string()),
+                                    ];
+                                    self.closure_parent_writeback = None;
+                                    let cmp = self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                    let cmp_val = match &cmp {
+                                        CfmlValue::Int(n) => *n,
+                                        CfmlValue::Double(d) => *d as i64,
+                                        _ => 0,
+                                    };
+                                    if cmp_val > 0 {
+                                        chars.swap(j, j + 1);
+                                    }
+                                }
+                            }
+                        } else {
+                            chars.sort();
+                        }
+                        return Ok(CfmlValue::String(chars.into_iter().collect()));
+                    }
+                    return Ok(CfmlValue::String(String::new()));
+                }
+                // ---- Collection Higher-Order Functions ----
+                "collectioneach" | "each" => {
+                    if let (Some(collection), Some(callback)) = (args.get(0), args.get(1)) {
+                        let callback = callback.clone();
+                        match collection {
+                            CfmlValue::Array(arr) => {
+                                for (i, item) in arr.iter().enumerate() {
+                                    let cb_args = vec![item.clone(), CfmlValue::Int((i + 1) as i64), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                }
+                            }
+                            CfmlValue::Struct(s) => {
+                                for (key, val) in s.iter() {
+                                    let cb_args = vec![CfmlValue::String(key.clone()), val.clone(), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                }
+                            }
+                            CfmlValue::Query(q) => {
+                                for (i, row) in q.rows.iter().enumerate() {
+                                    let row_struct = CfmlValue::Struct(row.clone());
+                                    let cb_args = vec![row_struct, CfmlValue::Int((i + 1) as i64), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Treat as list
+                                let list = collection.as_string();
+                                let items: Vec<&str> = list.split(',').filter(|s| !s.is_empty()).collect();
+                                for (i, item) in items.iter().enumerate() {
+                                    let cb_args = vec![CfmlValue::String(item.to_string()), CfmlValue::Int((i + 1) as i64), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "collectionmap" => {
+                    if let (Some(collection), Some(callback)) = (args.get(0), args.get(1)) {
+                        let callback = callback.clone();
+                        match collection {
+                            CfmlValue::Array(arr) => {
+                                let mut result = Vec::new();
+                                for (i, item) in arr.iter().enumerate() {
+                                    let cb_args = vec![item.clone(), CfmlValue::Int((i + 1) as i64), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    let mapped = self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                    result.push(mapped);
+                                }
+                                return Ok(CfmlValue::Array(result));
+                            }
+                            CfmlValue::Struct(s) => {
+                                let mut result = IndexMap::new();
+                                for (key, val) in s.iter() {
+                                    let cb_args = vec![CfmlValue::String(key.clone()), val.clone(), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    let mapped = self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                    result.insert(key.clone(), mapped);
+                                }
+                                return Ok(CfmlValue::Struct(result));
+                            }
+                            _ => {
+                                // Treat as list
+                                let list = collection.as_string();
+                                let items: Vec<&str> = list.split(',').filter(|s| !s.is_empty()).collect();
+                                let mut result: Vec<String> = Vec::new();
+                                for (i, item) in items.iter().enumerate() {
+                                    let cb_args = vec![CfmlValue::String(item.to_string()), CfmlValue::Int((i + 1) as i64), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    let mapped = self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                    result.push(mapped.as_string());
+                                }
+                                return Ok(CfmlValue::String(result.join(",")));
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "collectionfilter" => {
+                    if let (Some(collection), Some(callback)) = (args.get(0), args.get(1)) {
+                        let callback = callback.clone();
+                        match collection {
+                            CfmlValue::Array(arr) => {
+                                let mut result = Vec::new();
+                                for (i, item) in arr.iter().enumerate() {
+                                    let cb_args = vec![item.clone(), CfmlValue::Int((i + 1) as i64), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    let keep = self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                    if keep.is_true() {
+                                        result.push(item.clone());
+                                    }
+                                }
+                                return Ok(CfmlValue::Array(result));
+                            }
+                            CfmlValue::Struct(s) => {
+                                let mut result = IndexMap::new();
+                                for (key, val) in s.iter() {
+                                    let cb_args = vec![CfmlValue::String(key.clone()), val.clone(), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    let keep = self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                    if keep.is_true() {
+                                        result.insert(key.clone(), val.clone());
+                                    }
+                                }
+                                return Ok(CfmlValue::Struct(result));
+                            }
+                            _ => {
+                                // Treat as list
+                                let list = collection.as_string();
+                                let items: Vec<&str> = list.split(',').filter(|s| !s.is_empty()).collect();
+                                let mut result = Vec::new();
+                                for (i, item) in items.iter().enumerate() {
+                                    let cb_args = vec![CfmlValue::String(item.to_string()), CfmlValue::Int((i + 1) as i64), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    let keep = self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                    if keep.is_true() {
+                                        result.push(item.to_string());
+                                    }
+                                }
+                                return Ok(CfmlValue::String(result.join(",")));
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "collectionreduce" => {
+                    if let (Some(collection), Some(callback)) = (args.get(0), args.get(1)) {
+                        let mut acc = args.get(2).cloned().unwrap_or(CfmlValue::Null);
+                        let callback = callback.clone();
+                        match collection {
+                            CfmlValue::Array(arr) => {
+                                for (i, item) in arr.iter().enumerate() {
+                                    let cb_args = vec![acc.clone(), item.clone(), CfmlValue::Int((i + 1) as i64), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    acc = self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                }
+                            }
+                            CfmlValue::Struct(s) => {
+                                for (key, val) in s.iter() {
+                                    let cb_args = vec![acc.clone(), CfmlValue::String(key.clone()), val.clone(), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    acc = self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                }
+                            }
+                            _ => {
+                                let list = collection.as_string();
+                                let items: Vec<&str> = list.split(',').filter(|s| !s.is_empty()).collect();
+                                for (i, item) in items.iter().enumerate() {
+                                    let cb_args = vec![acc.clone(), CfmlValue::String(item.to_string()), CfmlValue::Int((i + 1) as i64), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    acc = self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                }
+                            }
+                        }
+                        return Ok(acc);
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "collectionsome" => {
+                    if let (Some(collection), Some(callback)) = (args.get(0), args.get(1)) {
+                        let callback = callback.clone();
+                        match collection {
+                            CfmlValue::Array(arr) => {
+                                for (i, item) in arr.iter().enumerate() {
+                                    let cb_args = vec![item.clone(), CfmlValue::Int((i + 1) as i64), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                    if result.is_true() {
+                                        return Ok(CfmlValue::Bool(true));
+                                    }
+                                }
+                            }
+                            CfmlValue::Struct(s) => {
+                                for (key, val) in s.iter() {
+                                    let cb_args = vec![CfmlValue::String(key.clone()), val.clone(), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                    if result.is_true() {
+                                        return Ok(CfmlValue::Bool(true));
+                                    }
+                                }
+                            }
+                            _ => {
+                                let list = collection.as_string();
+                                let items: Vec<&str> = list.split(',').filter(|s| !s.is_empty()).collect();
+                                for (i, item) in items.iter().enumerate() {
+                                    let cb_args = vec![CfmlValue::String(item.to_string()), CfmlValue::Int((i + 1) as i64), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                    if result.is_true() {
+                                        return Ok(CfmlValue::Bool(true));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Bool(false));
+                }
+                "collectionevery" => {
+                    if let (Some(collection), Some(callback)) = (args.get(0), args.get(1)) {
+                        let callback = callback.clone();
+                        match collection {
+                            CfmlValue::Array(arr) => {
+                                for (i, item) in arr.iter().enumerate() {
+                                    let cb_args = vec![item.clone(), CfmlValue::Int((i + 1) as i64), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                    if !result.is_true() {
+                                        return Ok(CfmlValue::Bool(false));
+                                    }
+                                }
+                            }
+                            CfmlValue::Struct(s) => {
+                                for (key, val) in s.iter() {
+                                    let cb_args = vec![CfmlValue::String(key.clone()), val.clone(), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                    if !result.is_true() {
+                                        return Ok(CfmlValue::Bool(false));
+                                    }
+                                }
+                            }
+                            _ => {
+                                let list = collection.as_string();
+                                let items: Vec<&str> = list.split(',').filter(|s| !s.is_empty()).collect();
+                                for (i, item) in items.iter().enumerate() {
+                                    let cb_args = vec![CfmlValue::String(item.to_string()), CfmlValue::Int((i + 1) as i64), collection.clone()];
+                                    self.closure_parent_writeback = None;
+                                    let result = self.call_function(&callback, cb_args, parent_locals)?;
+                                    if let Some(ref wb) = self.closure_parent_writeback {
+                                        Self::write_back_to_captured_scope(&callback, wb);
+                                    }
+                                    if !result.is_true() {
+                                        return Ok(CfmlValue::Bool(false));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Bool(true));
                 }
                 "queryeach" => {
                     if let (Some(q_val), Some(callback)) = (args.get(0), args.get(1)) {
@@ -3566,6 +4074,38 @@ impl CfmlVirtualMachine {
                     return Ok(CfmlValue::Null);
                 }
 
+                // ---- cfthread handlers ----
+                "__cfthread_run" => {
+                    let thread_name = args.get(0).map(|v| v.as_string()).unwrap_or_else(|| "thread1".to_string());
+                    if let Some(callback) = args.get(1) {
+                        let callback = callback.clone();
+                        // Execute the closure immediately (sequential execution model)
+                        let cb_args = vec![];
+                        let _ = self.call_function(&callback, cb_args, parent_locals);
+                    }
+                    // Store thread metadata as completed
+                    let mut thread_meta = IndexMap::new();
+                    thread_meta.insert("status".to_string(), CfmlValue::String("COMPLETED".to_string()));
+                    thread_meta.insert("name".to_string(), CfmlValue::String(thread_name.clone()));
+                    thread_meta.insert("output".to_string(), CfmlValue::String(String::new()));
+                    thread_meta.insert("error".to_string(), CfmlValue::String(String::new()));
+                    thread_meta.insert("elapsedtime".to_string(), CfmlValue::Int(0));
+                    // Store in cfthread scope (on variables scope)
+                    let thread_struct = self.get_or_create_cfthread_scope();
+                    if let CfmlValue::Struct(ref mut ts) = thread_struct {
+                        ts.insert(thread_name.to_lowercase(), CfmlValue::Struct(thread_meta));
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "__cfthread_join" => {
+                    // No-op since execution already happened (thread is already complete)
+                    return Ok(CfmlValue::Null);
+                }
+                "__cfthread_terminate" => {
+                    // No-op (thread already finished)
+                    return Ok(CfmlValue::Null);
+                }
+
                 "__cfcustomtag" => {
                     // Self-closing custom tag: __cfcustomtag(path_spec, attrs_struct)
                     let path_spec = args.get(0).map(|v| v.as_string()).unwrap_or_default();
@@ -4635,6 +5175,14 @@ impl CfmlVirtualMachine {
             }
         }
         None
+    }
+
+    /// Get or create the cfthread scope on the variables scope.
+    fn get_or_create_cfthread_scope(&mut self) -> &mut CfmlValue {
+        if !self.globals.contains_key("cfthread") {
+            self.globals.insert("cfthread".to_string(), CfmlValue::Struct(IndexMap::new()));
+        }
+        self.globals.get_mut("cfthread").unwrap()
     }
 
     /// Resolve a custom tag path specification to an actual filesystem path.

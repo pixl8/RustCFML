@@ -339,7 +339,7 @@ cargo run -- examples/08_builtins.cfm         # Built-in functions
 *   **Full CFScript parser** with proper operator precedence
 *   **CFML Tag preprocessor** — automatic tag-to-script conversion
 *   **Stack-based bytecode VM** for execution
-*   **390+ built-in functions** across strings, arrays, structs, math, dates, lists, JSON, queries, file I/O, conversion, type checking, caching, and security
+*   **400+ built-in functions** across strings, arrays, structs, math, dates, lists, JSON, queries, file I/O, conversion, type checking, caching, and security
 *   **Member functions** — `"hello".ucase()`, `[1,2,3].len()`, `{a:1}.keyList()`
 *   **Higher-order functions** — `arrayMap`, `arrayFilter`, `arrayReduce`, `arraySome`, `arrayEvery`, `structEach`, `structReduce`, `listMap`, `listFilter`, etc. with closure support
 *   **Method chaining** — `"hello world".ucase().reverse()`
@@ -350,7 +350,7 @@ cargo run -- examples/08_builtins.cfm         # Built-in functions
 *   **Error handling** — `try/catch/finally`, `throw`
 *   **Data types** — null, boolean, integer, double, string, array (1-based), struct (case-insensitive), function, query
 *   **String interpolation** — `"Hello #name#!"` with expression support in double-quoted strings
-*   **Elvis operator** — `value ?: "default"` null coalescing
+*   **Elvis operator** — `value ?: "default"` and `value ?? "default"` null coalescing
 *   **Null-safe navigation** — `obj?.prop?.nested` returns null instead of erroring
 *   **Regex support** — `reFind()`, `reReplace()`, `reMatch()` + case-insensitive variants via `regex` crate
 *   **File I/O** — `fileRead()`, `fileWrite()`, `fileExists()`, `directoryList()`, `getFileInfo()`, and more
@@ -386,14 +386,22 @@ cargo run -- examples/08_builtins.cfm         # Built-in functions
 *   **OS commands** — `cfexecute` with stdout/stderr capture, stdin body, variable and buffer output modes
 *   **Stored procedures** — `cfstoredproc`/`cfprocparam`/`cfprocresult` compiled to `queryExecute("CALL ...")`
 *   **Custom tags** — `cfmodule`, `cf_` prefix tags with body mode, caller write-back, thisTag scope
+*   **Tag libraries** — `cfimport taglib=` with prefix-based custom tag resolution
+*   **Threading** — `cfthread` tag with action=run/join/terminate (sequential execution model with thread scope metadata)
 *   **Password hashing** — bcrypt, scrypt, argon2, PBKDF2
 *   **Locale functions** — 13 `ls*` functions for locale-aware formatting
+*   **Higher-order generics** — `collectionEach/Map/Filter/Reduce/Some/Every`, `stringEach/Map/Filter/Reduce/Some/Every/Sort`, generic `each()`
+*   **Query value lists** — `valueList()`, `quotedValueList()`
 
 ### Planned / In Progress
 
-*   **Tag libraries** — `cfimport taglib=`, `.tld` descriptors
-*   **Threading** — `cfthread` equivalent
-*   **Higher-order generics** — `collectionEach/Map/Filter`, `stringEach/Map/Filter`, generic `each()`
+*   **Tag library descriptors** — `.tld` file parsing (filesystem taglib imports already work via `cfimport`)
+*   **Real concurrent threading** — `cfthread` currently executes inline (sequential); upgrade to `std::thread::spawn`
+
+### Not Supported
+
+*   **Query-of-Queries (QoQ)** — SQL SELECT on in-memory query objects
+*   Image functions, Spreadsheet functions, ORM, SOAP/WSDL, Flash/Flex, PDF generation, LDAP, Registry
 
 ## Architecture
 
@@ -426,11 +434,11 @@ RustCFML/
 │   ├── cfml-compiler/   # Lexer, Parser, AST, Tag Preprocessor
 │   ├── cfml-codegen/    # Bytecode compiler (AST → BytecodeOp)
 │   ├── cfml-vm/         # Stack-based bytecode execution engine
-│   ├── cfml-stdlib/     # 390+ built-in functions
+│   ├── cfml-stdlib/     # 400+ built-in functions
 │   ├── cli/             # Command-line interface (rustcfml binary)
 │   └── wasm/            # WebAssembly target via wasm-bindgen
 ├── examples/            # Example .cfm files
-├── tests/               # Test suite (998 assertions across 74 suites)
+├── tests/               # Test suite (1111 assertions across 83 suites)
 ├── TESTING.md           # Testing guide
 └── Cargo.toml           # Workspace root
 ```
@@ -500,7 +508,7 @@ console.log(output); // "Hello from WASM!"
 
 ## Testing
 
-Run the built-in CFML test suite (998 assertions across 74 suites):
+Run the built-in CFML test suite (1111 assertions across 83 suites):
 
 ```plaintext
 cargo run -- tests/runner.cfm
@@ -524,11 +532,11 @@ unit tests, integration tests, and test individual features.
 ## Disclaimer
 
 RustCFML is in active development. The interpreter covers a substantial portion
-of the CFML language — including 390+ built-in functions, 50+ tags, components with
+of the CFML language — including 400+ built-in functions, 50+ tags, components with
 inheritance, application lifecycle, sessions, database connectivity, SMTP email,
-in-memory caching, closures with mutation, and file uploads — and can run real
-CFScript and tag-based CFML code including frameworks like Taffy. It is not yet
-production-ready.
+in-memory caching, threading, closures with mutation, and file uploads — validated
+by 1111 assertions across 83 test suites. It can run real CFScript and tag-based
+CFML code including frameworks like Taffy. It is not yet production-ready.
 
 Contributions are welcome!
 

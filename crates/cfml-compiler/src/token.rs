@@ -62,6 +62,7 @@ pub enum Token {
     Question,
     QuestionDot,  // ?. (null-safe navigation)
     QuestionColon, // ?: (elvis operator)
+    QuestionQuestion, // ?? (null coalescing, alias for ?:)
     HashSign,     // # (for string interpolation)
 
     // Control flow

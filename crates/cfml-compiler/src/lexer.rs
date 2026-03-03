@@ -121,6 +121,8 @@ impl Lexer {
                     self.add_token(Token::QuestionDot);
                 } else if self.match_char(':') {
                     self.add_token(Token::QuestionColon);
+                } else if self.match_char('?') {
+                    self.add_token(Token::QuestionQuestion);
                 } else {
                     self.add_token(Token::Question);
                 }

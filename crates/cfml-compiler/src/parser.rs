@@ -1483,8 +1483,8 @@ impl Parser {
             })));
         }
 
-        // Elvis operator ?: (null coalescing)
-        if self.match_token(&Token::QuestionColon) {
+        // Elvis operator ?: (null coalescing) and ?? (null coalescing alias)
+        if self.match_token(&Token::QuestionColon) || self.match_token(&Token::QuestionQuestion) {
             let right = Box::new(self.parse_expression()?);
             return Ok(Expression::Elvis(Box::new(Elvis {
                 left: Box::new(expr),

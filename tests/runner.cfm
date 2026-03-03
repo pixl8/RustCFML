@@ -14,6 +14,7 @@ try { include "core/test_functions.cfm"; } catch (any e) { writeOutput("ERROR | 
 try { include "core/test_language_features.cfm"; } catch (any e) { writeOutput("ERROR | core/test_language_features.cfm | " & e.message & chr(10)); }
 try { include "core/test_scopes.cfm"; } catch (any e) { writeOutput("ERROR | core/test_scopes.cfm | " & e.message & chr(10)); }
 try { include "core/test_error_context.cfm"; } catch (any e) { writeOutput("ERROR | core/test_error_context.cfm | " & e.message & chr(10)); }
+try { include "core/test_null_coalescing.cfm"; } catch (any e) { writeOutput("ERROR | core/test_null_coalescing.cfm | " & e.message & chr(10)); }
 
 // --- Data Types ---
 try { include "types/test_null.cfm"; } catch (any e) { writeOutput("ERROR | types/test_null.cfm | " & e.message & chr(10)); }
@@ -52,6 +53,12 @@ try { include "stdlib/test_query_mutations.cfm"; } catch (any e) { writeOutput("
 try { include "stdlib/test_date_functions_extra.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_date_functions_extra.cfm | " & e.message & chr(10)); }
 try { include "stdlib/test_locale_functions.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_locale_functions.cfm | " & e.message & chr(10)); }
 try { include "stdlib/test_cache_functions.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_cache_functions.cfm | " & e.message & chr(10)); }
+try { include "stdlib/test_higher_order_functions.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_higher_order_functions.cfm | " & e.message & chr(10)); }
+try { include "stdlib/test_bitmask_functions.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_bitmask_functions.cfm | " & e.message & chr(10)); }
+try { include "stdlib/test_xml_dom_functions.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_xml_dom_functions.cfm | " & e.message & chr(10)); }
+try { include "stdlib/test_misc_functions.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_misc_functions.cfm | " & e.message & chr(10)); }
+try { include "stdlib/test_valuelist_functions.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_valuelist_functions.cfm | " & e.message & chr(10)); }
+try { include "stdlib/test_listreduceright.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_listreduceright.cfm | " & e.message & chr(10)); }
 
 // --- Member Functions ---
 try { include "members/test_string_members.cfm"; } catch (any e) { writeOutput("ERROR | members/test_string_members.cfm | " & e.message & chr(10)); }
@@ -77,6 +84,8 @@ try { include "tags/test_tags_cfexecute.cfm"; } catch (any e) { writeOutput("ERR
 try { include "tags/test_tags_cfmail.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_cfmail.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_cfcache.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_cfcache.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_cfstoredproc.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_cfstoredproc.cfm | " & e.message & chr(10)); }
+try { include "tags/test_tags_cfimport.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_cfimport.cfm | " & e.message & chr(10)); }
+try { include "tags/test_tags_cfthread.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_cfthread.cfm | " & e.message & chr(10)); }
 
 printSummary();
 </cfscript>

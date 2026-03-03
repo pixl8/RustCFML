@@ -39,6 +39,12 @@ pub fn has_cfml_tags(source: &str) -> bool {
 
 /// Convert CFML tag-based source code to equivalent CFScript
 pub fn tags_to_script(source: &str) -> String {
+    let mut imports = std::collections::HashMap::<String, String>::new();
+    tags_to_script_impl(source, &mut imports)
+}
+
+/// Internal implementation that threads cfimport prefix→taglib mappings through.
+fn tags_to_script_impl(source: &str, imports: &mut std::collections::HashMap<String, String>) -> String {
     let mut result = String::new();
     let chars: Vec<char> = source.chars().collect();
     let len = chars.len();
@@ -63,7 +69,11 @@ pub fn tags_to_script(source: &str) -> String {
             continue;
         }
         if i < len - 1 && chars[i] == '<' && is_cf_tag_start(&chars, i, len) {
-            let (script, consumed) = parse_cf_tag(&chars, i, len);
+            let (script, consumed) = parse_cf_tag(&chars, i, len, imports);
+            result.push_str(&script);
+            i += consumed;
+        } else if !imports.is_empty() && chars[i] == '<' && is_import_tag_start(&chars, i, len, imports) {
+            let (script, consumed) = parse_import_tag(&chars, i, len, imports);
             result.push_str(&script);
             i += consumed;
         } else if chars[i] == '#' && i + 1 < len && chars[i + 1] != '#' {
@@ -86,6 +96,7 @@ pub fn tags_to_script(source: &str) -> String {
             // Plain text - collect until we hit a tag, hash expression, or CFML comment
             let start = i;
             while i < len && !(chars[i] == '<' && is_cf_tag_start(&chars, i, len))
+                && !(chars[i] == '<' && !imports.is_empty() && is_import_tag_start(&chars, i, len, imports))
                 && !(chars[i] == '#' && i + 1 < len)
                 && !(i + 4 < len && chars[i] == '<' && chars[i + 1] == '!' && chars[i + 2] == '-' && chars[i + 3] == '-' && chars[i + 4] == '-')
             {
@@ -101,6 +112,84 @@ pub fn tags_to_script(source: &str) -> String {
     }
 
     result
+}
+
+/// Check if chars at pos start an import prefix tag: <prefix:tagname> or </prefix:tagname>
+fn is_import_tag_start(chars: &[char], pos: usize, len: usize, imports: &std::collections::HashMap<String, String>) -> bool {
+    let name_start = if pos + 1 < len && chars[pos + 1] == '/' { pos + 2 } else { pos + 1 };
+    // Read prefix (alphanumeric until :)
+    let mut end = name_start;
+    while end < len && (chars[end].is_alphanumeric() || chars[end] == '_') {
+        end += 1;
+    }
+    if end >= len || chars[end] != ':' || end == name_start {
+        return false;
+    }
+    // Check there's a tag name after the colon
+    if end + 1 >= len || !chars[end + 1].is_alphabetic() {
+        return false;
+    }
+    let prefix: String = chars[name_start..end].iter().collect();
+    imports.contains_key(&prefix.to_lowercase())
+}
+
+/// Parse an import prefix tag: <prefix:tagname attrs> or </prefix:tagname>
+fn parse_import_tag(chars: &[char], start: usize, len: usize, imports: &mut std::collections::HashMap<String, String>) -> (String, usize) {
+    let is_closing = chars.get(start + 1) == Some(&'/');
+    let name_start = if is_closing { start + 2 } else { start + 1 };
+
+    // Read prefix
+    let mut colon_pos = name_start;
+    while colon_pos < len && chars[colon_pos] != ':' { colon_pos += 1; }
+    let prefix: String = chars[name_start..colon_pos].iter().collect();
+
+    // Read tag name after colon
+    let tag_start = colon_pos + 1;
+    let mut tag_name_end = tag_start;
+    while tag_name_end < len && (chars[tag_name_end].is_alphanumeric() || chars[tag_name_end] == '_') {
+        tag_name_end += 1;
+    }
+    let tag_name: String = chars[tag_start..tag_name_end].iter().collect();
+
+    // For closing tags, just consume and return empty (opening tag handler manages execution)
+    if is_closing {
+        let close_end = find_tag_end(chars, tag_name_end, len);
+        return (String::new(), close_end - start);
+    }
+
+    // Parse attributes
+    let (attrs, tag_end) = parse_tag_attributes(chars, tag_name_end, len);
+
+    // Look up taglib path
+    let taglib = imports.get(&prefix.to_lowercase()).cloned().unwrap_or_default();
+    let path = format!("{}/{}.cfm", taglib.trim_end_matches('/'), tag_name.to_lowercase());
+    let path_expr = format!("\"{}\"", path.replace('"', "\\\""));
+
+    // Build attributes struct
+    let mut attr_parts = Vec::new();
+    for (k, v) in &attrs {
+        let val = strip_hashes(v);
+        attr_parts.push(format!("{}: {}", k, quote_if_needed(&val)));
+    }
+    let attrs_expr = format!("{{ {} }}", attr_parts.join(", "));
+
+    // Check for body (closing </prefix:tagname>)
+    let full_tag = format!("{}:{}", prefix, tag_name);
+    if let Some(body_start) = find_closing_tag(chars, tag_end, len, &full_tag) {
+        let body_chars = &chars[tag_end..body_start];
+        let body_source: String = body_chars.iter().collect();
+        let body_script = tags_to_script_impl(&body_source, imports);
+        let close_end = find_tag_end(chars, body_start, len);
+        let result = format!(
+            "__cfcustomtag_start({}, {});\n{}\n__cfcustomtag_end();\n",
+            path_expr, attrs_expr, body_script
+        );
+        (result, close_end - start)
+    } else {
+        // Self-closing
+        let result = format!("__cfcustomtag({}, {});\n", path_expr, attrs_expr);
+        (result, tag_end - start)
+    }
 }
 
 fn is_cf_tag_start(chars: &[char], pos: usize, len: usize) -> bool {
@@ -133,7 +222,7 @@ fn find_closing_hash(chars: &[char], start: usize, len: usize) -> Option<usize> 
     None
 }
 
-fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
+fn parse_cf_tag(chars: &[char], start: usize, len: usize, imports: &mut std::collections::HashMap<String, String>) -> (String, usize) {
     // Determine if closing tag
     let is_closing = chars.get(start + 1) == Some(&'/');
 
@@ -566,7 +655,7 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
                 let body: String = chars[tag_end..end_tag_pos].iter().collect();
                 let close_end = find_tag_end(chars, end_tag_pos, len);
                 // Process body through main loop (handles hash expressions, nested tags, text)
-                let body_script = tags_to_script(&body);
+                let body_script = tags_to_script_impl(&body, imports);
                 (format!("__cfsavecontent_start();\n{}{} = __cfsavecontent_end();\n", body_script, variable), close_end - start)
             } else {
                 (format!("__cfsavecontent_start();\n"), tag_end - start)
@@ -589,7 +678,7 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
                     if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cftransaction") {
                         let body: String = chars[tag_end..end_tag_pos].iter().collect();
                         let close_end = find_tag_end(chars, end_tag_pos, len);
-                        let body_script = tags_to_script(&body);
+                        let body_script = tags_to_script_impl(&body, imports);
 
                         // Build args for __cftransaction_start
                         let mut txn_args = vec!["\"begin\"".to_string()];
@@ -627,7 +716,7 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
             if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cfswitch") {
                 let body: String = chars[tag_end..end_tag_pos].iter().collect();
                 let close_end = find_tag_end(chars, end_tag_pos, len);
-                let switch_body = parse_cfswitch_body(&body);
+                let switch_body = parse_cfswitch_body(&body, imports);
                 (format!("switch ({}) {{\n{}}}\n", expression, switch_body), close_end - start)
             } else {
                 (format!("switch ({}) {{\n", expression), tag_end - start)
@@ -691,7 +780,7 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
             if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cfsilent") {
                 let body: String = chars[tag_end..end_tag_pos].iter().collect();
                 let close_end = find_tag_end(chars, end_tag_pos, len);
-                let body_script = tags_to_script(&body);
+                let body_script = tags_to_script_impl(&body, imports);
                 (format!("__cfsavecontent_start();\n{}__cfsavecontent_end();\n", body_script), close_end - start)
             } else {
                 (String::new(), tag_end - start)
@@ -727,7 +816,7 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
             if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cflock") {
                 let body: String = chars[tag_end..end_tag_pos].iter().collect();
                 let close_end = find_tag_end(chars, end_tag_pos, len);
-                let body_script = tags_to_script(&body);
+                let body_script = tags_to_script_impl(&body, imports);
                 let mut lock_parts = Vec::new();
                 for (k, v) in &attrs {
                     let lower = v.to_lowercase();
@@ -830,7 +919,7 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
                 // Body tag: emit start, recursively preprocess body, then end marker
                 let body_chars = &chars[tag_end..body_start];
                 let body_source: String = body_chars.iter().collect();
-                let body_script = tags_to_script(&body_source);
+                let body_script = tags_to_script_impl(&body_source, imports);
                 let close_end = find_tag_end(chars, body_start, len);
                 let result = format!(
                     "__cfcustomtag_start({}, {});\n{}\n__cfcustomtag_end();\n",
@@ -1015,6 +1104,54 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
             // These are handled as child tags of cfstoredproc; skip if encountered standalone
             (String::new(), tag_end - start)
         }
+        "cfthread" => {
+            let action = attrs.get("action").cloned().unwrap_or_else(|| "run".to_string()).to_lowercase();
+            let thread_name = attrs.get("name").cloned().unwrap_or_else(|| "thread1".to_string());
+            let thread_name_expr = format!("\"{}\"", thread_name.replace('"', "\\\""));
+
+            match action.as_str() {
+                "run" => {
+                    if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cfthread") {
+                        let body: String = chars[tag_end..end_tag_pos].iter().collect();
+                        let close_end = find_tag_end(chars, end_tag_pos, len);
+                        let body_script = tags_to_script_impl(&body, imports);
+                        (format!(
+                            "__cfthread_run({}, function() {{\n{}\n}});\n",
+                            thread_name_expr, body_script
+                        ), close_end - start)
+                    } else {
+                        (String::new(), tag_end - start)
+                    }
+                }
+                "join" => {
+                    let timeout = attrs.get("timeout").cloned().unwrap_or_else(|| "0".to_string());
+                    (format!("__cfthread_join({}, {});\n", thread_name_expr, timeout), tag_end - start)
+                }
+                "terminate" => {
+                    (format!("__cfthread_terminate({});\n", thread_name_expr), tag_end - start)
+                }
+                _ => {
+                    (format!("throw(\"cfthread action='{}' is not supported.\");\n", action), tag_end - start)
+                }
+            }
+        }
+        "cfimport" => {
+            // Register prefix→taglib mapping for CFML custom tag libraries.
+            if let (Some(taglib), Some(prefix)) = (attrs.get("taglib"), attrs.get("prefix")) {
+                imports.insert(prefix.to_lowercase(), taglib.clone());
+            } else {
+                // Non-taglib imports (e.g. Java class imports) are not supported
+                let detail = attrs.get("prefix")
+                    .or_else(|| attrs.get("name"))
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+                return (
+                    format!("throw(\"cfimport without taglib is not implemented ({}). Only CFML taglib imports are supported.\");\n", detail.replace('"', "\\\"" )),
+                    tag_end - start,
+                );
+            }
+            (String::new(), tag_end - start)
+        }
         _ => {
             if tag_lower.starts_with("cf_") {
                 // Custom tag: <cf_tagname attr1="val1">
@@ -1034,7 +1171,7 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
                 if let Some(body_start) = find_closing_tag(chars, tag_end, len, &tag_name_full) {
                     let body_chars = &chars[tag_end..body_start];
                     let body_source: String = body_chars.iter().collect();
-                    let body_script = tags_to_script(&body_source);
+                    let body_script = tags_to_script_impl(&body_source, imports);
                     let close_end = find_tag_end(chars, body_start, len);
                     let result = format!(
                         "__cfcustomtag_start({}, {});\n{}\n__cfcustomtag_end();\n",
@@ -1047,8 +1184,11 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
                     (result, tag_end - start)
                 }
             } else {
-                // Unknown tag, skip it
-                (String::new(), tag_end - start)
+                // Unknown/unsupported CFML tag — emit runtime error
+                (
+                    format!("throw(\"Tag <{}> is not implemented.\");\n", tag_name),
+                    tag_end - start,
+                )
             }
         }
     }
@@ -1422,7 +1562,7 @@ fn parse_cfloop_tag(
 }
 
 /// Parse the body of a <cfswitch> tag, scanning for <cfcase> and <cfdefaultcase>
-fn parse_cfswitch_body(body: &str) -> String {
+fn parse_cfswitch_body(body: &str, imports: &mut std::collections::HashMap<String, String>) -> String {
     let mut result = String::new();
     let chars: Vec<char> = body.chars().collect();
     let len = chars.len();
@@ -1449,7 +1589,7 @@ fn parse_cfswitch_body(body: &str) -> String {
                 // Find closing </cfdefaultcase>
                 if let Some(close_pos) = find_closing_tag(&chars, tag_end, len, "cfdefaultcase") {
                     let case_body: String = chars[tag_end..close_pos].iter().collect();
-                    let case_script = tags_to_script(&case_body);
+                    let case_script = tags_to_script_impl(&case_body, imports);
                     result.push_str(&format!("default: \n{}", case_script));
                     let close_end = find_tag_end(&chars, close_pos, len);
                     i = close_end;
@@ -1466,7 +1606,7 @@ fn parse_cfswitch_body(body: &str) -> String {
                 // Find closing </cfcase>
                 if let Some(close_pos) = find_closing_tag(&chars, tag_end, len, "cfcase") {
                     let case_body: String = chars[tag_end..close_pos].iter().collect();
-                    let case_script = tags_to_script(&case_body);
+                    let case_script = tags_to_script_impl(&case_body, imports);
                     // Value can be comma-separated for multiple case values
                     let values: Vec<&str> = value.split(',').map(|v| v.trim()).filter(|v| !v.is_empty()).collect();
                     let quoted_values: Vec<String> = values.iter().map(|v| {
@@ -1565,7 +1705,8 @@ fn parse_cffile_tag(
             let file_expr = if file.contains('.') || file.contains('(') { file } else { format!("\"{}\"", file.replace('"', "\\\"")) };
             (format!("fileDelete({});\n", file_expr), consumed)
         }
-        "upload" => {
+        "upload" | "uploadall" => {
+            let func = if action == "uploadall" { "__cffile_upload" } else { "__cffile_upload" };
             let mut parts = Vec::new();
             for (k, v) in attrs {
                 if k == "action" { continue; }
@@ -1576,10 +1717,10 @@ fn parse_cffile_tag(
                     parts.push(format!("{}: \"{}\"", k, v.replace('"', "\\\"")));
                 }
             }
-            (format!("__cffile_upload({{ {} }});\n", parts.join(", ")), consumed)
+            (format!("{}({{ {} }});\n", func, parts.join(", ")), consumed)
         }
         _ => {
-            (String::new(), consumed)
+            (format!("throw(\"cffile action='{}' is not implemented.\");\n", action), consumed)
         }
     }
 }
