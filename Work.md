@@ -12,10 +12,10 @@ Full CFScript support: variables, operators (arithmetic, comparison, logical, st
 ### Data Types
 Null, Boolean, Integer (i64), Double (f64), String (CI comparison), Array (1-based), Struct (CI keys), Function, Closure, Component, Query, Binary.
 
-### Tag Syntax (45+ tags)
-Tag preprocessor converts CFML tags to CFScript. Supports: cfset, cfoutput, cfif/cfelseif/cfelse, cfloop, cfscript, cffunction, cfargument, cfreturn, cfinclude, cfdump, cfthrow, cftry/cfcatch/cffinally, cfabort, cfparam, cfcomponent, cfinterface, cfproperty, cfhttp, cfhttpparam, cfquery, cfqueryparam, cfheader, cfcontent, cflocation, cfdirectory, cfsavecontent, cfinvoke, cftransaction, cfswitch/cfcase/cfdefaultcase, cfbreak, cfcontinue, cfwhile, cfrethrow, cflock, cfsilent, cflog, cfsetting, cfcookie, cffile, cfloginuser, cflogout, cfmodule, cf_ prefix custom tags. CFScript `lock` block syntax supported. Custom tags support self-closing and body modes, caller write-back, thisTag scope, this.customTagPaths.
+### Tag Syntax (50+ tags)
+Tag preprocessor converts CFML tags to CFScript. Supports: cfset, cfoutput, cfif/cfelseif/cfelse, cfloop, cfscript, cffunction, cfargument, cfreturn, cfinclude, cfdump, cfthrow, cftry/cfcatch/cffinally, cfabort, cfparam, cfcomponent, cfinterface, cfproperty, cfhttp, cfhttpparam, cfquery, cfqueryparam, cfheader, cfcontent, cflocation, cfdirectory, cfsavecontent, cfinvoke, cftransaction, cfswitch/cfcase/cfdefaultcase, cfbreak, cfcontinue, cfwhile, cfrethrow, cflock, cfsilent, cflog, cfsetting, cfcookie, cffile, cfloginuser, cflogout, cfmodule, cf_ prefix custom tags, cfmail/cfmailparam/cfmailpart, cfcache, cfexecute, cfstoredproc/cfprocparam/cfprocresult. CFScript `lock` block syntax supported. Custom tags support self-closing and body modes, caller write-back, thisTag scope, this.customTagPaths.
 
-### Standard Library (380+ functions)
+### Standard Library (390+ functions)
 - **String (50+)**: len, ucase, lcase, trim, ltrim, rtrim, find, findNoCase, findOneOf, mid, left, right, replace, replaceNoCase, replaceList, replaceListNoCase, reverse, repeatString, insert, removeChars, spanIncluding, spanExcluding, compare, compareNoCase, asc, chr, reFind, reFindNoCase, reReplace, reReplaceNoCase, reMatch, reMatchNoCase, wrap, stripCr, toBase64, toBinary, urlEncodedFormat, urlDecode, htmlEditFormat, htmlCodeFormat, encodeForHTML, xmlFormat, paragraphFormat, ucFirst, jsStringFormat, reEscape, getToken, newLine, lJustify, rJustify, cJustify, numberFormat, decimalFormat, formatBaseN, inputBaseN
 - **Array (46+)**: arrayNew, arrayLen, arrayAppend, arrayPrepend, arrayDeleteAt, arrayInsertAt, arraySet, arraySwap, arrayContains, arrayContainsNoCase, arrayFind, arrayFindNoCase, arrayFindAll, arrayFindAllNoCase, arraySort, arrayReverse, arraySlice, arrayToList, arrayMerge, arrayClear, arrayIsDefined, arrayMin, arrayMax, arrayAvg, arraySum, arrayFirst, arrayLast, arrayIsEmpty, arrayDelete, arrayPop, arrayShift, arrayPush, arrayUnshift, arrayIndexExists, arrayResize, arrayMedian, arrayMid, arrayReduceRight, arraySplice, arrayRange, arrayToStruct, arrayDeleteNoCase + higher-order: map, filter, reduce, each, some, every
 - **Struct (31+)**: structNew, structCount, structKeyExists, structKeyList, structKeyArray, structDelete, structInsert, structUpdate, structFind, structFindKey, structFindValue, structClear, structCopy, structAppend, structIsEmpty, structSort, structGet, structValueArray, structEquals, isEmpty, structToSorted, structIsOrdered, structIsCaseSensitive, structToQueryString, structGetMetadata, structSetMetadata + higher-order: each, map, filter, reduce, some, every
@@ -32,7 +32,8 @@ Tag preprocessor converts CFML tags to CFScript. Supports: cfset, cfoutput, cfif
 - **Locale (13)**: lsDateFormat, lsTimeFormat, lsDateTimeFormat, lsCurrencyFormat, lsEuroCurrencyFormat, lsIsDate, lsIsNumeric, lsIsCurrency, lsParseCurrency, lsParseDateTime, lsNumberFormat, lsWeek, lsDayOfWeek
 - **Error Handling**: cfcatch.tagContext (stack trace array with template, line, id, raw_trace, column), exceptionKeyExists
 - **XML**: xmlParse, xmlSearch, isXML
-- **Utility (22+)**: writeOutput, writeDump, dump, sleep, duplicate, writeLog, systemOutput, trace, location, applicationStop, getApplicationMetadata, getApplicationSettings, getFileFromPath, getCanonicalPath, getTemplatePath, setLocale, getLocale, setTimeZone, getTimeZone, getBaseTemplatePath, getCurrentTemplatePath, getDirectoryFromPath, setVariable, getVariable
+- **Caching (8)**: cachePut, cacheGet, cacheDelete, cacheClear, cacheKeyExists, cacheCount, cacheGetAll, cacheGetAllIds
+- **Utility (23+)**: writeOutput, writeDump, dump, sleep, duplicate, writeLog, systemOutput, trace, location, applicationStop, getApplicationMetadata, getApplicationSettings, getFileFromPath, getCanonicalPath, getTemplatePath, setLocale, getLocale, setTimeZone, getTimeZone, getBaseTemplatePath, getCurrentTemplatePath, getDirectoryFromPath, setVariable, getVariable, getEnvironmentVariable
 - **Session/Auth**: sessionInvalidate, sessionRotate, sessionGetMetaData, getAuthUser, isUserLoggedIn, isUserInRole
 
 ### Member Functions
@@ -61,10 +62,6 @@ CLI (file exec, `-c` inline, `-d` debug, `-r` REPL, `--serve`), WASM target, err
 
 **Tag Libraries**: cfimport taglib= (cfimport is parsed but no-op), .tld tag library descriptors, cfmodule name= dot-path resolution via customTagPaths
 
-**Tags**: cfmail/cfmailparam/cfmailpart, cfcache, cfexecute, cfstoredproc/cfprocparam/cfprocresult
-
-**Caching**: cacheGet, cachePut, cacheDelete, cacheClear, cacheKeyExists, cacheCount, cacheGetAll, cacheGetAllIds
-
 **Higher-Order**: collectionEach/Map/Filter/Reduce/Every/Some, stringEach/Map/Filter/Reduce/Some/Every/Sort, each (generic)
 
 **Misc**: bitMaskClear/Read/Set, xmlNew/xmlElemNew/xmlChildPos/xmlGetNodeType/xmlHasChild, isXMLDoc/Elem/Node/Root/Attribute, soundex/metaphone, htmlParse, toScript
@@ -74,7 +71,7 @@ CLI (file exec, `-c` inline, `-d` debug, `-r` REPL, `--serve`), WASM target, err
 - JWT functions, cfzip, cfschedule, cfthread, cfwddx, callStackGet/Dump, precisionEvaluate, INI file functions, valuelist/quotedValueList, system monitoring
 
 ### Taffy Framework
-Remaining: cfthread, cfcache, rate limiting, CORS headers.
+Remaining: cfthread, rate limiting, CORS headers.
 
 ---
 

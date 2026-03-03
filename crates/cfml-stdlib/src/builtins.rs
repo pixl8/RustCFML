@@ -491,7 +491,7 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("__cfcookie".into(), fn_cfcookie_stub);
     f.insert("__cfcache".into(), fn_cfcache_stub);
     f.insert("__cfexecute".into(), fn_cfexecute_stub);
-    f.insert("__cfmail".into(), fn_cfmail_stub);
+    f.insert("__cfmail".into(), fn_cfmail);
 
     // ---- Cache functions (VM-intercepted) ----
     f.insert("cachePut".into(), fn_cache_stub);
@@ -8118,8 +8118,172 @@ fn fn_cfexecute_stub(_args: Vec<CfmlValue>) -> CfmlResult {
     Err(CfmlError::runtime("__cfexecute requires VM intercept".into()))
 }
 
-fn fn_cfmail_stub(_args: Vec<CfmlValue>) -> CfmlResult {
-    // VM intercepts this
+fn fn_cfmail(args: Vec<CfmlValue>) -> CfmlResult {
+    let opts = match args.into_iter().next() {
+        Some(CfmlValue::Struct(s)) => s,
+        _ => return Err(CfmlError::runtime("__cfmail requires a struct argument".into())),
+    };
+
+    let get_opt = |key: &str| -> Option<String> {
+        opts.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.as_string())
+    };
+
+    let to = get_opt("to").unwrap_or_default();
+    let from = get_opt("from").unwrap_or_default();
+    let subject = get_opt("subject").unwrap_or_default();
+    let mail_type = get_opt("type").unwrap_or_else(|| "text".into());
+    let body_text = get_opt("body").unwrap_or_default();
+    let cc = get_opt("cc");
+    let bcc = get_opt("bcc");
+    let server = get_opt("server");
+    let port_str = get_opt("port");
+    let username = get_opt("username");
+    let password = get_opt("password");
+
+    // Always log to stderr
+    eprintln!("[CFMAIL] To: {} | From: {} | Subject: {} | Type: {}", to, from, subject, mail_type);
+    if !body_text.is_empty() {
+        eprintln!("[CFMAIL] Body: {}", body_text);
+    }
+
+    // Collect file attachments from params array
+    let mut attachments: Vec<String> = Vec::new();
+    if let Some((_, CfmlValue::Array(params))) = opts.iter().find(|(k, _)| k.eq_ignore_ascii_case("params")) {
+        for param in params {
+            if let CfmlValue::Struct(p) = param {
+                if let Some(file_path) = p.iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("file"))
+                    .map(|(_, v)| v.as_string())
+                {
+                    if !file_path.is_empty() {
+                        attachments.push(file_path);
+                    }
+                }
+            }
+        }
+    }
+
+    // If server is provided, attempt real SMTP delivery
+    #[cfg(feature = "smtp")]
+    if let Some(ref smtp_server) = server {
+        use lettre::{SmtpTransport, Transport};
+        use lettre::transport::smtp::authentication::Credentials;
+        use lettre::message::{header::ContentType, Message, MultiPart, SinglePart, Attachment};
+
+        let mut email_builder = Message::builder()
+            .subject(&subject);
+
+        // Parse from address
+        match from.parse::<lettre::message::Mailbox>() {
+            Ok(mbox) => { email_builder = email_builder.from(mbox); }
+            Err(e) => return Err(CfmlError::runtime(format!("cfmail: invalid from address '{}': {}", from, e))),
+        }
+
+        // Parse to addresses (comma-separated)
+        for addr in to.split(',') {
+            let addr = addr.trim();
+            if !addr.is_empty() {
+                match addr.parse::<lettre::message::Mailbox>() {
+                    Ok(mbox) => { email_builder = email_builder.to(mbox); }
+                    Err(e) => return Err(CfmlError::runtime(format!("cfmail: invalid to address '{}': {}", addr, e))),
+                }
+            }
+        }
+
+        // CC
+        if let Some(ref cc_addrs) = cc {
+            for addr in cc_addrs.split(',') {
+                let addr = addr.trim();
+                if !addr.is_empty() {
+                    if let Ok(mbox) = addr.parse::<lettre::message::Mailbox>() {
+                        email_builder = email_builder.cc(mbox);
+                    }
+                }
+            }
+        }
+
+        // BCC
+        if let Some(ref bcc_addrs) = bcc {
+            for addr in bcc_addrs.split(',') {
+                let addr = addr.trim();
+                if !addr.is_empty() {
+                    if let Ok(mbox) = addr.parse::<lettre::message::Mailbox>() {
+                        email_builder = email_builder.bcc(mbox);
+                    }
+                }
+            }
+        }
+
+        let email = if attachments.is_empty() {
+            // Simple message (no attachments)
+            let content_type = if mail_type.eq_ignore_ascii_case("html") {
+                ContentType::TEXT_HTML
+            } else {
+                ContentType::TEXT_PLAIN
+            };
+            email_builder
+                .header(content_type)
+                .body(body_text.clone())
+                .map_err(|e| CfmlError::runtime(format!("cfmail: failed to build email: {}", e)))?
+        } else {
+            // Multipart message with attachments
+            let body_part = if mail_type.eq_ignore_ascii_case("html") {
+                SinglePart::builder()
+                    .header(ContentType::TEXT_HTML)
+                    .body(body_text.clone())
+            } else {
+                SinglePart::builder()
+                    .header(ContentType::TEXT_PLAIN)
+                    .body(body_text.clone())
+            };
+
+            let mut multipart = MultiPart::mixed().singlepart(body_part);
+
+            for file_path in &attachments {
+                let path = std::path::Path::new(file_path);
+                let filename = path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "attachment".to_string());
+                match std::fs::read(path) {
+                    Ok(data) => {
+                        let attachment = Attachment::new(filename)
+                            .body(data, ContentType::parse("application/octet-stream").unwrap());
+                        multipart = multipart.singlepart(attachment);
+                        eprintln!("[CFMAIL] Attachment: {}", file_path);
+                    }
+                    Err(e) => {
+                        eprintln!("[CFMAIL] Warning: could not read attachment '{}': {}", file_path, e);
+                    }
+                }
+            }
+
+            email_builder
+                .multipart(multipart)
+                .map_err(|e| CfmlError::runtime(format!("cfmail: failed to build email: {}", e)))?
+        };
+
+        let port: u16 = port_str.as_deref()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(25);
+
+        let mut transport_builder = SmtpTransport::builder_dangerous(smtp_server)
+            .port(port);
+
+        if let (Some(ref user), Some(ref pass)) = (&username, &password) {
+            transport_builder = transport_builder.credentials(
+                Credentials::new(user.clone(), pass.clone())
+            );
+        }
+
+        let mailer = transport_builder.build();
+        match mailer.send(&email) {
+            Ok(_) => eprintln!("[CFMAIL] Sent successfully via {}", smtp_server),
+            Err(e) => return Err(CfmlError::runtime(format!("cfmail: SMTP send failed: {}", e))),
+        }
+    }
+
     Ok(CfmlValue::Null)
 }
 

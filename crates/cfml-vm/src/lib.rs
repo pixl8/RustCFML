@@ -1738,7 +1738,7 @@ impl CfmlVirtualMachine {
                 | "__cfcustomtag" | "__cfcustomtag_start" | "__cfcustomtag_end"
                 | "cacheput" | "cacheget" | "cachedelete" | "cacheclear"
                 | "cachekeyexists" | "cachecount" | "cachegetall" | "cachegetallids"
-                | "__cfcache" | "__cfexecute" | "__cfmail" => {
+                | "__cfcache" | "__cfexecute" => {
                     // Will be handled at the end of this function (needs VM access)
                 }
                 _ => {
@@ -3561,37 +3561,6 @@ impl CfmlVirtualMachine {
                             Err(e) => {
                                 return Err(CfmlError::runtime(format!("cfexecute: failed to spawn '{}': {}", cmd_name, e)));
                             }
-                        }
-                    }
-                    return Ok(CfmlValue::Null);
-                }
-
-                // ---- cfmail tag handler ----
-                "__cfmail" => {
-                    if let Some(CfmlValue::Struct(opts)) = args.get(0) {
-                        let to = opts.iter()
-                            .find(|(k, _)| k.to_lowercase() == "to")
-                            .map(|(_, v)| v.as_string())
-                            .unwrap_or_default();
-                        let from = opts.iter()
-                            .find(|(k, _)| k.to_lowercase() == "from")
-                            .map(|(_, v)| v.as_string())
-                            .unwrap_or_default();
-                        let subject = opts.iter()
-                            .find(|(k, _)| k.to_lowercase() == "subject")
-                            .map(|(_, v)| v.as_string())
-                            .unwrap_or_default();
-                        let mail_type = opts.iter()
-                            .find(|(k, _)| k.to_lowercase() == "type")
-                            .map(|(_, v)| v.as_string())
-                            .unwrap_or_else(|| "text".to_string());
-                        let body_text = opts.iter()
-                            .find(|(k, _)| k.to_lowercase() == "body")
-                            .map(|(_, v)| v.as_string())
-                            .unwrap_or_default();
-                        eprintln!("[CFMAIL] To: {} | From: {} | Subject: {} | Type: {}", to, from, subject, mail_type);
-                        if !body_text.is_empty() {
-                            eprintln!("[CFMAIL] Body: {}", body_text);
                         }
                     }
                     return Ok(CfmlValue::Null);
