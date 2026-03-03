@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
 parking_lot = { workspace = true }
+rust_decimal = { version = "1", features = ["maths"] }
 
 [features]
 default = ["std"]

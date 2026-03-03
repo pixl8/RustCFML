@@ -13,7 +13,7 @@ Full CFScript support: variables, operators (arithmetic, comparison, logical, st
 Null, Boolean, Integer (i64), Double (f64), String (CI comparison), Array (1-based), Struct (CI keys), Function, Closure, Component, Query, Binary.
 
 ### Tag Syntax (50+ tags)
-Tag preprocessor converts CFML tags to CFScript. Supports: cfset, cfoutput, cfif/cfelseif/cfelse, cfloop, cfscript, cffunction, cfargument, cfreturn, cfinclude, cfdump, cfthrow, cftry/cfcatch/cffinally, cfabort, cfparam, cfcomponent, cfinterface, cfproperty, cfhttp, cfhttpparam, cfquery, cfqueryparam, cfheader, cfcontent, cflocation, cfdirectory, cfsavecontent, cfinvoke, cftransaction, cfswitch/cfcase/cfdefaultcase, cfbreak, cfcontinue, cfwhile, cfrethrow, cflock, cfsilent, cflog, cfsetting, cfcookie, cffile, cfloginuser, cflogout, cfmodule, cf_ prefix custom tags, cfmail/cfmailparam/cfmailpart, cfcache, cfexecute, cfstoredproc/cfprocparam/cfprocresult, cfimport (taglib), cfthread. CFScript `lock` block syntax supported. Custom tags support self-closing and body modes, caller write-back, thisTag scope, this.customTagPaths.
+Tag preprocessor converts CFML tags to CFScript. Supports: cfset, cfoutput, cfif/cfelseif/cfelse, cfloop, cfscript, cffunction, cfargument, cfreturn, cfinclude, cfdump, cfthrow, cftry/cfcatch/cffinally, cfabort, cfparam, cfcomponent, cfinterface, cfproperty, cfhttp, cfhttpparam, cfquery, cfqueryparam, cfheader, cfcontent, cflocation, cfdirectory, cfsavecontent, cfinvoke, cftransaction, cfswitch/cfcase/cfdefaultcase, cfbreak, cfcontinue, cfwhile, cfrethrow, cflock, cfsilent, cflog, cfsetting, cfcookie, cffile, cfloginuser, cflogout, cfmodule, cf_ prefix custom tags, cfmail/cfmailparam/cfmailpart, cfcache, cfexecute, cfstoredproc/cfprocparam/cfprocresult, cfimport (taglib with .tld support), cfthread, cfzip. CFScript `lock` block syntax supported. Custom tags support self-closing and body modes, caller write-back, thisTag scope, this.customTagPaths.
 
 ### Standard Library (400+ functions)
 - **String (50+)**: len, ucase, lcase, trim, ltrim, rtrim, find, findNoCase, findOneOf, mid, left, right, replace, replaceNoCase, replaceList, replaceListNoCase, reverse, repeatString, insert, removeChars, spanIncluding, spanExcluding, compare, compareNoCase, asc, chr, reFind, reFindNoCase, reReplace, reReplaceNoCase, reMatch, reMatchNoCase, wrap, stripCr, toBase64, toBinary, urlEncodedFormat, urlDecode, htmlEditFormat, htmlCodeFormat, encodeForHTML, xmlFormat, paragraphFormat, ucFirst, jsStringFormat, reEscape, getToken, newLine, lJustify, rJustify, cJustify, numberFormat, decimalFormat, formatBaseN, inputBaseN
@@ -31,12 +31,14 @@ Tag preprocessor converts CFML tags to CFScript. Supports: cfset, cfoutput, cfif
 - **Encoding/Decoding**: charsetDecode, charsetEncode, encodeForHTMLAttribute, encodeForXML, encodeForXMLAttribute, encodeFor, decodeForHTML, decodeFromURL, urlEncode, canonicalize
 - **Locale (13)**: lsDateFormat, lsTimeFormat, lsDateTimeFormat, lsCurrencyFormat, lsEuroCurrencyFormat, lsIsDate, lsIsNumeric, lsIsCurrency, lsParseCurrency, lsParseDateTime, lsNumberFormat, lsWeek, lsDayOfWeek
 - **Error Handling**: cfcatch.tagContext (stack trace array with template, line, id, raw_trace, column), exceptionKeyExists
-- **XML (10+)**: xmlParse, xmlSearch, isXML, xmlNew, xmlElemNew, xmlChildPos, xmlGetNodeType, xmlHasChild, isXMLDoc/Elem/Node/Root/Attribute
+- **XML/HTML (11+)**: xmlParse, xmlSearch, isXML, xmlNew, xmlElemNew, xmlChildPos, xmlGetNodeType, xmlHasChild, isXMLDoc/Elem/Node/Root/Attribute, htmlParse
 - **Caching (8)**: cachePut, cacheGet, cacheDelete, cacheClear, cacheKeyExists, cacheCount, cacheGetAll, cacheGetAllIds
 - **Higher-Order Generics**: collectionEach/Map/Filter/Reduce/Some/Every, stringEach/Map/Filter/Reduce/Some/Every/Sort, each (generic)
 - **Utility (23+)**: writeOutput, writeDump, dump, sleep, duplicate, writeLog, systemOutput, trace, location, applicationStop, getApplicationMetadata, getApplicationSettings, getFileFromPath, getCanonicalPath, getTemplatePath, setLocale, getLocale, setTimeZone, getTimeZone, getBaseTemplatePath, getCurrentTemplatePath, getDirectoryFromPath, setVariable, getVariable, getEnvironmentVariable
 - **Session/Auth**: sessionInvalidate, sessionRotate, sessionGetMetaData, getAuthUser, isUserLoggedIn, isUserInRole
 - **Bitmask**: bitMaskClear, bitMaskRead, bitMaskSet
+- **Zip**: cfzip (actions: zip, unzip, list, read, readBinary, delete)
+- **Stack/Precision**: callStackGet, callStackDump, precisionEvaluate
 - **Misc**: soundex, metaphone, toScript
 
 ### Member Functions
@@ -49,13 +51,13 @@ local, variables, arguments, request, application (persistent), server, session 
 extends (dot-path), super.method(), isInstanceOf, getMetadata, createObject, interface/implements with inheritance, implicit accessors, onMissingMethod, component mappings (this.mappings).
 
 ### Web Server (Axum)
-`--serve` mode with: HTTP response infrastructure, form scope (url-encoded + multipart), url scope, cgi scope, cookie scope, session management (onSessionStart/onSessionEnd lifecycle, configurable timeout), file uploads, Application.cfc lifecycle, URL rewrite engine (Tuckey-compatible). Real named locks with cflock/cfscript lock (RwLock-based concurrency). Bracket assignment for component mappings.
+`--serve` mode with: HTTP response infrastructure, form scope (url-encoded + multipart), url scope, cgi scope (remote_addr, server_name from Host header, all http_* headers), cookie scope, session management (onSessionStart/onSessionEnd lifecycle, configurable timeout), file uploads, Application.cfc lifecycle, URL rewrite engine (Tuckey-compatible). Real named locks with cflock/cfscript lock (RwLock-based concurrency). Bracket assignment for component mappings.
 
 ### Database
 queryExecute with SQLite, MySQL, PostgreSQL, MSSQL. Connection pooling, cfqueryparam, cftransaction, structured query params.
 
-### Threading
-cfthread tag with action=run/join/terminate. Sequential execution model (thread body runs inline). cfthread scope with thread metadata (status, output, error).
+### Threading (Sequential — No Real Concurrency)
+cfthread tag with action=run/join/terminate. **Thread bodies execute inline sequentially** — no threads are spawned. This means cfthread code works functionally but does not run in parallel; sleep/long operations block the parent. cfthread scope with thread metadata (status, output, error, elapsedtime). Output capture, error capture, and thread scope (thread.varName) all work correctly within this sequential model.
 
 ### Infrastructure
 CLI (file exec, `-c` inline, `-d` debug, `-r` REPL, `--serve`), WASM target, error handling with line/column info.
@@ -65,10 +67,7 @@ CLI (file exec, `-c` inline, `-d` debug, `-r` REPL, `--serve`), WASM target, err
 ## Remaining Work
 
 ### Low Priority
-- .tld tag library descriptor parsing (cfimport taglib= works for filesystem taglibs)
-- htmlParse
-- cfzip, cfschedule, cfwddx
-- callStackGet/callStackDump, precisionEvaluate
+- cfschedule, cfwddx
 - INI file functions (getProfileString, setProfileString)
 - Real concurrent cfthread execution (currently sequential)
 
@@ -77,7 +76,7 @@ CLI (file exec, `-c` inline, `-d` debug, `-r` REPL, `--serve`), WASM target, err
 - Image functions (80+), Spreadsheet functions (40+), ORM (20+), SOAP/WSDL, Flash/Flex UI tags, Exchange, PDF, LDAP, Registry, .NET, Gateway, JWT
 
 ### Taffy Framework
-Remaining: rate limiting, CORS headers.
+Believed feature-complete. cgi.remote_addr, cgi.server_name (from Host header), and all request headers (cgi.http_*) available for rate limiting and CORS.
 
 ---
 
@@ -104,4 +103,4 @@ crates/
 
 Reference: [cfdocs.org/functions](https://cfdocs.org/functions) | [cfdocs.org/tags](https://cfdocs.org/tags) | BoxLang ANTLR grammar | Lucee expression grammar
 
-*Last Updated: 2026-03-03*
+*Last Updated: 2026-03-03* | 1163 tests across 88 suites

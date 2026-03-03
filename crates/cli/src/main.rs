@@ -382,15 +382,17 @@ async fn async_run_server(doc_root: &Path, port: u16, debug: bool, single_thread
         eprintln!("Failed to start server on 0.0.0.0:{}: {}", port, e);
         exit(1);
     });
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
 }
 
 async fn handle_request(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     req: axum::extract::Request,
 ) -> axum::response::Response {
     let (parts, body) = req.into_parts();
     let method = parts.method.to_string();
+    let remote_addr = addr.ip().to_string();
     let url = parts.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/").to_string();
 
     // Extract headers as Vec<(String, String)>
@@ -482,7 +484,7 @@ async fn handle_request(
 
             // Build web scopes using resolved script_name and path_info
             let (extra_globals, http_request_data) = build_web_scopes(
-                &method, &headers, &body_bytes, &rf.script_name, &rf.path_info, &query_string, state.port,
+                &method, &headers, &body_bytes, &rf.script_name, &rf.path_info, &query_string, state.port, &remote_addr,
             );
 
             let file_path = rf.file_path.to_string_lossy().to_string();
@@ -702,6 +704,7 @@ fn build_web_scopes(
     path_info: &str,
     query_string: &str,
     port: u16,
+    remote_addr: &str,
 ) -> (IndexMap<String, CfmlValue>, CfmlValue) {
     let mut globals = IndexMap::new();
 
@@ -712,22 +715,28 @@ fn build_web_scopes(
     cgi.insert("path_info".to_string(), CfmlValue::String(path_info.to_string()));
     cgi.insert("script_name".to_string(), CfmlValue::String(script_name.to_string()));
     cgi.insert("query_string".to_string(), CfmlValue::String(query_string.to_string()));
-    cgi.insert("server_name".to_string(), CfmlValue::String("127.0.0.1".to_string()));
     cgi.insert("server_port".to_string(), CfmlValue::String(port.to_string()));
+    cgi.insert("remote_addr".to_string(), CfmlValue::String(remote_addr.to_string()));
+    cgi.insert("remote_host".to_string(), CfmlValue::String(remote_addr.to_string()));
 
-    // Extract headers
+    // Extract headers into CGI scope with http_ prefix (standard CGI convention)
     let mut content_type = String::new();
-    let mut user_agent = String::new();
+    let mut server_name = "127.0.0.1".to_string();
     for (name, value) in headers {
         let lower = name.to_lowercase();
         if lower == "content-type" {
             content_type = value.clone();
-        } else if lower == "user-agent" {
-            user_agent = value.clone();
+            cgi.insert("content_type".to_string(), CfmlValue::String(value.clone()));
         }
+        if lower == "host" {
+            // server_name from Host header (strip port if present)
+            server_name = value.split(':').next().unwrap_or(value).to_string();
+        }
+        // Map all headers to cgi.http_* (replacing - with _)
+        let cgi_key = format!("http_{}", lower.replace('-', "_"));
+        cgi.insert(cgi_key, CfmlValue::String(value.clone()));
     }
-    cgi.insert("content_type".to_string(), CfmlValue::String(content_type.clone()));
-    cgi.insert("http_user_agent".to_string(), CfmlValue::String(user_agent));
+    cgi.insert("server_name".to_string(), CfmlValue::String(server_name));
 
     globals.insert("cgi".to_string(), CfmlValue::Struct(cgi));
 

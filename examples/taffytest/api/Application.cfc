@@ -3,15 +3,15 @@
 
 		this.name = "TaffyTestAPI";
 		this.mappings = {
-			"/taffy": "/Users/alexskinner/Repos/opensource/cfml_rust/Taffy",
-			"/resources": "/Users/alexskinner/Repos/opensource/cfml_rust/RustCFML/examples/taffytest/api/resources"
+			"/taffy": expandPath("../../../../Taffy"),
+			"/resources": expandPath("./resources")
 		};
 
 		function onApplicationStart(){
-			var factory = createObject("component", "/Users/alexskinner/Repos/opensource/cfml_rust/Taffy/core/factory.cfc");
+			var factory = createObject("component", expandPath("../../../../Taffy/core/factory.cfc"));
 			factory.init();
 
-			var resourcePath = "/Users/alexskinner/Repos/opensource/cfml_rust/RustCFML/examples/taffytest/api/resources";
+			var resourcePath = expandPath("./resources");
 			factory.loadBeansFromPath(resourcePath, "resources", resourcePath, true, { status: { skippedResources: [] }, beanList: "" });
 
 			var beanList = factory.getBeanList();

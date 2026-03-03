@@ -37,6 +37,41 @@ assert("cfthread terminate completes", true, true);
 assertTrue("cfthread scope exists", isDefined("cfthread"));
 assertTrue("cfthread.t1 exists", isDefined("cfthread.t1"));
 assert("cfthread.t1 status", cfthread.t1.status, "COMPLETED");
+</cfscript>
+
+<!--- Output capture --->
+<cfthread name="t3">
+    <cfoutput>hello from thread</cfoutput>
+</cfthread>
+
+<cfscript>
+assert("cfthread output capture", cfthread.t3.output, "hello from thread");
+</cfscript>
+
+<!--- Error capture --->
+<cfthread name="t4">
+    <cfthrow message="thread error test">
+</cfthread>
+
+<cfscript>
+assertTrue("cfthread error captured", len(cfthread.t4.error) > 0);
+assert("cfthread status after error", cfthread.t4.status, "COMPLETED");
+</cfscript>
+
+<!--- Elapsed time --->
+<cfscript>
+assertTrue("cfthread elapsedtime is numeric", isNumeric(cfthread.t3.elapsedtime));
+</cfscript>
+
+<!--- Thread scope --->
+<cfthread name="t5">
+    <cfset thread.result = "done">
+    <cfset thread.count = 42>
+</cfthread>
+
+<cfscript>
+assert("cfthread thread scope string", cfthread.t5.result, "done");
+assert("cfthread thread scope number", cfthread.t5.count, 42);
 
 suiteEnd();
 </cfscript>

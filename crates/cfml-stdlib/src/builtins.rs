@@ -606,7 +606,18 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
         f.insert("isXMLNode".into(), fn_is_xml_node);
         f.insert("isXMLRoot".into(), fn_is_xml_root);
         f.insert("isXMLAttribute".into(), fn_is_xml_attribute);
+    }
+
+    // ---- HTML functions ----
+    #[cfg(feature = "html")]
+    {
         f.insert("htmlParse".into(), fn_html_parse);
+    }
+
+    // ---- Zip functions ----
+    #[cfg(feature = "zip_support")]
+    {
+        f.insert("cfzip".into(), fn_cfzip);
     }
 
     // ---- Misc functions ----
@@ -7563,20 +7574,79 @@ fn fn_is_xml_attribute(args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::Bool(false))
 }
 
-#[cfg(feature = "xml")]
+#[cfg(feature = "html")]
 fn fn_html_parse(args: Vec<CfmlValue>) -> CfmlResult {
+    use scraper::{Html, Node};
+    use ego_tree::NodeRef;
+
+    fn walk_node(node_ref: NodeRef<Node>) -> Option<CfmlValue> {
+        match node_ref.value() {
+            Node::Element(el) => {
+                let tag_name = el.name.local.to_string();
+                let mut element = IndexMap::new();
+                element.insert("xmlName".to_string(), CfmlValue::String(tag_name));
+                element.insert("xmlType".to_string(), CfmlValue::String("ELEMENT".to_string()));
+
+                let mut attrs = IndexMap::new();
+                for (name, val) in el.attrs() {
+                    attrs.insert(name.to_string(), CfmlValue::String(val.to_string()));
+                }
+                element.insert("xmlAttributes".to_string(), CfmlValue::Struct(attrs));
+
+                let mut children = Vec::new();
+                let mut text_parts = Vec::new();
+                for child in node_ref.children() {
+                    if let Some(child_val) = walk_node(child) {
+                        if let CfmlValue::Struct(ref cs) = child_val {
+                            if let Some(CfmlValue::String(ref t)) = cs.get("xmlType") {
+                                if t == "TEXT" {
+                                    if let Some(CfmlValue::String(ref txt)) = cs.get("xmlText") {
+                                        text_parts.push(txt.clone());
+                                    }
+                                }
+                            }
+                        }
+                        children.push(child_val);
+                    }
+                }
+                element.insert("xmlText".to_string(), CfmlValue::String(text_parts.join("")));
+                element.insert("xmlChildren".to_string(), CfmlValue::Array(children));
+                Some(CfmlValue::Struct(element))
+            }
+            Node::Text(t) => {
+                let text = t.to_string();
+                if text.trim().is_empty() { return None; }
+                let mut element = IndexMap::new();
+                element.insert("xmlName".to_string(), CfmlValue::String("#text".to_string()));
+                element.insert("xmlType".to_string(), CfmlValue::String("TEXT".to_string()));
+                element.insert("xmlText".to_string(), CfmlValue::String(text));
+                element.insert("xmlChildren".to_string(), CfmlValue::Array(Vec::new()));
+                element.insert("xmlAttributes".to_string(), CfmlValue::Struct(IndexMap::new()));
+                Some(CfmlValue::Struct(element))
+            }
+            _ => None,
+        }
+    }
+
     let html_str = get_str(&args, 0);
-    // Wrap in XML-compatible form and delegate to xmlParse logic
-    // Simple approach: return a basic struct with the HTML content
+    let html = Html::parse_document(&html_str);
+
     let mut doc = IndexMap::new();
-    let mut root = IndexMap::new();
-    root.insert("xmlName".to_string(), CfmlValue::String("html".to_string()));
-    root.insert("xmlType".to_string(), CfmlValue::String("ELEMENT".to_string()));
-    root.insert("xmlText".to_string(), CfmlValue::String(html_str));
-    root.insert("xmlChildren".to_string(), CfmlValue::Array(Vec::new()));
-    root.insert("xmlAttributes".to_string(), CfmlValue::Struct(IndexMap::new()));
-    doc.insert("xmlRoot".to_string(), CfmlValue::Struct(root));
     doc.insert("xmlType".to_string(), CfmlValue::String("DOCUMENT".to_string()));
+
+    let root_el = html.root_element();
+    if let Some(root_cfml) = walk_node(*root_el) {
+        doc.insert("xmlRoot".to_string(), root_cfml);
+    } else {
+        let mut root = IndexMap::new();
+        root.insert("xmlName".to_string(), CfmlValue::String("html".to_string()));
+        root.insert("xmlType".to_string(), CfmlValue::String("ELEMENT".to_string()));
+        root.insert("xmlText".to_string(), CfmlValue::String(String::new()));
+        root.insert("xmlChildren".to_string(), CfmlValue::Array(Vec::new()));
+        root.insert("xmlAttributes".to_string(), CfmlValue::Struct(IndexMap::new()));
+        doc.insert("xmlRoot".to_string(), CfmlValue::Struct(root));
+    }
+
     Ok(CfmlValue::Struct(doc))
 }
 
@@ -9298,4 +9368,275 @@ fn fn_csrf_verify_token(args: Vec<CfmlValue>) -> CfmlResult {
     let is_valid = token.len() == 64 && token.chars().all(|c| c.is_ascii_hexdigit());
 
     Ok(CfmlValue::Bool(is_valid))
+}
+
+// ---- cfzip ----
+
+#[cfg(feature = "zip_support")]
+#[cfg(not(target_arch = "wasm32"))]
+fn fn_cfzip(args: Vec<CfmlValue>) -> CfmlResult {
+    use zip::write::SimpleFileOptions;
+    use std::io::{Read, Write, Cursor};
+
+    let opts = match args.into_iter().next() {
+        Some(CfmlValue::Struct(s)) => s,
+        _ => return Err(CfmlError::runtime("cfzip requires a struct argument".into())),
+    };
+
+    let action = opts.get("action").map(|v| v.as_string().to_lowercase()).unwrap_or_else(|| "zip".to_string());
+    let file_path = opts.get("file").map(|v| v.as_string()).unwrap_or_default();
+    let source = opts.get("source").map(|v| v.as_string()).unwrap_or_default();
+    let destination = opts.get("destination").map(|v| v.as_string()).unwrap_or_default();
+    let entry_path = opts.get("entrypath").map(|v| v.as_string()).unwrap_or_default();
+    let overwrite = opts.get("overwrite").map(|v| v.is_true()).unwrap_or(false);
+    let recurse = opts.get("recurse").map(|v| v.is_true()).unwrap_or(true);
+    let store_path = opts.get("storepath").map(|v| v.is_true()).unwrap_or(true);
+    let prefix = opts.get("prefix").map(|v| v.as_string()).unwrap_or_default();
+    let charset = opts.get("charset").map(|v| v.as_string()).unwrap_or_else(|| "utf-8".to_string());
+    let filter = opts.get("filter").map(|v| v.as_string()).unwrap_or_default();
+
+    match action.as_str() {
+        "zip" => {
+            if file_path.is_empty() || source.is_empty() {
+                return Err(CfmlError::runtime("cfzip action=zip requires file and source attributes".into()));
+            }
+            let out_file = std::fs::File::create(&file_path)
+                .map_err(|e| CfmlError::runtime(format!("cfzip: cannot create file '{}': {}", file_path, e)))?;
+            let mut zip_writer = zip::ZipWriter::new(out_file);
+            let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+            let source_path = std::path::Path::new(&source);
+            if source_path.is_dir() {
+                cfzip_add_directory(&mut zip_writer, source_path, source_path, &options, recurse, store_path, &prefix, &filter)?;
+            } else if source_path.is_file() {
+                let name = if prefix.is_empty() {
+                    source_path.file_name().unwrap_or_default().to_string_lossy().to_string()
+                } else {
+                    format!("{}/{}", prefix.trim_end_matches('/'), source_path.file_name().unwrap_or_default().to_string_lossy())
+                };
+                let mut f = std::fs::File::open(source_path)
+                    .map_err(|e| CfmlError::runtime(format!("cfzip: cannot read '{}': {}", source, e)))?;
+                let mut buf = Vec::new();
+                f.read_to_end(&mut buf).map_err(|e| CfmlError::runtime(e.to_string()))?;
+                zip_writer.start_file(&name, options).map_err(|e| CfmlError::runtime(e.to_string()))?;
+                zip_writer.write_all(&buf).map_err(|e| CfmlError::runtime(e.to_string()))?;
+            } else {
+                return Err(CfmlError::runtime(format!("cfzip: source '{}' does not exist", source)));
+            }
+            zip_writer.finish().map_err(|e| CfmlError::runtime(e.to_string()))?;
+            Ok(CfmlValue::Null)
+        }
+        "unzip" => {
+            if file_path.is_empty() || destination.is_empty() {
+                return Err(CfmlError::runtime("cfzip action=unzip requires file and destination attributes".into()));
+            }
+            let f = std::fs::File::open(&file_path)
+                .map_err(|e| CfmlError::runtime(format!("cfzip: cannot open '{}': {}", file_path, e)))?;
+            let mut archive = zip::ZipArchive::new(f)
+                .map_err(|e| CfmlError::runtime(format!("cfzip: invalid zip '{}': {}", file_path, e)))?;
+
+            let dest = std::path::Path::new(&destination);
+            std::fs::create_dir_all(dest).map_err(|e| CfmlError::runtime(e.to_string()))?;
+
+            for i in 0..archive.len() {
+                let mut entry = archive.by_index(i).map_err(|e| CfmlError::runtime(e.to_string()))?;
+                let name = entry.name().to_string();
+
+                if !entry_path.is_empty() && !name.starts_with(&entry_path) {
+                    continue;
+                }
+
+                let out_path = if store_path {
+                    dest.join(&name)
+                } else {
+                    dest.join(std::path::Path::new(&name).file_name().unwrap_or_default())
+                };
+
+                if entry.is_dir() {
+                    std::fs::create_dir_all(&out_path).map_err(|e| CfmlError::runtime(e.to_string()))?;
+                } else {
+                    if let Some(parent) = out_path.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| CfmlError::runtime(e.to_string()))?;
+                    }
+                    if out_path.exists() && !overwrite {
+                        continue;
+                    }
+                    let mut buf = Vec::new();
+                    std::io::Read::read_to_end(&mut entry, &mut buf).map_err(|e| CfmlError::runtime(e.to_string()))?;
+                    std::fs::write(&out_path, &buf).map_err(|e| CfmlError::runtime(e.to_string()))?;
+                }
+            }
+            Ok(CfmlValue::Null)
+        }
+        "list" => {
+            if file_path.is_empty() {
+                return Err(CfmlError::runtime("cfzip action=list requires file attribute".into()));
+            }
+            let f = std::fs::File::open(&file_path)
+                .map_err(|e| CfmlError::runtime(format!("cfzip: cannot open '{}': {}", file_path, e)))?;
+            let mut archive = zip::ZipArchive::new(f)
+                .map_err(|e| CfmlError::runtime(format!("cfzip: invalid zip '{}': {}", file_path, e)))?;
+
+            let columns = vec![
+                "name".to_string(), "directory".to_string(), "size".to_string(),
+                "compressedsize".to_string(), "type".to_string(),
+                "datelastmodified".to_string(), "comment".to_string(), "crc".to_string(),
+            ];
+            let mut query = cfml_common::dynamic::CfmlQuery::new(columns);
+
+            for i in 0..archive.len() {
+                let entry = archive.by_index(i).map_err(|e| CfmlError::runtime(e.to_string()))?;
+                let name = entry.name().to_string();
+                let is_dir = entry.is_dir();
+                let dir = std::path::Path::new(&name).parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+
+                let mut row = IndexMap::new();
+                row.insert("name".to_string(), CfmlValue::String(name));
+                row.insert("directory".to_string(), CfmlValue::String(dir));
+                row.insert("size".to_string(), CfmlValue::Int(entry.size() as i64));
+                row.insert("compressedsize".to_string(), CfmlValue::Int(entry.compressed_size() as i64));
+                row.insert("type".to_string(), CfmlValue::String(if is_dir { "Dir".to_string() } else { "File".to_string() }));
+                row.insert("datelastmodified".to_string(), CfmlValue::String(String::new()));
+                row.insert("comment".to_string(), CfmlValue::String(entry.comment().to_string()));
+                row.insert("crc".to_string(), CfmlValue::Int(entry.crc32() as i64));
+                query.rows.push(row);
+            }
+
+            Ok(CfmlValue::Query(query))
+        }
+        "read" => {
+            if file_path.is_empty() || entry_path.is_empty() {
+                return Err(CfmlError::runtime("cfzip action=read requires file and entrypath attributes".into()));
+            }
+            let f = std::fs::File::open(&file_path)
+                .map_err(|e| CfmlError::runtime(format!("cfzip: cannot open '{}': {}", file_path, e)))?;
+            let mut archive = zip::ZipArchive::new(f)
+                .map_err(|e| CfmlError::runtime(format!("cfzip: invalid zip '{}': {}", file_path, e)))?;
+            let mut entry = archive.by_name(&entry_path)
+                .map_err(|e| CfmlError::runtime(format!("cfzip: entry '{}' not found: {}", entry_path, e)))?;
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut buf).map_err(|e| CfmlError::runtime(e.to_string()))?;
+            let text = if charset.to_lowercase() == "utf-8" {
+                String::from_utf8_lossy(&buf).to_string()
+            } else {
+                String::from_utf8_lossy(&buf).to_string()
+            };
+            Ok(CfmlValue::String(text))
+        }
+        "readbinary" => {
+            if file_path.is_empty() || entry_path.is_empty() {
+                return Err(CfmlError::runtime("cfzip action=readBinary requires file and entrypath attributes".into()));
+            }
+            let f = std::fs::File::open(&file_path)
+                .map_err(|e| CfmlError::runtime(format!("cfzip: cannot open '{}': {}", file_path, e)))?;
+            let mut archive = zip::ZipArchive::new(f)
+                .map_err(|e| CfmlError::runtime(format!("cfzip: invalid zip '{}': {}", file_path, e)))?;
+            let mut entry = archive.by_name(&entry_path)
+                .map_err(|e| CfmlError::runtime(format!("cfzip: entry '{}' not found: {}", entry_path, e)))?;
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut buf).map_err(|e| CfmlError::runtime(e.to_string()))?;
+            Ok(CfmlValue::Binary(buf))
+        }
+        "delete" => {
+            if file_path.is_empty() || entry_path.is_empty() {
+                return Err(CfmlError::runtime("cfzip action=delete requires file and entrypath attributes".into()));
+            }
+            // Read existing archive, write new one without the entry
+            let f = std::fs::File::open(&file_path)
+                .map_err(|e| CfmlError::runtime(format!("cfzip: cannot open '{}': {}", file_path, e)))?;
+            let mut archive = zip::ZipArchive::new(f)
+                .map_err(|e| CfmlError::runtime(format!("cfzip: invalid zip '{}': {}", file_path, e)))?;
+
+            let mut buf = Cursor::new(Vec::new());
+            {
+                let mut writer = zip::ZipWriter::new(&mut buf);
+                let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+                for i in 0..archive.len() {
+                    let mut entry = archive.by_index(i).map_err(|e| CfmlError::runtime(e.to_string()))?;
+                    let name = entry.name().to_string();
+                    if name == entry_path {
+                        continue;
+                    }
+                    let mut data = Vec::new();
+                    std::io::Read::read_to_end(&mut entry, &mut data).map_err(|e| CfmlError::runtime(e.to_string()))?;
+                    if entry.is_dir() {
+                        writer.add_directory(&name, options).map_err(|e| CfmlError::runtime(e.to_string()))?;
+                    } else {
+                        writer.start_file(&name, options).map_err(|e| CfmlError::runtime(e.to_string()))?;
+                        writer.write_all(&data).map_err(|e| CfmlError::runtime(e.to_string()))?;
+                    }
+                }
+                writer.finish().map_err(|e| CfmlError::runtime(e.to_string()))?;
+            }
+            std::fs::write(&file_path, buf.into_inner())
+                .map_err(|e| CfmlError::runtime(format!("cfzip: cannot write '{}': {}", file_path, e)))?;
+            Ok(CfmlValue::Null)
+        }
+        _ => Err(CfmlError::runtime(format!("cfzip: unsupported action '{}'", action))),
+    }
+}
+
+#[cfg(feature = "zip_support")]
+#[cfg(not(target_arch = "wasm32"))]
+fn cfzip_add_directory(
+    writer: &mut zip::ZipWriter<std::fs::File>,
+    dir: &std::path::Path,
+    base: &std::path::Path,
+    options: &zip::write::SimpleFileOptions,
+    recurse: bool,
+    store_path: bool,
+    prefix: &str,
+    filter: &str,
+) -> Result<(), CfmlError> {
+    use std::io::Read;
+
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| CfmlError::runtime(format!("cfzip: cannot read directory '{}': {}", dir.display(), e)))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if recurse {
+                cfzip_add_directory(writer, &path, base, options, recurse, store_path, prefix, filter)?;
+            }
+        } else {
+            let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            // Apply filter (simple glob: *.ext)
+            if !filter.is_empty() {
+                let pattern = filter.replace("*", "");
+                if !file_name.ends_with(&pattern) {
+                    continue;
+                }
+            }
+            let archive_name = if store_path {
+                let rel = path.strip_prefix(base).unwrap_or(&path);
+                if prefix.is_empty() {
+                    rel.to_string_lossy().to_string()
+                } else {
+                    format!("{}/{}", prefix.trim_end_matches('/'), rel.to_string_lossy())
+                }
+            } else {
+                if prefix.is_empty() {
+                    file_name
+                } else {
+                    format!("{}/{}", prefix.trim_end_matches('/'), file_name)
+                }
+            };
+            let mut f = std::fs::File::open(&path)
+                .map_err(|e| CfmlError::runtime(format!("cfzip: cannot read '{}': {}", path.display(), e)))?;
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf).map_err(|e| CfmlError::runtime(e.to_string()))?;
+            writer.start_file(&archive_name, *options).map_err(|e| CfmlError::runtime(e.to_string()))?;
+            std::io::Write::write_all(writer, &buf).map_err(|e| CfmlError::runtime(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "zip_support")]
+#[cfg(target_arch = "wasm32")]
+fn fn_cfzip(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("cfzip is not supported in wasm".into()))
 }

@@ -562,6 +562,8 @@ impl CfmlVirtualMachine {
                             if let CfmlValue::Struct(s) = &val {
                                 self.set_session_scope(s.clone());
                             }
+                        } else if name_lower == "thread" && self.globals.contains_key("thread") {
+                            self.globals.insert("thread".to_string(), val);
                         } else {
                             locals.insert(name, val);
                         }
@@ -616,6 +618,7 @@ impl CfmlVirtualMachine {
                     // 4. Check VM-intercepted function names (custom tags, etc.)
                     } else if matches!(name_lower.as_str(),
                         "__cfcustomtag" | "__cfcustomtag_start" | "__cfcustomtag_end"
+                        | "callstackget" | "callstackdump" | "precisionevaluate"
                     ) {
                         stack.push(CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
                             name: name.clone(),
@@ -1745,7 +1748,8 @@ impl CfmlVirtualMachine {
                 | "cacheput" | "cacheget" | "cachedelete" | "cacheclear"
                 | "cachekeyexists" | "cachecount" | "cachegetall" | "cachegetallids"
                 | "__cfcache" | "__cfexecute"
-                | "__cfthread_run" | "__cfthread_join" | "__cfthread_terminate" => {
+                | "__cfthread_run" | "__cfthread_join" | "__cfthread_terminate"
+                | "callstackget" | "callstackdump" | "precisionevaluate" => {
                     // Will be handled at the end of this function (needs VM access)
                 }
                 _ => {
@@ -4077,20 +4081,58 @@ impl CfmlVirtualMachine {
                 // ---- cfthread handlers ----
                 "__cfthread_run" => {
                     let thread_name = args.get(0).map(|v| v.as_string()).unwrap_or_else(|| "thread1".to_string());
+
+                    let mut thread_output = String::new();
+                    let mut thread_error = String::new();
+                    let mut thread_vars: IndexMap<String, CfmlValue> = IndexMap::new();
+                    let mut elapsed: i64 = 0;
+
                     if let Some(callback) = args.get(1) {
                         let callback = callback.clone();
-                        // Execute the closure immediately (sequential execution model)
-                        let cb_args = vec![];
-                        let _ = self.call_function(&callback, cb_args, parent_locals);
+
+                        // Set up thread scope in globals (thread.varName = value)
+                        self.globals.insert("thread".to_string(), CfmlValue::Struct(IndexMap::new()));
+
+                        // Capture output (same pattern as cfsavecontent)
+                        self.saved_output_buffers.push(std::mem::take(&mut self.output_buffer));
+
+                        // Track elapsed time
+                        let start_time = std::time::Instant::now();
+
+                        // Execute thread body, catching errors
+                        let result = self.call_function(&callback, vec![], parent_locals);
+
+                        elapsed = start_time.elapsed().as_millis() as i64;
+
+                        // Capture any output written during thread body
+                        thread_output = std::mem::take(&mut self.output_buffer);
+                        self.output_buffer = self.saved_output_buffers.pop().unwrap_or_default();
+
+                        // Capture error if any
+                        if let Err(ref e) = result {
+                            thread_error = format!("{}", e);
+                        }
+
+                        // Collect thread scope variables
+                        if let Some(CfmlValue::Struct(ts)) = self.globals.remove("thread") {
+                            thread_vars = ts;
+                        }
                     }
-                    // Store thread metadata as completed
+
+                    // Build thread metadata
                     let mut thread_meta = IndexMap::new();
                     thread_meta.insert("status".to_string(), CfmlValue::String("COMPLETED".to_string()));
                     thread_meta.insert("name".to_string(), CfmlValue::String(thread_name.clone()));
-                    thread_meta.insert("output".to_string(), CfmlValue::String(String::new()));
-                    thread_meta.insert("error".to_string(), CfmlValue::String(String::new()));
-                    thread_meta.insert("elapsedtime".to_string(), CfmlValue::Int(0));
-                    // Store in cfthread scope (on variables scope)
+                    thread_meta.insert("output".to_string(), CfmlValue::String(thread_output));
+                    thread_meta.insert("error".to_string(), CfmlValue::String(thread_error));
+                    thread_meta.insert("elapsedtime".to_string(), CfmlValue::Int(elapsed));
+
+                    // Merge thread scope variables into metadata
+                    for (k, v) in thread_vars {
+                        thread_meta.insert(k, v);
+                    }
+
+                    // Store in cfthread scope
                     let thread_struct = self.get_or_create_cfthread_scope();
                     if let CfmlValue::Struct(ref mut ts) = thread_struct {
                         ts.insert(thread_name.to_lowercase(), CfmlValue::Struct(thread_meta));
@@ -4104,6 +4146,41 @@ impl CfmlVirtualMachine {
                 "__cfthread_terminate" => {
                     // No-op (thread already finished)
                     return Ok(CfmlValue::Null);
+                }
+
+                "callstackget" => {
+                    let frames = self.build_stack_trace();
+                    let offset = args.get(0).map(|v| v.as_string().parse::<i64>().unwrap_or(0).max(0) as usize).unwrap_or(0);
+                    let max_frames = args.get(1).map(|v| v.as_string().parse::<usize>().unwrap_or(usize::MAX)).unwrap_or(usize::MAX);
+                    let result: Vec<CfmlValue> = frames.into_iter()
+                        .skip(offset)
+                        .take(max_frames)
+                        .map(|f| {
+                            let mut s = IndexMap::new();
+                            s.insert("Function".to_string(), CfmlValue::String(f.function));
+                            s.insert("Template".to_string(), CfmlValue::String(f.template));
+                            s.insert("LineNumber".to_string(), CfmlValue::Int(f.line as i64));
+                            CfmlValue::Struct(s)
+                        })
+                        .collect();
+                    return Ok(CfmlValue::Array(result));
+                }
+
+                "callstackdump" => {
+                    let frames = self.build_stack_trace();
+                    let dump: String = frames.iter()
+                        .map(|f| format!("{} ({}:{})", f.function, f.template, f.line))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.output_buffer.push_str(&dump);
+                    self.output_buffer.push('\n');
+                    return Ok(CfmlValue::Null);
+                }
+
+                "precisionevaluate" => {
+                    let expr = args.get(0).map(|v| v.as_string()).unwrap_or_default();
+                    let result = precision_evaluate_expr(&expr)?;
+                    return Ok(CfmlValue::String(result));
                 }
 
                 "__cfcustomtag" => {
@@ -6658,4 +6735,129 @@ fn cfml_compare(a: &CfmlValue, b: &CfmlValue) -> i32 {
             x.partial_cmp(&y).map_or(0, |o| o as i32)
         }
     }
+}
+
+// ---- precisionEvaluate: recursive-descent parser operating on rust_decimal::Decimal ----
+
+fn precision_evaluate_expr(expr: &str) -> Result<String, CfmlError> {
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+
+    struct PrecParser<'a> {
+        chars: &'a [u8],
+        pos: usize,
+    }
+
+    impl<'a> PrecParser<'a> {
+        fn new(input: &'a str) -> Self {
+            Self { chars: input.as_bytes(), pos: 0 }
+        }
+
+        fn skip_ws(&mut self) {
+            while self.pos < self.chars.len() && self.chars[self.pos].is_ascii_whitespace() {
+                self.pos += 1;
+            }
+        }
+
+        fn parse_expr(&mut self) -> Result<Decimal, CfmlError> {
+            self.parse_add_sub()
+        }
+
+        fn parse_add_sub(&mut self) -> Result<Decimal, CfmlError> {
+            let mut left = self.parse_mul_div()?;
+            loop {
+                self.skip_ws();
+                if self.pos >= self.chars.len() { break; }
+                match self.chars[self.pos] {
+                    b'+' => { self.pos += 1; let right = self.parse_mul_div()?; left = left.checked_add(right).unwrap_or(left); }
+                    b'-' => { self.pos += 1; let right = self.parse_mul_div()?; left = left.checked_sub(right).unwrap_or(left); }
+                    _ => break,
+                }
+            }
+            Ok(left)
+        }
+
+        fn parse_mul_div(&mut self) -> Result<Decimal, CfmlError> {
+            let mut left = self.parse_unary()?;
+            loop {
+                self.skip_ws();
+                if self.pos >= self.chars.len() { break; }
+                match self.chars[self.pos] {
+                    b'*' => { self.pos += 1; let right = self.parse_unary()?; left = left.checked_mul(right).unwrap_or(left); }
+                    b'/' => {
+                        self.pos += 1;
+                        let right = self.parse_unary()?;
+                        if right.is_zero() {
+                            return Err(CfmlError::runtime("Division by zero in precisionEvaluate".into()));
+                        }
+                        left = left.checked_div(right).unwrap_or(left);
+                    }
+                    b'%' => {
+                        self.pos += 1;
+                        let right = self.parse_unary()?;
+                        if right.is_zero() {
+                            return Err(CfmlError::runtime("Division by zero in precisionEvaluate".into()));
+                        }
+                        left = left.checked_rem(right).unwrap_or(left);
+                    }
+                    _ => break,
+                }
+            }
+            Ok(left)
+        }
+
+        fn parse_unary(&mut self) -> Result<Decimal, CfmlError> {
+            self.skip_ws();
+            if self.pos < self.chars.len() && self.chars[self.pos] == b'-' {
+                self.pos += 1;
+                let val = self.parse_primary()?;
+                Ok(-val)
+            } else if self.pos < self.chars.len() && self.chars[self.pos] == b'+' {
+                self.pos += 1;
+                self.parse_primary()
+            } else {
+                self.parse_primary()
+            }
+        }
+
+        fn parse_primary(&mut self) -> Result<Decimal, CfmlError> {
+            self.skip_ws();
+            if self.pos >= self.chars.len() {
+                return Err(CfmlError::runtime("Unexpected end of expression in precisionEvaluate".into()));
+            }
+            if self.chars[self.pos] == b'(' {
+                self.pos += 1;
+                let val = self.parse_expr()?;
+                self.skip_ws();
+                if self.pos < self.chars.len() && self.chars[self.pos] == b')' {
+                    self.pos += 1;
+                } else {
+                    return Err(CfmlError::runtime("Missing closing parenthesis in precisionEvaluate".into()));
+                }
+                Ok(val)
+            } else {
+                // Parse number
+                let start = self.pos;
+                while self.pos < self.chars.len() && (self.chars[self.pos].is_ascii_digit() || self.chars[self.pos] == b'.') {
+                    self.pos += 1;
+                }
+                if self.pos == start {
+                    return Err(CfmlError::runtime(format!(
+                        "Unexpected character '{}' in precisionEvaluate",
+                        self.chars[self.pos] as char
+                    )));
+                }
+                let num_str = std::str::from_utf8(&self.chars[start..self.pos])
+                    .map_err(|_| CfmlError::runtime("Invalid UTF-8 in precisionEvaluate".into()))?;
+                Decimal::from_str(num_str)
+                    .map_err(|_| CfmlError::runtime(format!("Invalid number '{}' in precisionEvaluate", num_str)))
+            }
+        }
+    }
+
+    let mut parser = PrecParser::new(expr.trim());
+    let result = parser.parse_expr()?;
+    // Normalize: remove trailing zeros for display
+    let s = result.normalize().to_string();
+    Ok(s)
 }

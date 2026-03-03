@@ -31,6 +31,64 @@
 //! - <cfdirectory action="..." directory="..." name="..." filter="..." recurse="...">
 //! - <cfinvoke component="..." method="..." returnvariable="...">
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+/// TLD cache: prefix → (tag-name → file-name) parsed from .tld files.
+thread_local! {
+    static TLD_CACHE: RefCell<HashMap<String, HashMap<String, String>>> = RefCell::new(HashMap::new());
+}
+
+/// Parse a .tld file and return tag-name → file-name mapping.
+fn parse_tld_file(tld_path: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let content = match std::fs::read_to_string(tld_path) {
+        Ok(c) => c,
+        Err(_) => return map,
+    };
+    // Best-effort parsing: find <tag><name>foo</name></tag> blocks
+    // and optional <tag-class> or <tag-file> elements
+    let lower = content.to_lowercase();
+    let bytes = lower.as_bytes();
+    let mut pos = 0;
+    while pos < bytes.len() {
+        if let Some(tag_start) = lower[pos..].find("<tag>") {
+            let abs_start = pos + tag_start;
+            if let Some(tag_end) = lower[abs_start..].find("</tag>") {
+                let block = &content[abs_start..abs_start + tag_end + 6];
+                let block_lower = block.to_lowercase();
+                // Extract <name>
+                let name = extract_tld_element(&block_lower, block, "name");
+                if let Some(tag_name) = name {
+                    // Extract optional <tag-file>
+                    let file = extract_tld_element(&block_lower, block, "tag-file")
+                        .unwrap_or_else(|| format!("{}.cfm", tag_name));
+                    map.insert(tag_name.to_lowercase(), file);
+                }
+                pos = abs_start + tag_end + 6;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    map
+}
+
+/// Extract text content of a simple XML element from a TLD block.
+fn extract_tld_element(block_lower: &str, block_orig: &str, element: &str) -> Option<String> {
+    let open = format!("<{}>", element);
+    let close = format!("</{}>", element);
+    if let Some(start) = block_lower.find(&open) {
+        if let Some(end) = block_lower[start..].find(&close) {
+            let text = &block_orig[start + open.len()..start + end];
+            return Some(text.trim().to_string());
+        }
+    }
+    None
+}
+
 /// Check if source contains CFML tags or CFML comments
 pub fn has_cfml_tags(source: &str) -> bool {
     let lower = source.to_lowercase();
@@ -160,9 +218,16 @@ fn parse_import_tag(chars: &[char], start: usize, len: usize, imports: &mut std:
     // Parse attributes
     let (attrs, tag_end) = parse_tag_attributes(chars, tag_name_end, len);
 
-    // Look up taglib path
-    let taglib = imports.get(&prefix.to_lowercase()).cloned().unwrap_or_default();
-    let path = format!("{}/{}.cfm", taglib.trim_end_matches('/'), tag_name.to_lowercase());
+    // Look up taglib path, consulting TLD cache for file name overrides
+    let prefix_lower = prefix.to_lowercase();
+    let taglib = imports.get(&prefix_lower).cloned().unwrap_or_default();
+    let tag_file = TLD_CACHE.with(|cache| {
+        let c = cache.borrow();
+        c.get(&prefix_lower)
+            .and_then(|tld| tld.get(&tag_name.to_lowercase()))
+            .cloned()
+    }).unwrap_or_else(|| format!("{}.cfm", tag_name.to_lowercase()));
+    let path = format!("{}/{}", taglib.trim_end_matches('/'), tag_file);
     let path_expr = format!("\"{}\"", path.replace('"', "\\\""));
 
     // Build attributes struct
@@ -644,6 +709,38 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize, imports: &mut std::col
             let call = format!("cfdirectory({{ {} }})", parts.join(", "));
             if let Some(n) = name {
                 (format!("{} = {};\n", n, call), tag_end - start)
+            } else {
+                (format!("{};\n", call), tag_end - start)
+            }
+        }
+        "cfzip" => {
+            // <cfzip action="zip" file="out.zip" source="dir/" ...>
+            let name = attrs.get("name").cloned();
+            let variable = attrs.get("variable").cloned();
+            let mut parts = Vec::new();
+            for (k, v) in &attrs {
+                if k == "name" || k == "variable" { continue; }
+                let raw = v.trim();
+                if raw.starts_with('#') && raw.ends_with('#') && raw.len() > 2 {
+                    parts.push(format!("{}: {}", k, strip_hashes(raw)));
+                } else {
+                    let lower = raw.to_lowercase();
+                    if lower == "true" || lower == "yes" {
+                        parts.push(format!("{}: true", k));
+                    } else if lower == "false" || lower == "no" {
+                        parts.push(format!("{}: false", k));
+                    } else if raw.parse::<f64>().is_ok() {
+                        parts.push(format!("{}: {}", k, raw));
+                    } else {
+                        parts.push(format!("{}: \"{}\"", k, raw.replace('"', "\\\"")));
+                    }
+                }
+            }
+            let call = format!("cfzip({{ {} }})", parts.join(", "));
+            if let Some(n) = name {
+                (format!("{} = {};\n", n, call), tag_end - start)
+            } else if let Some(v) = variable {
+                (format!("{} = {};\n", v, call), tag_end - start)
             } else {
                 (format!("{};\n", call), tag_end - start)
             }
@@ -1138,7 +1235,22 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize, imports: &mut std::col
         "cfimport" => {
             // Register prefix→taglib mapping for CFML custom tag libraries.
             if let (Some(taglib), Some(prefix)) = (attrs.get("taglib"), attrs.get("prefix")) {
-                imports.insert(prefix.to_lowercase(), taglib.clone());
+                let prefix_lower = prefix.to_lowercase();
+                imports.insert(prefix_lower.clone(), taglib.clone());
+                // Check for .tld files in the taglib directory
+                if let Ok(entries) = std::fs::read_dir(taglib) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().map_or(false, |e| e == "tld") {
+                            let tld_map = parse_tld_file(&path.to_string_lossy());
+                            if !tld_map.is_empty() {
+                                TLD_CACHE.with(|cache| {
+                                    cache.borrow_mut().insert(prefix_lower.clone(), tld_map);
+                                });
+                            }
+                        }
+                    }
+                }
             } else {
                 // Non-taglib imports (e.g. Java class imports) are not supported
                 let detail = attrs.get("prefix")

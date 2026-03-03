@@ -59,6 +59,9 @@ try { include "stdlib/test_xml_dom_functions.cfm"; } catch (any e) { writeOutput
 try { include "stdlib/test_misc_functions.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_misc_functions.cfm | " & e.message & chr(10)); }
 try { include "stdlib/test_valuelist_functions.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_valuelist_functions.cfm | " & e.message & chr(10)); }
 try { include "stdlib/test_listreduceright.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_listreduceright.cfm | " & e.message & chr(10)); }
+try { include "stdlib/test_callstack.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_callstack.cfm | " & e.message & chr(10)); }
+try { include "stdlib/test_precisionevaluate.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_precisionevaluate.cfm | " & e.message & chr(10)); }
+try { include "stdlib/test_htmlparse.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_htmlparse.cfm | " & e.message & chr(10)); }
 
 // --- Member Functions ---
 try { include "members/test_string_members.cfm"; } catch (any e) { writeOutput("ERROR | members/test_string_members.cfm | " & e.message & chr(10)); }
@@ -86,6 +89,8 @@ try { include "tags/test_tags_cfcache.cfm"; } catch (any e) { writeOutput("ERROR
 try { include "tags/test_tags_cfstoredproc.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_cfstoredproc.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_cfimport.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_cfimport.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_cfthread.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_cfthread.cfm | " & e.message & chr(10)); }
+try { include "tags/test_tags_cfzip.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_cfzip.cfm | " & e.message & chr(10)); }
+try { include "tags/test_tags_tld.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_tld.cfm | " & e.message & chr(10)); }
 
 printSummary();
 </cfscript>
