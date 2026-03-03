@@ -843,6 +843,178 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize) -> (String, usize) {
                 (result, tag_end - start)
             }
         }
+        "cfcache" => {
+            let mut parts = Vec::new();
+            for (k, v) in &attrs {
+                let val = strip_hashes(v);
+                if val != *v {
+                    parts.push(format!("{}: {}", k, val));
+                } else {
+                    parts.push(format!("{}: \"{}\"", k, v.replace('"', "\\\"")));
+                }
+            }
+            (format!("__cfcache({{ {} }});\n", parts.join(", ")), tag_end - start)
+        }
+        "cfexecute" => {
+            let name_attr = attrs.get("name").cloned().unwrap_or_default();
+            let arguments = attrs.get("arguments").cloned();
+            let variable = attrs.get("variable").cloned();
+            let error_variable = attrs.get("errorvariable").cloned();
+            let timeout = attrs.get("timeout").cloned();
+
+            let mut opts = Vec::new();
+            let name_stripped = strip_hashes(&name_attr);
+            if name_attr != name_stripped {
+                opts.push(format!("name: {}", name_stripped));
+            } else {
+                opts.push(format!("name: \"{}\"", name_attr));
+            }
+            if let Some(a) = &arguments {
+                let a_stripped = strip_hashes(a);
+                if *a != a_stripped {
+                    opts.push(format!("arguments: {}", a_stripped));
+                } else {
+                    opts.push(format!("arguments: \"{}\"", a.replace('"', "\\\"")));
+                }
+            }
+            if let Some(t) = &timeout { opts.push(format!("timeout: {}", t)); }
+            if variable.is_some() {
+                opts.push("variable: true".to_string());
+            }
+
+            // Check for body (stdin input)
+            if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cfexecute") {
+                let body: String = chars[tag_end..end_tag_pos].iter().collect();
+                let close_end = find_tag_end(chars, end_tag_pos, len);
+                let body_trimmed = body.trim();
+                if !body_trimmed.is_empty() {
+                    opts.push(format!("body: \"{}\"", body_trimmed.replace('"', "\\\"").replace('\n', "\\n")));
+                }
+                if let Some(ref var) = variable {
+                    let mut result = format!("__cfexec_tmp = __cfexecute({{ {} }});\n", opts.join(", "));
+                    result.push_str(&format!("{} = __cfexec_tmp.output;\n", var));
+                    if let Some(ref ev) = error_variable {
+                        result.push_str(&format!("{} = __cfexec_tmp.error;\n", ev));
+                    }
+                    (result, close_end - start)
+                } else {
+                    (format!("__cfexecute({{ {} }});\n", opts.join(", ")), close_end - start)
+                }
+            } else {
+                // Self-closing
+                if let Some(ref var) = variable {
+                    let mut result = format!("__cfexec_tmp = __cfexecute({{ {} }});\n", opts.join(", "));
+                    result.push_str(&format!("{} = __cfexec_tmp.output;\n", var));
+                    if let Some(ref ev) = error_variable {
+                        result.push_str(&format!("{} = __cfexec_tmp.error;\n", ev));
+                    }
+                    (result, tag_end - start)
+                } else {
+                    (format!("__cfexecute({{ {} }});\n", opts.join(", ")), tag_end - start)
+                }
+            }
+        }
+        "cfmail" => {
+            let mut opts = Vec::new();
+            for (k, v) in &attrs {
+                let val = strip_hashes(v);
+                if val != *v {
+                    opts.push(format!("{}: {}", k, val));
+                } else {
+                    opts.push(format!("{}: \"{}\"", k, v.replace('"', "\\\"")));
+                }
+            }
+
+            if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cfmail") {
+                let body: String = chars[tag_end..end_tag_pos].iter().collect();
+                let close_end = find_tag_end(chars, end_tag_pos, len);
+
+                // Parse cfmailparam child tags
+                let params = parse_cfmailparam_tags(&body);
+                if !params.is_empty() {
+                    opts.push(format!("params: [{}]", params.join(", ")));
+                }
+
+                // Parse cfmailpart child tags
+                let (parts, remaining_body) = parse_cfmailpart_tags(&body);
+                if !parts.is_empty() {
+                    opts.push(format!("parts: [{}]", parts.join(", ")));
+                }
+
+                // Use remaining body (after stripping child tags) as body text
+                let body_text = remaining_body.trim();
+                if !body_text.is_empty() {
+                    opts.push(format!("body: \"{}\"", body_text.replace('"', "\\\"").replace('\n', "\\n")));
+                }
+
+                (format!("__cfmail({{ {} }});\n", opts.join(", ")), close_end - start)
+            } else {
+                // Self-closing cfmail
+                (format!("__cfmail({{ {} }});\n", opts.join(", ")), tag_end - start)
+            }
+        }
+        "cfmailparam" | "cfmailpart" => {
+            // These are handled as child tags of cfmail; skip if encountered standalone
+            (String::new(), tag_end - start)
+        }
+        "cfstoredproc" => {
+            let procedure = attrs.get("procedure").cloned().unwrap_or_default();
+            let datasource = attrs.get("datasource").cloned();
+
+            if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cfstoredproc") {
+                let body: String = chars[tag_end..end_tag_pos].iter().collect();
+                let close_end = find_tag_end(chars, end_tag_pos, len);
+
+                let proc_params = parse_cfprocparam_tags(&body);
+                let proc_results = parse_cfprocresult_tags(&body);
+
+                // Build param placeholders
+                let placeholders: Vec<&str> = proc_params.iter().map(|_| "?").collect();
+                let sql = format!("CALL {}({})", procedure, placeholders.join(","));
+
+                // Build params array
+                let params_arr: Vec<String> = proc_params.iter().map(|p| {
+                    let mut parts = Vec::new();
+                    if let Some(ref v) = p.value {
+                        let stripped = strip_hashes(v);
+                        if stripped != *v {
+                            parts.push(format!("value: {}", stripped));
+                        } else {
+                            parts.push(format!("value: \"{}\"", v.replace('"', "\\\"")));
+                        }
+                    }
+                    if let Some(ref t) = p.cfsqltype {
+                        parts.push(format!("cfsqltype: \"{}\"", t));
+                    }
+                    format!("{{ {} }}", parts.join(", "))
+                }).collect();
+
+                let mut query_opts = Vec::new();
+                if let Some(ds) = &datasource {
+                    query_opts.push(format!("datasource: \"{}\"", ds));
+                }
+
+                let result_var = proc_results.first()
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| "cfresult".to_string());
+
+                let opts_str = if query_opts.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {{ {} }}", query_opts.join(", "))
+                };
+
+                (format!("{} = queryExecute(\"{}\", [{}]{});\n",
+                    result_var, sql, params_arr.join(", "), opts_str), close_end - start)
+            } else {
+                // Self-closing (unusual)
+                (format!("queryExecute(\"CALL {}()\");\n", procedure), tag_end - start)
+            }
+        }
+        "cfprocparam" | "cfprocresult" => {
+            // These are handled as child tags of cfstoredproc; skip if encountered standalone
+            (String::new(), tag_end - start)
+        }
         _ => {
             if tag_lower.starts_with("cf_") {
                 // Custom tag: <cf_tagname attr1="val1">
@@ -1637,6 +1809,222 @@ fn parse_cfhttpparam_tags(body: &str) -> Vec<String> {
     }
 
     params
+}
+
+/// Parse <cfmailparam> tags from the body of a <cfmail> tag.
+/// Returns a vector of struct literal strings like: { name: "X-Header", value: "foo" }
+fn parse_cfmailparam_tags(body: &str) -> Vec<String> {
+    let mut params = Vec::new();
+    let chars: Vec<char> = body.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        if i + 12 < len && chars[i] == '<' {
+            let ahead: String = chars[i..std::cmp::min(i + 13, len)].iter().collect();
+            if ahead.to_lowercase().starts_with("<cfmailparam") {
+                let next_after = chars.get(i + 12);
+                if next_after == Some(&' ') || next_after == Some(&'>') || next_after == Some(&'/') || next_after == Some(&'\t') || next_after == Some(&'\n') {
+                    let name_end = i + 12;
+                    let (tag_attrs, _) = parse_tag_attributes(&chars, name_end, len);
+
+                    let mut parts = Vec::new();
+                    if let Some(n) = tag_attrs.get("name") {
+                        let stripped = strip_hashes(n);
+                        if stripped != *n {
+                            parts.push(format!("name: {}", stripped));
+                        } else {
+                            parts.push(format!("name: \"{}\"", n));
+                        }
+                    }
+                    if let Some(v) = tag_attrs.get("value") {
+                        let stripped = strip_hashes(v);
+                        if stripped != *v {
+                            parts.push(format!("value: {}", stripped));
+                        } else {
+                            parts.push(format!("value: \"{}\"", v));
+                        }
+                    }
+                    if let Some(f) = tag_attrs.get("file") {
+                        let stripped = strip_hashes(f);
+                        if stripped != *f {
+                            parts.push(format!("file: {}", stripped));
+                        } else {
+                            parts.push(format!("file: \"{}\"", f));
+                        }
+                    }
+                    if let Some(t) = tag_attrs.get("type") {
+                        parts.push(format!("type: \"{}\"", t.to_lowercase()));
+                    }
+                    if let Some(d) = tag_attrs.get("disposition") {
+                        parts.push(format!("disposition: \"{}\"", d));
+                    }
+
+                    params.push(format!("{{ {} }}", parts.join(", ")));
+
+                    while i < len && chars[i] != '>' { i += 1; }
+                    if i < len { i += 1; }
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    params
+}
+
+/// Parse <cfmailpart> tags from the body of a <cfmail> tag.
+/// Returns (parts_vec, remaining_body_text) where remaining_body_text has child tags stripped.
+fn parse_cfmailpart_tags(body: &str) -> (Vec<String>, String) {
+    let mut parts = Vec::new();
+    let mut remaining = body.to_string();
+    let chars: Vec<char> = body.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    let mut remove_ranges: Vec<(usize, usize)> = Vec::new();
+
+    while i < len {
+        if i + 11 < len && chars[i] == '<' {
+            let ahead: String = chars[i..std::cmp::min(i + 12, len)].iter().collect();
+            if ahead.to_lowercase().starts_with("<cfmailpart") {
+                let next_after = chars.get(i + 11);
+                if next_after == Some(&' ') || next_after == Some(&'>') || next_after == Some(&'/') || next_after == Some(&'\t') || next_after == Some(&'\n') {
+                    let tag_start = i;
+                    let name_end = i + 11;
+                    let (tag_attrs, _) = parse_tag_attributes(&chars, name_end, len);
+
+                    // Find > to get start of body content
+                    while i < len && chars[i] != '>' { i += 1; }
+                    if i < len { i += 1; }
+                    let content_start = i;
+
+                    // Find closing </cfmailpart>
+                    let close_tag = "</cfmailpart>";
+                    let mut found_close = false;
+                    let close_len = close_tag.len();
+                    while i + close_len <= len {
+                        let slice: String = chars[i..i + close_len].iter().collect();
+                        if slice.to_lowercase() == close_tag {
+                            let content: String = chars[content_start..i].iter().collect();
+                            let mut part_parts = Vec::new();
+                            if let Some(t) = tag_attrs.get("type") {
+                                part_parts.push(format!("type: \"{}\"", t.to_lowercase()));
+                            }
+                            if let Some(c) = tag_attrs.get("charset") {
+                                part_parts.push(format!("charset: \"{}\"", c));
+                            }
+                            let content_trimmed = content.trim();
+                            part_parts.push(format!("body: \"{}\"", content_trimmed.replace('"', "\\\"").replace('\n', "\\n")));
+                            parts.push(format!("{{ {} }}", part_parts.join(", ")));
+
+                            i += close_len;
+                            // Skip past >
+                            while i < len && chars[i] != '>' { i += 1; }
+                            if i < len { i += 1; }
+                            remove_ranges.push((tag_start, i));
+                            found_close = true;
+                            break;
+                        }
+                        i += 1;
+                    }
+                    if found_close { continue; }
+                }
+            }
+            // Also remove <cfmailparam> tags from remaining body
+            if ahead.to_lowercase().starts_with("<cfmailparam") {
+                let tag_start = i;
+                while i < len && chars[i] != '>' { i += 1; }
+                if i < len { i += 1; }
+                remove_ranges.push((tag_start, i));
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    // Remove child tag ranges from remaining body (reverse order to preserve indices)
+    for (start, end) in remove_ranges.iter().rev() {
+        let start_byte = chars[..*start].iter().collect::<String>().len();
+        let end_byte = chars[..*end].iter().collect::<String>().len();
+        remaining.replace_range(start_byte..end_byte, "");
+    }
+
+    (parts, remaining)
+}
+
+/// Represents a stored procedure parameter
+struct ProcParam {
+    value: Option<String>,
+    cfsqltype: Option<String>,
+}
+
+/// Parse <cfprocparam> tags from the body of a <cfstoredproc> tag.
+fn parse_cfprocparam_tags(body: &str) -> Vec<ProcParam> {
+    let mut params = Vec::new();
+    let chars: Vec<char> = body.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        if i + 12 < len && chars[i] == '<' {
+            let ahead: String = chars[i..std::cmp::min(i + 13, len)].iter().collect();
+            if ahead.to_lowercase().starts_with("<cfprocparam") {
+                let next_after = chars.get(i + 12);
+                if next_after == Some(&' ') || next_after == Some(&'>') || next_after == Some(&'/') || next_after == Some(&'\t') || next_after == Some(&'\n') {
+                    let name_end = i + 12;
+                    let (tag_attrs, _) = parse_tag_attributes(&chars, name_end, len);
+
+                    params.push(ProcParam {
+                        value: tag_attrs.get("value").cloned(),
+                        cfsqltype: tag_attrs.get("cfsqltype").cloned(),
+                    });
+
+                    while i < len && chars[i] != '>' { i += 1; }
+                    if i < len { i += 1; }
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    params
+}
+
+/// Parse <cfprocresult> tags from the body of a <cfstoredproc> tag.
+/// Returns Vec<(result_variable_name, resultset_number)>
+fn parse_cfprocresult_tags(body: &str) -> Vec<(String, usize)> {
+    let mut results = Vec::new();
+    let chars: Vec<char> = body.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        if i + 13 < len && chars[i] == '<' {
+            let ahead: String = chars[i..std::cmp::min(i + 14, len)].iter().collect();
+            if ahead.to_lowercase().starts_with("<cfprocresult") {
+                let next_after = chars.get(i + 13);
+                if next_after == Some(&' ') || next_after == Some(&'>') || next_after == Some(&'/') || next_after == Some(&'\t') || next_after == Some(&'\n') {
+                    let name_end = i + 13;
+                    let (tag_attrs, _) = parse_tag_attributes(&chars, name_end, len);
+
+                    let name = tag_attrs.get("name").cloned().unwrap_or_else(|| "cfresult".to_string());
+                    let resultset: usize = tag_attrs.get("resultset")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(1);
+                    results.push((name, resultset));
+
+                    while i < len && chars[i] != '>' { i += 1; }
+                    if i < len { i += 1; }
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    results
 }
 
 #[cfg(test)]

@@ -146,6 +146,8 @@ pub struct CfmlVirtualMachine {
     pub custom_tag_paths: Vec<String>,
     /// Stack for nested body-mode custom tags
     custom_tag_stack: Vec<CustomTagState>,
+    /// In-memory cache: key -> (value, optional expiry instant)
+    pub cache: HashMap<String, (CfmlValue, Option<std::time::Instant>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +214,7 @@ impl CfmlVirtualMachine {
             held_locks: Vec::new(),
             custom_tag_paths: Vec::new(),
             custom_tag_stack: Vec::new(),
+            cache: HashMap::new(),
         }
     }
 
@@ -1732,7 +1735,10 @@ impl CfmlVirtualMachine {
                 | "getauthuser" | "isuserinrole" | "isuserloggedin"
                 | "__cfloginuser" | "__cflogout"
                 | "setvariable" | "getvariable" | "throw"
-                | "__cfcustomtag" | "__cfcustomtag_start" | "__cfcustomtag_end" => {
+                | "__cfcustomtag" | "__cfcustomtag_start" | "__cfcustomtag_end"
+                | "cacheput" | "cacheget" | "cachedelete" | "cacheclear"
+                | "cachekeyexists" | "cachecount" | "cachegetall" | "cachegetallids"
+                | "__cfcache" | "__cfexecute" | "__cfmail" => {
                     // Will be handled at the end of this function (needs VM access)
                 }
                 _ => {
@@ -3376,6 +3382,221 @@ impl CfmlVirtualMachine {
 
                     return Err(CfmlError::runtime(message));
                 }
+                // ---- Cache functions ----
+                "cacheput" => {
+                    let key = args.get(0).map(|v| v.as_string()).unwrap_or_default();
+                    let value = args.get(1).cloned().unwrap_or(CfmlValue::Null);
+                    let expiry = args.get(2).and_then(|v| {
+                        // Timespan: value < 1 treated as fractional days (×86400→secs)
+                        let secs = match v {
+                            CfmlValue::Int(i) => *i as f64,
+                            CfmlValue::Double(d) => {
+                                if *d < 1.0 { *d * 86400.0 } else { *d }
+                            }
+                            CfmlValue::String(s) => s.parse::<f64>().unwrap_or(0.0),
+                            _ => 0.0,
+                        };
+                        if secs > 0.0 {
+                            Some(std::time::Instant::now() + std::time::Duration::from_secs_f64(secs))
+                        } else {
+                            None
+                        }
+                    });
+                    self.cache.insert(key, (value, expiry));
+                    return Ok(CfmlValue::Null);
+                }
+                "cacheget" => {
+                    let key = args.get(0).map(|v| v.as_string()).unwrap_or_default();
+                    if let Some((val, expiry)) = self.cache.get(&key).cloned() {
+                        if let Some(exp) = expiry {
+                            if std::time::Instant::now() > exp {
+                                self.cache.remove(&key);
+                                return Ok(CfmlValue::Null);
+                            }
+                        }
+                        return Ok(val);
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "cachedelete" => {
+                    let key = args.get(0).map(|v| v.as_string()).unwrap_or_default();
+                    let throw_on_error = args.get(1).map(|v| match v {
+                        CfmlValue::Bool(b) => *b,
+                        CfmlValue::String(s) => s.to_lowercase() == "true" || s.to_lowercase() == "yes",
+                        _ => false,
+                    }).unwrap_or(false);
+                    if self.cache.remove(&key).is_none() && throw_on_error {
+                        return Err(CfmlError::runtime(format!("Cache key '{}' does not exist", key)));
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "cacheclear" => {
+                    let filter = args.get(0).map(|v| v.as_string()).unwrap_or_default();
+                    if filter.is_empty() {
+                        self.cache.clear();
+                    } else {
+                        // Simple wildcard matching: * matches any sequence
+                        let pattern = filter.to_lowercase();
+                        let keys_to_remove: Vec<String> = self.cache.keys()
+                            .filter(|k| wildcard_match(&pattern, &k.to_lowercase()))
+                            .cloned()
+                            .collect();
+                        for k in keys_to_remove {
+                            self.cache.remove(&k);
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+                "cachekeyexists" => {
+                    let key = args.get(0).map(|v| v.as_string()).unwrap_or_default();
+                    if let Some((_, expiry)) = self.cache.get(&key) {
+                        if let Some(exp) = expiry {
+                            if std::time::Instant::now() > *exp {
+                                self.cache.remove(&key);
+                                return Ok(CfmlValue::Bool(false));
+                            }
+                        }
+                        return Ok(CfmlValue::Bool(true));
+                    }
+                    return Ok(CfmlValue::Bool(false));
+                }
+                "cachecount" => {
+                    let now = std::time::Instant::now();
+                    let count = self.cache.iter()
+                        .filter(|(_, (_, exp))| exp.map_or(true, |e| now <= e))
+                        .count();
+                    return Ok(CfmlValue::Int(count as i64));
+                }
+                "cachegetall" => {
+                    let now = std::time::Instant::now();
+                    let mut result = IndexMap::new();
+                    for (k, (v, exp)) in &self.cache {
+                        if exp.map_or(true, |e| now <= e) {
+                            result.insert(k.clone(), v.clone());
+                        }
+                    }
+                    return Ok(CfmlValue::Struct(result));
+                }
+                "cachegetallids" => {
+                    let now = std::time::Instant::now();
+                    let ids: Vec<CfmlValue> = self.cache.iter()
+                        .filter(|(_, (_, exp))| exp.map_or(true, |e| now <= e))
+                        .map(|(k, _)| CfmlValue::String(k.clone()))
+                        .collect();
+                    return Ok(CfmlValue::Array(ids));
+                }
+
+                // ---- cfcache tag handler ----
+                "__cfcache" => {
+                    // Stub/no-op; in serve mode could push Cache-Control header
+                    return Ok(CfmlValue::Null);
+                }
+
+                // ---- cfexecute tag handler ----
+                "__cfexecute" => {
+                    if let Some(CfmlValue::Struct(opts)) = args.get(0) {
+                        let cmd_name = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "name")
+                            .map(|(_, v)| v.as_string())
+                            .unwrap_or_default();
+                        let arguments = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "arguments")
+                            .map(|(_, v)| v.as_string())
+                            .unwrap_or_default();
+                        let has_variable = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "variable")
+                            .map(|(_,v)| match v {
+                                CfmlValue::Bool(b) => *b,
+                                CfmlValue::String(s) => s.to_lowercase() == "true",
+                                _ => false,
+                            })
+                            .unwrap_or(false);
+                        let body = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "body")
+                            .map(|(_, v)| v.as_string());
+
+                        let cmd_args: Vec<&str> = if arguments.is_empty() {
+                            Vec::new()
+                        } else {
+                            arguments.split_whitespace().collect()
+                        };
+
+                        let mut command = std::process::Command::new(&cmd_name);
+                        command.args(&cmd_args);
+                        if body.is_some() {
+                            command.stdin(std::process::Stdio::piped());
+                        }
+                        command.stdout(std::process::Stdio::piped());
+                        command.stderr(std::process::Stdio::piped());
+
+                        match command.spawn() {
+                            Ok(mut child) => {
+                                if let Some(ref stdin_data) = body {
+                                    if let Some(ref mut stdin) = child.stdin {
+                                        use std::io::Write;
+                                        let _ = stdin.write_all(stdin_data.as_bytes());
+                                    }
+                                    // Drop stdin to signal EOF
+                                    child.stdin.take();
+                                }
+                                match child.wait_with_output() {
+                                    Ok(output) => {
+                                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                                        if has_variable {
+                                            let mut result = IndexMap::new();
+                                            result.insert("output".to_string(), CfmlValue::String(stdout));
+                                            result.insert("error".to_string(), CfmlValue::String(stderr));
+                                            return Ok(CfmlValue::Struct(result));
+                                        } else {
+                                            self.output_buffer.push_str(&stdout);
+                                            return Ok(CfmlValue::Null);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        return Err(CfmlError::runtime(format!("cfexecute: {}", e)));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                return Err(CfmlError::runtime(format!("cfexecute: failed to spawn '{}': {}", cmd_name, e)));
+                            }
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+
+                // ---- cfmail tag handler ----
+                "__cfmail" => {
+                    if let Some(CfmlValue::Struct(opts)) = args.get(0) {
+                        let to = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "to")
+                            .map(|(_, v)| v.as_string())
+                            .unwrap_or_default();
+                        let from = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "from")
+                            .map(|(_, v)| v.as_string())
+                            .unwrap_or_default();
+                        let subject = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "subject")
+                            .map(|(_, v)| v.as_string())
+                            .unwrap_or_default();
+                        let mail_type = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "type")
+                            .map(|(_, v)| v.as_string())
+                            .unwrap_or_else(|| "text".to_string());
+                        let body_text = opts.iter()
+                            .find(|(k, _)| k.to_lowercase() == "body")
+                            .map(|(_, v)| v.as_string())
+                            .unwrap_or_default();
+                        eprintln!("[CFMAIL] To: {} | From: {} | Subject: {} | Type: {}", to, from, subject, mail_type);
+                        if !body_text.is_empty() {
+                            eprintln!("[CFMAIL] Body: {}", body_text);
+                        }
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+
                 "__cfcustomtag" => {
                     // Self-closing custom tag: __cfcustomtag(path_spec, attrs_struct)
                     let path_spec = args.get(0).map(|v| v.as_string()).unwrap_or_default();
@@ -5780,6 +6001,36 @@ impl CfmlVirtualMachine {
 }
 
 // ---- Helper functions ----
+
+/// Simple wildcard matching: '*' matches any sequence of characters.
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (plen, tlen) = (p.len(), t.len());
+    let (mut pi, mut ti) = (0, 0);
+    let (mut star_pi, mut star_ti) = (usize::MAX, 0);
+
+    while ti < tlen {
+        if pi < plen && (p[pi] == t[ti] || p[pi] == '?') {
+            pi += 1;
+            ti += 1;
+        } else if pi < plen && p[pi] == '*' {
+            star_pi = pi;
+            star_ti = ti;
+            pi += 1;
+        } else if star_pi != usize::MAX {
+            pi = star_pi + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+    while pi < plen && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == plen
+}
 
 fn binary_op<F>(stack: &mut Vec<CfmlValue>, op: F)
 where
