@@ -13,6 +13,7 @@ try { include "core/test_error_handling.cfm"; } catch (any e) { writeOutput("ERR
 try { include "core/test_functions.cfm"; } catch (any e) { writeOutput("ERROR | core/test_functions.cfm | " & e.message & chr(10)); }
 try { include "core/test_language_features.cfm"; } catch (any e) { writeOutput("ERROR | core/test_language_features.cfm | " & e.message & chr(10)); }
 try { include "core/test_scopes.cfm"; } catch (any e) { writeOutput("ERROR | core/test_scopes.cfm | " & e.message & chr(10)); }
+try { include "core/test_error_context.cfm"; } catch (any e) { writeOutput("ERROR | core/test_error_context.cfm | " & e.message & chr(10)); }
 
 // --- Data Types ---
 try { include "types/test_null.cfm"; } catch (any e) { writeOutput("ERROR | types/test_null.cfm | " & e.message & chr(10)); }
@@ -43,8 +44,13 @@ try { include "stdlib/test_conversion.cfm"; } catch (any e) { writeOutput("ERROR
 try { include "stdlib/test_json.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_json.cfm | " & e.message & chr(10)); }
 try { include "stdlib/test_file_io.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_file_io.cfm | " & e.message & chr(10)); }
 try { include "stdlib/test_security.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_security.cfm | " & e.message & chr(10)); }
+try { include "stdlib/test_password_hashing.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_password_hashing.cfm | " & e.message & chr(10)); }
 try { include "stdlib/test_xml.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_xml.cfm | " & e.message & chr(10)); }
 try { include "stdlib/test_utility.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_utility.cfm | " & e.message & chr(10)); }
+try { include "stdlib/test_encoding_functions.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_encoding_functions.cfm | " & e.message & chr(10)); }
+try { include "stdlib/test_query_mutations.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_query_mutations.cfm | " & e.message & chr(10)); }
+try { include "stdlib/test_date_functions_extra.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_date_functions_extra.cfm | " & e.message & chr(10)); }
+try { include "stdlib/test_locale_functions.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_locale_functions.cfm | " & e.message & chr(10)); }
 
 // --- Member Functions ---
 try { include "members/test_string_members.cfm"; } catch (any e) { writeOutput("ERROR | members/test_string_members.cfm | " & e.message & chr(10)); }

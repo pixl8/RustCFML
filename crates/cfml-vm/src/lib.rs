@@ -252,6 +252,22 @@ impl CfmlVirtualMachine {
         frames
     }
 
+    fn build_tag_context(&self) -> CfmlValue {
+        let frames = self.build_stack_trace();
+        let context: Vec<CfmlValue> = frames.iter().map(|f| {
+            let mut entry = IndexMap::new();
+            entry.insert("template".to_string(), CfmlValue::String(f.template.clone()));
+            entry.insert("line".to_string(), CfmlValue::Int(f.line as i64));
+            entry.insert("id".to_string(), CfmlValue::String("CFML".to_string()));
+            entry.insert("raw_trace".to_string(), CfmlValue::String(
+                format!("at {}({}:{})", f.function, f.template, f.line)
+            ));
+            entry.insert("column".to_string(), CfmlValue::Int(0));
+            CfmlValue::Struct(entry)
+        }).collect();
+        CfmlValue::Array(context)
+    }
+
     fn wrap_error(&self, mut err: CfmlError) -> CfmlError {
         if err.stack_trace.is_empty() {
             err.stack_trace = self.build_stack_trace();
@@ -672,7 +688,7 @@ impl CfmlVirtualMachine {
                             exception.insert("message".to_string(), CfmlValue::String("Division by zero is not allowed.".to_string()));
                             exception.insert("type".to_string(), CfmlValue::String("Expression".to_string()));
                             exception.insert("detail".to_string(), CfmlValue::String(String::new()));
-                            exception.insert("tagcontext".to_string(), CfmlValue::Array(vec![]));
+                            exception.insert("tagcontext".to_string(), self.build_tag_context());
                             let error_val = CfmlValue::Struct(exception);
                             self.last_exception = Some(error_val.clone());
                             if let Some(handler) = self.try_stack.pop() {
@@ -888,7 +904,7 @@ impl CfmlVirtualMachine {
                                         err_struct.insert("message".to_string(), CfmlValue::String(e.message.clone()));
                                         err_struct.insert("type".to_string(), CfmlValue::String(format!("{}", e.error_type)));
                                         err_struct.insert("detail".to_string(), CfmlValue::String(String::new()));
-                                        err_struct.insert("tagcontext".to_string(), CfmlValue::Array(vec![]));
+                                        err_struct.insert("tagcontext".to_string(), self.build_tag_context());
                                         CfmlValue::Struct(err_struct)
                                     });
                                     stack.push(error_val);
@@ -1366,7 +1382,7 @@ impl CfmlVirtualMachine {
                                     err_struct.insert("message".to_string(), CfmlValue::String(e.message.clone()));
                                     err_struct.insert("type".to_string(), CfmlValue::String(format!("{}", e.error_type)));
                                     err_struct.insert("detail".to_string(), CfmlValue::String(String::new()));
-                                    err_struct.insert("tagcontext".to_string(), CfmlValue::Array(vec![]));
+                                    err_struct.insert("tagcontext".to_string(), self.build_tag_context());
                                     CfmlValue::Struct(err_struct)
                                 });
                                 stack.push(error_val);
@@ -1526,7 +1542,7 @@ impl CfmlVirtualMachine {
                                             err_struct.insert("message".to_string(), CfmlValue::String(e.message.clone()));
                                             err_struct.insert("type".to_string(), CfmlValue::String(format!("{}", e.error_type)));
                                             err_struct.insert("detail".to_string(), CfmlValue::String(String::new()));
-                                            err_struct.insert("tagcontext".to_string(), CfmlValue::Array(vec![]));
+                                            err_struct.insert("tagcontext".to_string(), self.build_tag_context());
                                             let error_val = CfmlValue::Struct(err_struct);
                                             stack.push(error_val);
                                             ip = handler.catch_ip;
@@ -3353,7 +3369,7 @@ impl CfmlVirtualMachine {
                     exception.insert("type".to_string(), CfmlValue::String(error_type));
                     exception.insert("detail".to_string(), CfmlValue::String(detail));
                     exception.insert("errorcode".to_string(), CfmlValue::String(errorcode));
-                    exception.insert("tagcontext".to_string(), CfmlValue::Array(vec![]));
+                    exception.insert("tagcontext".to_string(), self.build_tag_context());
 
                     let error_val = CfmlValue::Struct(exception);
                     self.last_exception = Some(error_val.clone());

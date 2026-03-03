@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use indexmap::IndexMap;
 use regex::Regex;
 use serde_json;
-use chrono::{NaiveDateTime, NaiveDate, NaiveTime, Datelike, Timelike};
+use chrono::{NaiveDateTime, NaiveDate, NaiveTime, Datelike, Timelike, Local, Utc, TimeZone};
 
 pub type BuiltinFunction = fn(Vec<CfmlValue>) -> CfmlResult;
 
@@ -283,6 +283,11 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("monthShortAsString".into(), fn_month_short_as_string);
     f.insert("quarter".into(), fn_quarter);
     f.insert("week".into(), fn_week);
+    f.insert("millisecond".into(), fn_millisecond);
+    f.insert("dateConvert".into(), fn_date_convert);
+    f.insert("getNumericDate".into(), fn_get_numeric_date);
+    f.insert("getHTTPTimeString".into(), fn_get_http_time_string);
+    f.insert("nowServer".into(), fn_now_server);
     f.insert("getTickCount".into(), fn_get_tick_count);
     f.insert("getFunctionList".into(), fn_get_function_list);
     f.insert("getContextRoot".into(), fn_get_context_root);
@@ -340,6 +345,12 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("queryColumnList".into(), fn_query_column_list as BuiltinFunction);
     f.insert("queryDeleteRow".into(), fn_query_delete_row as BuiltinFunction);
     f.insert("queryDeleteColumn".into(), fn_query_delete_column as BuiltinFunction);
+    f.insert("queryAppend".into(), fn_query_append as BuiltinFunction);
+    f.insert("queryInsertAt".into(), fn_query_insert_at as BuiltinFunction);
+    f.insert("queryPrepend".into(), fn_query_prepend as BuiltinFunction);
+    f.insert("queryReverse".into(), fn_query_reverse as BuiltinFunction);
+    f.insert("queryRowSwap".into(), fn_query_row_swap as BuiltinFunction);
+    f.insert("querySetRow".into(), fn_query_set_row as BuiltinFunction);
     // Higher-order query functions (VM-intercepted stubs)
     f.insert("queryEach".into(), fn_query_ho_stub as BuiltinFunction);
     f.insert("queryMap".into(), fn_query_ho_stub as BuiltinFunction);
@@ -389,11 +400,27 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("setLocale".into(), fn_set_locale);
     f.insert("getLocale".into(), fn_get_locale);
     f.insert("setTimeZone".into(), fn_set_time_zone);
+
+    // ---- Locale (ls*) functions ----
+    f.insert("lsDateFormat".into(), fn_ls_date_format);
+    f.insert("lsTimeFormat".into(), fn_ls_time_format);
+    f.insert("lsDateTimeFormat".into(), fn_ls_date_time_format);
+    f.insert("lsCurrencyFormat".into(), fn_ls_currency_format);
+    f.insert("lsEuroCurrencyFormat".into(), fn_ls_euro_currency_format);
+    f.insert("lsIsDate".into(), fn_ls_is_date);
+    f.insert("lsIsNumeric".into(), fn_ls_is_numeric);
+    f.insert("lsIsCurrency".into(), fn_ls_is_currency);
+    f.insert("lsParseCurrency".into(), fn_ls_parse_currency);
+    f.insert("lsParseDateTime".into(), fn_ls_parse_date_time);
+    f.insert("lsNumberFormat".into(), fn_ls_number_format);
+    f.insert("lsWeek".into(), fn_ls_week);
+    f.insert("lsDayOfWeek".into(), fn_ls_day_of_week);
     f.insert("applicationStop".into(), fn_application_stop);
     f.insert("getApplicationMetadata".into(), fn_get_application_metadata);
     f.insert("getApplicationSettings".into(), fn_get_application_metadata);  // alias
     f.insert("location".into(), fn_cflocation_stub);  // VM intercepts
     f.insert("trace".into(), fn_trace);
+    f.insert("exceptionKeyExists".into(), fn_exception_key_exists);
 
     // ---- File I/O functions ----
     f.insert("fileRead".into(), fn_file_read);
@@ -428,6 +455,16 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("encodeForURL".into(), fn_encode_for_url);
     f.insert("encodeForCSS".into(), fn_encode_for_css);
     f.insert("encodeForJavaScript".into(), fn_encode_for_javascript);
+    f.insert("charsetDecode".into(), fn_charset_decode);
+    f.insert("charsetEncode".into(), fn_charset_encode);
+    f.insert("encodeForHTMLAttribute".into(), fn_encode_for_html_attribute);
+    f.insert("encodeForXML".into(), fn_encode_for_xml);
+    f.insert("encodeForXMLAttribute".into(), fn_encode_for_xml_attribute);
+    f.insert("encodeFor".into(), fn_encode_for);
+    f.insert("decodeForHTML".into(), fn_decode_for_html);
+    f.insert("decodeFromURL".into(), fn_decode_from_url);
+    f.insert("urlEncode".into(), fn_url_encode_alias);
+    f.insert("canonicalize".into(), fn_canonicalize);
     f.insert("listReduce".into(), fn_list_reduce);
     f.insert("arrayPop".into(), fn_array_pop);
     f.insert("arrayShift".into(), fn_array_shift);
@@ -492,6 +529,20 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("generateSecretKey".into(), fn_generate_secret_key);
     f.insert("encrypt".into(), fn_encrypt);
     f.insert("decrypt".into(), fn_decrypt);
+
+    // ---- Password hashing / CSRF functions ----
+    #[cfg(feature = "security")]
+    {
+        f.insert("generatePBKDFKey".into(), fn_generate_pbkdf_key);
+        f.insert("generateBCryptHash".into(), fn_generate_bcrypt_hash);
+        f.insert("verifyBCryptHash".into(), fn_verify_bcrypt_hash);
+        f.insert("generateSCryptHash".into(), fn_generate_scrypt_hash);
+        f.insert("verifySCryptHash".into(), fn_verify_scrypt_hash);
+        f.insert("generateArgon2Hash".into(), fn_generate_argon2_hash);
+        f.insert("argon2CheckHash".into(), fn_argon2_check_hash);
+        f.insert("csrfGenerateToken".into(), fn_csrf_generate_token);
+        f.insert("csrfVerifyToken".into(), fn_csrf_verify_token);
+    }
 
     // ---- XML functions ----
     #[cfg(feature = "xml")]
@@ -1143,6 +1194,10 @@ fn fn_binary_decode(args: Vec<CfmlValue>) -> CfmlResult {
                 i += 4;
             }
             Ok(CfmlValue::Binary(bytes))
+        }
+        "utf-8" | "us-ascii" => {
+            // Convert string directly to bytes
+            Ok(CfmlValue::Binary(input.as_bytes().to_vec()))
         }
         _ => Err(CfmlError::runtime(format!("Unsupported encoding: {}", encoding))),
     }
@@ -3225,6 +3280,64 @@ fn fn_date_compare(args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::Int(cmp))
 }
 
+fn fn_millisecond(args: Vec<CfmlValue>) -> CfmlResult {
+    let dt = parse_cfml_date(&get_str(&args, 0))
+        .ok_or_else(|| CfmlError::runtime("Invalid date".into()))?;
+    let millis = dt.and_utc().timestamp_subsec_millis() as i64;
+    Ok(CfmlValue::Int(millis))
+}
+
+fn fn_date_convert(args: Vec<CfmlValue>) -> CfmlResult {
+    let conversion_type = get_str(&args, 0).to_lowercase();
+    let date_str = get_str(&args, 1);
+    let dt = parse_cfml_date(&date_str)
+        .ok_or_else(|| CfmlError::runtime(format!("Invalid date: {}", date_str)))?;
+
+    let result = match conversion_type.as_str() {
+        "local2utc" => {
+            let local_dt = Local.from_local_datetime(&dt)
+                .single()
+                .ok_or_else(|| CfmlError::runtime("Ambiguous or invalid local time".into()))?;
+            local_dt.with_timezone(&Utc).naive_utc()
+        }
+        "utc2local" => {
+            let utc_dt = Utc.from_utc_datetime(&dt);
+            utc_dt.with_timezone(&Local).naive_local()
+        }
+        _ => return Err(CfmlError::runtime(
+            format!("Invalid conversion type: {}. Use 'local2utc' or 'utc2local'.", conversion_type)
+        )),
+    };
+
+    Ok(CfmlValue::String(result.format("%Y-%m-%d %H:%M:%S").to_string()))
+}
+
+fn fn_get_numeric_date(args: Vec<CfmlValue>) -> CfmlResult {
+    let date_str = get_str(&args, 0);
+    let dt = parse_cfml_date(&date_str)
+        .ok_or_else(|| CfmlError::runtime(format!("Invalid date: {}", date_str)))?;
+
+    let epoch = NaiveDate::from_ymd_opt(1899, 12, 30).unwrap().and_hms_opt(0, 0, 0).unwrap();
+    let duration = dt - epoch;
+    let days = duration.num_days() as f64;
+    let remaining_secs = duration.num_seconds() - (duration.num_days() * 86400);
+    let frac = remaining_secs as f64 / 86400.0;
+
+    Ok(CfmlValue::Double(days + frac))
+}
+
+fn fn_get_http_time_string(args: Vec<CfmlValue>) -> CfmlResult {
+    let date_str = get_str(&args, 0);
+    let dt = parse_cfml_date(&date_str)
+        .ok_or_else(|| CfmlError::runtime(format!("Invalid date: {}", date_str)))?;
+
+    Ok(CfmlValue::String(dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string()))
+}
+
+fn fn_now_server(_args: Vec<CfmlValue>) -> CfmlResult {
+    Ok(CfmlValue::String(Local::now().format("%Y-%m-%d %H:%M:%S").to_string()))
+}
+
 fn fn_get_tick_count(_args: Vec<CfmlValue>) -> CfmlResult {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
@@ -3782,6 +3895,122 @@ fn fn_query_delete_column(args: Vec<CfmlValue>) -> CfmlResult {
         }
     }
     Ok(CfmlValue::Null)
+}
+
+fn fn_query_append(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() >= 2 {
+        if let (CfmlValue::Query(q1), CfmlValue::Query(q2)) = (&args[0], &args[1]) {
+            let mut result = q1.clone();
+            for col in &q2.columns {
+                let col_lower = col.to_lowercase();
+                if !result.columns.iter().any(|c| c.to_lowercase() == col_lower) {
+                    result.columns.push(col.clone());
+                }
+            }
+            for row in &q2.rows {
+                result.rows.push(row.clone());
+            }
+            return Ok(CfmlValue::Query(result));
+        }
+    }
+    Err(CfmlError::runtime("queryAppend() requires two query arguments".to_string()))
+}
+
+fn fn_query_insert_at(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() >= 3 {
+        if let CfmlValue::Query(q) = &args[0] {
+            let mut result = q.clone();
+            let position = (get_int(&args, 2) as usize).saturating_sub(1);
+            if position > result.rows.len() {
+                return Err(CfmlError::runtime(format!(
+                    "queryInsertAt: position {} is out of range (query has {} rows)",
+                    position + 1, result.rows.len()
+                )));
+            }
+            let row_data = match &args[1] {
+                CfmlValue::Struct(data) => data.clone(),
+                _ => IndexMap::new(),
+            };
+            result.rows.insert(position, row_data);
+            return Ok(CfmlValue::Query(result));
+        }
+    }
+    Err(CfmlError::runtime("queryInsertAt() requires a query, row data, and position".to_string()))
+}
+
+fn fn_query_prepend(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() >= 2 {
+        if let (CfmlValue::Query(q1), CfmlValue::Query(q2)) = (&args[0], &args[1]) {
+            let mut result = q1.clone();
+            for col in &q2.columns {
+                let col_lower = col.to_lowercase();
+                if !result.columns.iter().any(|c| c.to_lowercase() == col_lower) {
+                    result.columns.push(col.clone());
+                }
+            }
+            let mut new_rows = q2.rows.clone();
+            new_rows.append(&mut result.rows);
+            result.rows = new_rows;
+            return Ok(CfmlValue::Query(result));
+        }
+    }
+    Err(CfmlError::runtime("queryPrepend() requires two query arguments".to_string()))
+}
+
+fn fn_query_reverse(args: Vec<CfmlValue>) -> CfmlResult {
+    if let Some(CfmlValue::Query(q)) = args.first() {
+        let mut result = q.clone();
+        result.rows.reverse();
+        return Ok(CfmlValue::Query(result));
+    }
+    Err(CfmlError::runtime("queryReverse() requires a query argument".to_string()))
+}
+
+fn fn_query_row_swap(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() >= 3 {
+        if let CfmlValue::Query(q) = &args[0] {
+            let mut result = q.clone();
+            let row1 = (get_int(&args, 1) as usize).saturating_sub(1);
+            let row2 = (get_int(&args, 2) as usize).saturating_sub(1);
+            if row1 >= result.rows.len() {
+                return Err(CfmlError::runtime(format!(
+                    "queryRowSwap: row1 {} is out of range (query has {} rows)",
+                    row1 + 1, result.rows.len()
+                )));
+            }
+            if row2 >= result.rows.len() {
+                return Err(CfmlError::runtime(format!(
+                    "queryRowSwap: row2 {} is out of range (query has {} rows)",
+                    row2 + 1, result.rows.len()
+                )));
+            }
+            result.rows.swap(row1, row2);
+            return Ok(CfmlValue::Query(result));
+        }
+    }
+    Err(CfmlError::runtime("queryRowSwap() requires a query and two row numbers".to_string()))
+}
+
+fn fn_query_set_row(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() >= 3 {
+        if let CfmlValue::Query(q) = &args[0] {
+            let mut result = q.clone();
+            let row_idx = (get_int(&args, 1) as usize).saturating_sub(1);
+            if row_idx >= result.rows.len() {
+                return Err(CfmlError::runtime(format!(
+                    "querySetRow: row {} is out of range (query has {} rows)",
+                    row_idx + 1, result.rows.len()
+                )));
+            }
+            let row_data = match &args[2] {
+                CfmlValue::Struct(data) => data.clone(),
+                _ => IndexMap::new(),
+            };
+            result.rows[row_idx] = row_data;
+            return Ok(CfmlValue::Query(result));
+        }
+    }
+    Err(CfmlError::runtime("querySetRow() requires a query, row number, and row data".to_string()))
 }
 
 fn fn_query_ho_stub(_args: Vec<CfmlValue>) -> CfmlResult {
@@ -4377,6 +4606,257 @@ fn fn_encode_for_javascript(args: Vec<CfmlValue>) -> CfmlResult {
         }
     }
     Ok(CfmlValue::String(result))
+}
+
+// ===============================================
+// ENCODING/DECODING FUNCTIONS
+// ===============================================
+
+fn fn_charset_decode(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0);
+    let _encoding = get_str(&args, 1).to_lowercase();
+    Ok(CfmlValue::Binary(s.as_bytes().to_vec()))
+}
+
+fn fn_charset_encode(args: Vec<CfmlValue>) -> CfmlResult {
+    let bytes = match args.first() {
+        Some(CfmlValue::Binary(b)) => b.clone(),
+        Some(other) => other.as_string().into_bytes(),
+        None => Vec::new(),
+    };
+    let _encoding = get_str(&args, 1).to_lowercase();
+    match String::from_utf8(bytes.clone()) {
+        Ok(s) => Ok(CfmlValue::String(s)),
+        Err(_) => Ok(CfmlValue::String(String::from_utf8_lossy(&bytes).to_string())),
+    }
+}
+
+fn fn_encode_for_html_attribute(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0);
+    let mut result = String::new();
+    for c in s.chars() {
+        match c {
+            '&' => result.push_str("&amp;"),
+            '<' => result.push_str("&lt;"),
+            '>' => result.push_str("&gt;"),
+            '"' => result.push_str("&quot;"),
+            '\'' => result.push_str("&#x27;"),
+            '/' => result.push_str("&#x2f;"),
+            '\t' => result.push_str("&#x9;"),
+            '\n' => result.push_str("&#xa;"),
+            '\r' => result.push_str("&#xd;"),
+            '`' => result.push_str("&#x60;"),
+            _ => result.push(c),
+        }
+    }
+    Ok(CfmlValue::String(result))
+}
+
+fn fn_encode_for_xml(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0);
+    Ok(CfmlValue::String(
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;"),
+    ))
+}
+
+fn fn_encode_for_xml_attribute(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0);
+    let mut result = String::new();
+    for c in s.chars() {
+        match c {
+            '&' => result.push_str("&amp;"),
+            '<' => result.push_str("&lt;"),
+            '>' => result.push_str("&gt;"),
+            '"' => result.push_str("&quot;"),
+            '\'' => result.push_str("&apos;"),
+            '\t' => result.push_str("&#x9;"),
+            '\n' => result.push_str("&#xA;"),
+            '\r' => result.push_str("&#xD;"),
+            _ => result.push(c),
+        }
+    }
+    Ok(CfmlValue::String(result))
+}
+
+fn fn_encode_for(args: Vec<CfmlValue>) -> CfmlResult {
+    let encoding_type = get_str(&args, 0).to_lowercase();
+    let value_args = if args.len() > 1 {
+        vec![args[1].clone()]
+    } else {
+        vec![CfmlValue::String(String::new())]
+    };
+    match encoding_type.as_str() {
+        "html" => fn_encode_for_html(value_args),
+        "htmlattribute" => fn_encode_for_html_attribute(value_args),
+        "xml" => fn_encode_for_xml(value_args),
+        "xmlattribute" => fn_encode_for_xml_attribute(value_args),
+        "javascript" | "js" => fn_encode_for_javascript(value_args),
+        "css" => fn_encode_for_css(value_args),
+        "url" => fn_url_encode(value_args),
+        _ => Err(CfmlError::runtime(format!("Unsupported encoding type: {}", encoding_type))),
+    }
+}
+
+fn fn_decode_for_html(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0);
+    Ok(CfmlValue::String(decode_html_entities(&s)))
+}
+
+fn decode_html_entities(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '&' {
+            let mut entity = String::new();
+            entity.push('&');
+            let mut found_semi = false;
+            for _ in 0..12 {
+                match chars.peek() {
+                    Some(&';') => {
+                        entity.push(';');
+                        chars.next();
+                        found_semi = true;
+                        break;
+                    }
+                    Some(&ch) => {
+                        entity.push(ch);
+                        chars.next();
+                    }
+                    None => break,
+                }
+            }
+            if found_semi {
+                match entity.as_str() {
+                    "&amp;" => result.push('&'),
+                    "&lt;" => result.push('<'),
+                    "&gt;" => result.push('>'),
+                    "&quot;" => result.push('"'),
+                    "&apos;" => result.push('\''),
+                    "&#39;" => result.push('\''),
+                    "&#x27;" | "&#X27;" => result.push('\''),
+                    "&#x2f;" | "&#X2f;" | "&#x2F;" | "&#X2F;" => result.push('/'),
+                    "&nbsp;" => result.push('\u{00A0}'),
+                    _ => {
+                        if entity.starts_with("&#x") || entity.starts_with("&#X") {
+                            let hex_str = &entity[3..entity.len() - 1];
+                            if let Ok(code) = u32::from_str_radix(hex_str, 16) {
+                                if let Some(ch) = char::from_u32(code) {
+                                    result.push(ch);
+                                } else {
+                                    result.push_str(&entity);
+                                }
+                            } else {
+                                result.push_str(&entity);
+                            }
+                        } else if entity.starts_with("&#") {
+                            let num_str = &entity[2..entity.len() - 1];
+                            if let Ok(code) = num_str.parse::<u32>() {
+                                if let Some(ch) = char::from_u32(code) {
+                                    result.push(ch);
+                                } else {
+                                    result.push_str(&entity);
+                                }
+                            } else {
+                                result.push_str(&entity);
+                            }
+                        } else {
+                            result.push_str(&entity);
+                        }
+                    }
+                }
+            } else {
+                result.push_str(&entity);
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+fn fn_decode_from_url(args: Vec<CfmlValue>) -> CfmlResult {
+    fn_url_decode(args)
+}
+
+fn fn_url_encode_alias(args: Vec<CfmlValue>) -> CfmlResult {
+    fn_url_encode(args)
+}
+
+fn fn_canonicalize(args: Vec<CfmlValue>) -> CfmlResult {
+    let mut s = get_str(&args, 0);
+    let _restrict_multiple = if args.len() > 1 {
+        let v = args[1].as_string().to_lowercase();
+        v == "true" || v == "yes" || v == "1"
+    } else {
+        false
+    };
+    let _restrict_mixed = if args.len() > 2 {
+        let v = args[2].as_string().to_lowercase();
+        v == "true" || v == "yes" || v == "1"
+    } else {
+        false
+    };
+    for _ in 0..5 {
+        let prev = s.clone();
+        s = decode_html_entities(&s);
+        s = url_decode_string(&s);
+        if s == prev {
+            break;
+        }
+    }
+    Ok(CfmlValue::String(s))
+}
+
+fn url_decode_string(s: &str) -> String {
+    let mut result = String::new();
+    let mut bytes = Vec::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '%' => {
+                let hex: String = chars.by_ref().take(2).collect();
+                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                    bytes.push(byte);
+                }
+                if chars.peek() != Some(&'%') {
+                    if let Ok(decoded) = String::from_utf8(bytes.clone()) {
+                        result.push_str(&decoded);
+                    } else {
+                        for b in &bytes { result.push(*b as char); }
+                    }
+                    bytes.clear();
+                }
+            }
+            '+' => {
+                if !bytes.is_empty() {
+                    if let Ok(decoded) = String::from_utf8(bytes.clone()) {
+                        result.push_str(&decoded);
+                    }
+                    bytes.clear();
+                }
+                result.push(' ');
+            }
+            _ => {
+                if !bytes.is_empty() {
+                    if let Ok(decoded) = String::from_utf8(bytes.clone()) {
+                        result.push_str(&decoded);
+                    }
+                    bytes.clear();
+                }
+                result.push(c);
+            }
+        }
+    }
+    if !bytes.is_empty() {
+        if let Ok(decoded) = String::from_utf8(bytes.clone()) {
+            result.push_str(&decoded);
+        }
+    }
+    result
 }
 
 fn fn_list_reduce(_args: Vec<CfmlValue>) -> CfmlResult {
@@ -7699,4 +8179,412 @@ fn fn_file_set_last_modified(args: Vec<CfmlValue>) -> CfmlResult {
     file.set_modified(modified_time)
         .map_err(|e| CfmlError::runtime(format!("fileSetLastModified failed: {}", e)))?;
     Ok(CfmlValue::Null)
+}
+
+// ============================================================
+// Locale (ls*) Functions
+// ============================================================
+
+fn fn_ls_date_format(args: Vec<CfmlValue>) -> CfmlResult {
+    let pass_args = if args.len() >= 2 {
+        vec![args[0].clone(), args[1].clone()]
+    } else {
+        vec![args.first().cloned().unwrap_or(CfmlValue::String(String::new()))]
+    };
+    fn_date_format(pass_args)
+}
+
+fn fn_ls_time_format(args: Vec<CfmlValue>) -> CfmlResult {
+    let pass_args = if args.len() >= 2 {
+        vec![args[0].clone(), args[1].clone()]
+    } else {
+        vec![args.first().cloned().unwrap_or(CfmlValue::String(String::new()))]
+    };
+    fn_time_format(pass_args)
+}
+
+fn fn_ls_date_time_format(args: Vec<CfmlValue>) -> CfmlResult {
+    let pass_args = if args.len() >= 2 {
+        vec![args[0].clone(), args[1].clone()]
+    } else {
+        vec![args.first().cloned().unwrap_or(CfmlValue::String(String::new()))]
+    };
+    fn_date_time_format(pass_args)
+}
+
+fn fn_ls_currency_format(args: Vec<CfmlValue>) -> CfmlResult {
+    let n = get_float(&args, 0);
+    let currency_type = if args.len() > 1 {
+        get_str(&args, 1).to_lowercase()
+    } else {
+        "local".to_string()
+    };
+
+    let negative = n < 0.0;
+    let abs_n = n.abs();
+    let formatted_num = format!("{:.2}", abs_n);
+    let parts: Vec<&str> = formatted_num.split('.').collect();
+    let int_with_commas = add_thousands_separator(parts[0]);
+    let decimal = parts.get(1).unwrap_or(&"00");
+
+    let formatted = match currency_type.as_str() {
+        "international" => format!("USD{}.{}", int_with_commas, decimal),
+        "none" => format!("{}.{}", int_with_commas, decimal),
+        _ => format!("${}.{}", int_with_commas, decimal),
+    };
+
+    if negative {
+        Ok(CfmlValue::String(format!("-{}", formatted)))
+    } else {
+        Ok(CfmlValue::String(formatted))
+    }
+}
+
+fn fn_ls_euro_currency_format(args: Vec<CfmlValue>) -> CfmlResult {
+    let n = get_float(&args, 0);
+    let currency_type = if args.len() > 1 {
+        get_str(&args, 1).to_lowercase()
+    } else {
+        "local".to_string()
+    };
+
+    let negative = n < 0.0;
+    let abs_n = n.abs();
+    let formatted_num = format!("{:.2}", abs_n);
+    let parts: Vec<&str> = formatted_num.split('.').collect();
+    let int_with_commas = add_thousands_separator(parts[0]);
+    let decimal = parts.get(1).unwrap_or(&"00");
+
+    let formatted = match currency_type.as_str() {
+        "international" => format!("EUR{}.{}", int_with_commas, decimal),
+        "none" => format!("{}.{}", int_with_commas, decimal),
+        _ => format!("\u{20AC}{}.{}", int_with_commas, decimal),
+    };
+
+    if negative {
+        Ok(CfmlValue::String(format!("-{}", formatted)))
+    } else {
+        Ok(CfmlValue::String(formatted))
+    }
+}
+
+fn fn_ls_is_date(args: Vec<CfmlValue>) -> CfmlResult {
+    fn_is_date(vec![args.first().cloned().unwrap_or(CfmlValue::String(String::new()))])
+}
+
+fn fn_ls_is_numeric(args: Vec<CfmlValue>) -> CfmlResult {
+    fn_is_numeric(vec![args.first().cloned().unwrap_or(CfmlValue::String(String::new()))])
+}
+
+fn fn_ls_is_currency(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0).trim().to_string();
+    if s.is_empty() {
+        return Ok(CfmlValue::Bool(false));
+    }
+    let stripped: String = s.chars()
+        .filter(|c| *c != '$' && *c != '\u{20AC}' && *c != '\u{00A3}' && *c != '\u{00A5}'
+            && *c != ',' && *c != ' ')
+        .collect();
+    let is_currency = !stripped.is_empty() && stripped.trim_start_matches('-').parse::<f64>().is_ok();
+    let has_digit = s.chars().any(|c| c.is_ascii_digit());
+    Ok(CfmlValue::Bool(is_currency && has_digit))
+}
+
+fn fn_ls_parse_currency(args: Vec<CfmlValue>) -> CfmlResult {
+    let s = get_str(&args, 0).trim().to_string();
+    let stripped: String = s.chars()
+        .filter(|c| *c != '$' && *c != '\u{20AC}' && *c != '\u{00A3}' && *c != '\u{00A5}'
+            && *c != ',' && *c != ' ')
+        .collect();
+    let cleaned = if stripped.len() >= 3 {
+        let prefix = &stripped[..3];
+        if prefix.chars().all(|c| c.is_ascii_uppercase()) && stripped[3..].starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '.') {
+            stripped[3..].to_string()
+        } else {
+            stripped
+        }
+    } else {
+        stripped
+    };
+    match cleaned.parse::<f64>() {
+        Ok(n) => Ok(CfmlValue::Double(n)),
+        Err(_) => Err(CfmlError::runtime(format!("Cannot parse currency: {}", s))),
+    }
+}
+
+fn fn_ls_parse_date_time(args: Vec<CfmlValue>) -> CfmlResult {
+    fn_parse_date_time(vec![args.first().cloned().unwrap_or(CfmlValue::String(String::new()))])
+}
+
+fn fn_ls_number_format(args: Vec<CfmlValue>) -> CfmlResult {
+    let pass_args = if args.len() >= 2 {
+        vec![args[0].clone(), args[1].clone()]
+    } else {
+        vec![args.first().cloned().unwrap_or(CfmlValue::String(String::new()))]
+    };
+    fn_number_format(pass_args)
+}
+
+fn fn_ls_week(args: Vec<CfmlValue>) -> CfmlResult {
+    fn_week(vec![args.first().cloned().unwrap_or(CfmlValue::String(String::new()))])
+}
+
+fn fn_ls_day_of_week(args: Vec<CfmlValue>) -> CfmlResult {
+    fn_day_of_week(vec![args.first().cloned().unwrap_or(CfmlValue::String(String::new()))])
+}
+
+// ---- Exception functions ----
+
+fn fn_exception_key_exists(args: Vec<CfmlValue>) -> CfmlResult {
+    if let (Some(CfmlValue::Struct(s)), Some(key)) = (args.get(0), args.get(1)) {
+        let key_str = key.as_string().to_lowercase();
+        let exists = s.keys().any(|k| k.to_lowercase() == key_str);
+        Ok(CfmlValue::Bool(exists))
+    } else {
+        Ok(CfmlValue::Bool(false))
+    }
+}
+
+// ===============================================
+// PASSWORD HASHING / CSRF FUNCTIONS
+// ===============================================
+
+/// generatePBKDFKey(algorithm, passphrase, salt, iterations, keySize)
+/// Generates a derived key using PBKDF2.
+/// algorithm: "PBKDF2WithHmacSHA1", "PBKDF2WithHmacSHA256", "PBKDF2WithHmacSHA512"
+/// keySize is in bits (e.g. 128, 256). Returns hex-encoded derived key.
+#[cfg(feature = "security")]
+fn fn_generate_pbkdf_key(args: Vec<CfmlValue>) -> CfmlResult {
+    use pbkdf2::pbkdf2_hmac;
+    use sha2::{Sha256, Sha512};
+    use sha1::Sha1;
+
+    if args.len() < 5 {
+        return Err(CfmlError::runtime(
+            "generatePBKDFKey requires 5 arguments: algorithm, passphrase, salt, iterations, keySize".to_string()
+        ));
+    }
+
+    let algorithm = get_str(&args, 0).to_uppercase();
+    let passphrase = get_str(&args, 1);
+    let salt = get_str(&args, 2);
+    let iterations = get_int(&args, 3) as u32;
+    let key_size_bits = get_int(&args, 4) as usize;
+    let key_size_bytes = key_size_bits / 8;
+
+    if iterations == 0 {
+        return Err(CfmlError::runtime("generatePBKDFKey: iterations must be greater than 0".to_string()));
+    }
+    if key_size_bytes == 0 {
+        return Err(CfmlError::runtime("generatePBKDFKey: keySize must be greater than 0".to_string()));
+    }
+
+    let mut derived_key = vec![0u8; key_size_bytes];
+
+    match algorithm.as_str() {
+        "PBKDF2WITHHMACSHA1" | "PBKDF2WITHSHA1" => {
+            pbkdf2_hmac::<Sha1>(
+                passphrase.as_bytes(),
+                salt.as_bytes(),
+                iterations,
+                &mut derived_key,
+            );
+        }
+        "PBKDF2WITHHMACSHA256" | "PBKDF2WITHSHA256" => {
+            pbkdf2_hmac::<Sha256>(
+                passphrase.as_bytes(),
+                salt.as_bytes(),
+                iterations,
+                &mut derived_key,
+            );
+        }
+        "PBKDF2WITHHMACSHA512" | "PBKDF2WITHSHA512" => {
+            pbkdf2_hmac::<Sha512>(
+                passphrase.as_bytes(),
+                salt.as_bytes(),
+                iterations,
+                &mut derived_key,
+            );
+        }
+        _ => {
+            return Err(CfmlError::runtime(format!(
+                "generatePBKDFKey: unsupported algorithm '{}'. Supported: PBKDF2WithHmacSHA1, PBKDF2WithHmacSHA256, PBKDF2WithHmacSHA512",
+                algorithm
+            )));
+        }
+    }
+
+    Ok(CfmlValue::String(hex_encode(&derived_key)))
+}
+
+/// generateBCryptHash(password [, rounds])
+/// Generate a bcrypt hash. Rounds default to 10. Returns the bcrypt hash string.
+#[cfg(feature = "security")]
+fn fn_generate_bcrypt_hash(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.is_empty() {
+        return Err(CfmlError::runtime("generateBCryptHash requires at least 1 argument: password".to_string()));
+    }
+
+    let password = get_str(&args, 0);
+    let rounds = if args.len() >= 2 { get_int(&args, 1) as u32 } else { 10 };
+
+    if rounds < 4 || rounds > 31 {
+        return Err(CfmlError::runtime(format!(
+            "generateBCryptHash: rounds must be between 4 and 31, got {}", rounds
+        )));
+    }
+
+    let hash = bcrypt::hash(password.as_bytes(), rounds)
+        .map_err(|e| CfmlError::runtime(format!("generateBCryptHash error: {}", e)))?;
+
+    Ok(CfmlValue::String(hash))
+}
+
+/// verifyBCryptHash(password, hash)
+/// Verify a password against a bcrypt hash. Returns boolean.
+#[cfg(feature = "security")]
+fn fn_verify_bcrypt_hash(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() < 2 {
+        return Err(CfmlError::runtime("verifyBCryptHash requires 2 arguments: password, hash".to_string()));
+    }
+
+    let password = get_str(&args, 0);
+    let hash = get_str(&args, 1);
+
+    let result = bcrypt::verify(password.as_bytes(), &hash)
+        .unwrap_or(false);
+
+    Ok(CfmlValue::Bool(result))
+}
+
+/// generateSCryptHash(password)
+/// Generate a scrypt hash. Returns encoded hash string.
+#[cfg(feature = "security")]
+fn fn_generate_scrypt_hash(args: Vec<CfmlValue>) -> CfmlResult {
+    use scrypt::password_hash::{PasswordHasher, SaltString};
+    use rand::rngs::OsRng;
+
+    if args.is_empty() {
+        return Err(CfmlError::runtime("generateSCryptHash requires at least 1 argument: password".to_string()));
+    }
+
+    let password = get_str(&args, 0);
+    let salt = SaltString::generate(&mut OsRng);
+    let params = scrypt::Params::recommended();
+    let hasher = scrypt::Scrypt;
+
+    let hash = hasher
+        .hash_password_customized(
+            password.as_bytes(),
+            None,
+            None,
+            params,
+            &salt,
+        )
+        .map_err(|e| CfmlError::runtime(format!("generateSCryptHash error: {}", e)))?;
+
+    Ok(CfmlValue::String(hash.to_string()))
+}
+
+/// verifySCryptHash(password, hash)
+/// Verify a password against a scrypt hash. Returns boolean.
+#[cfg(feature = "security")]
+fn fn_verify_scrypt_hash(args: Vec<CfmlValue>) -> CfmlResult {
+    use scrypt::password_hash::{PasswordHash, PasswordVerifier};
+
+    if args.len() < 2 {
+        return Err(CfmlError::runtime("verifySCryptHash requires 2 arguments: password, hash".to_string()));
+    }
+
+    let password = get_str(&args, 0);
+    let hash_str = get_str(&args, 1);
+
+    let parsed_hash = PasswordHash::new(&hash_str)
+        .map_err(|e| CfmlError::runtime(format!("verifySCryptHash: invalid hash format: {}", e)))?;
+
+    let result = scrypt::Scrypt.verify_password(password.as_bytes(), &parsed_hash).is_ok();
+
+    Ok(CfmlValue::Bool(result))
+}
+
+/// generateArgon2Hash(password)
+/// Generate an Argon2id hash. Returns encoded hash string.
+#[cfg(feature = "security")]
+fn fn_generate_argon2_hash(args: Vec<CfmlValue>) -> CfmlResult {
+    use argon2::password_hash::{PasswordHasher, SaltString};
+    use rand::rngs::OsRng;
+
+    if args.is_empty() {
+        return Err(CfmlError::runtime("generateArgon2Hash requires at least 1 argument: password".to_string()));
+    }
+
+    let password = get_str(&args, 0);
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = argon2::Argon2::default(); // Argon2id with default params
+
+    let hash = argon2
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|e| CfmlError::runtime(format!("generateArgon2Hash error: {}", e)))?;
+
+    Ok(CfmlValue::String(hash.to_string()))
+}
+
+/// argon2CheckHash(hash, password)
+/// Verify a password against an Argon2 hash. Note: CFML has hash first, password second.
+/// Returns boolean.
+#[cfg(feature = "security")]
+fn fn_argon2_check_hash(args: Vec<CfmlValue>) -> CfmlResult {
+    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+
+    if args.len() < 2 {
+        return Err(CfmlError::runtime("argon2CheckHash requires 2 arguments: hash, password".to_string()));
+    }
+
+    // Note: CFML convention is (hash, password) - reversed from other verify functions
+    let hash_str = get_str(&args, 0);
+    let password = get_str(&args, 1);
+
+    let parsed_hash = PasswordHash::new(&hash_str)
+        .map_err(|e| CfmlError::runtime(format!("argon2CheckHash: invalid hash format: {}", e)))?;
+
+    let result = argon2::Argon2::default()
+        .verify_password(password.as_bytes(), &parsed_hash)
+        .is_ok();
+
+    Ok(CfmlValue::Bool(result))
+}
+
+/// csrfGenerateToken([key, forceNew])
+/// Generate a CSRF token. Returns a random 32-byte hex string (64 hex chars).
+/// The key parameter is accepted but ignored (no server-side session storage).
+#[cfg(feature = "security")]
+fn fn_csrf_generate_token(args: Vec<CfmlValue>) -> CfmlResult {
+    use rand::RngCore;
+
+    // key (args[0]) and forceNew (args[1]) are accepted but ignored
+    // since we don't have server-side session storage
+    let _ = &args;
+
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+
+    Ok(CfmlValue::String(hex_encode(&bytes)))
+}
+
+/// csrfVerifyToken(token [, key])
+/// Verify a CSRF token. Without session storage, we verify the token is a valid
+/// 64-character hex string. Returns boolean.
+#[cfg(feature = "security")]
+fn fn_csrf_verify_token(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.is_empty() {
+        return Err(CfmlError::runtime("csrfVerifyToken requires at least 1 argument: token".to_string()));
+    }
+
+    let token = get_str(&args, 0);
+    // key (args[1]) is accepted but ignored
+
+    // Verify: must be exactly 64 hex characters (32 bytes)
+    let is_valid = token.len() == 64 && token.chars().all(|c| c.is_ascii_hexdigit());
+
+    Ok(CfmlValue::Bool(is_valid))
 }
