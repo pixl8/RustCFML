@@ -91,7 +91,7 @@ crates/
 ├── cfml-compiler/   # Lexer, Parser, AST, Tag Preprocessor
 ├── cfml-codegen/    # AST → BytecodeOp
 ├── cfml-vm/         # Stack-based VM
-├── cfml-stdlib/     # 340+ built-in functions
+├── cfml-stdlib/     # 390+ built-in functions
 ├── cli/             # CLI + Axum web server
 └── wasm/            # WebAssembly target
 ```

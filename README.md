@@ -339,7 +339,7 @@ cargo run -- examples/08_builtins.cfm         # Built-in functions
 *   **Full CFScript parser** with proper operator precedence
 *   **CFML Tag preprocessor** — automatic tag-to-script conversion
 *   **Stack-based bytecode VM** for execution
-*   **340+ built-in functions** across strings, arrays, structs, math, dates, lists, JSON, queries, file I/O, conversion, and type checking
+*   **390+ built-in functions** across strings, arrays, structs, math, dates, lists, JSON, queries, file I/O, conversion, type checking, caching, and security
 *   **Member functions** — `"hello".ucase()`, `[1,2,3].len()`, `{a:1}.keyList()`
 *   **Higher-order functions** — `arrayMap`, `arrayFilter`, `arrayReduce`, `arraySome`, `arrayEvery`, `structEach`, `structReduce`, `listMap`, `listFilter`, etc. with closure support
 *   **Method chaining** — `"hello world".ucase().reverse()`
@@ -364,7 +364,7 @@ cargo run -- examples/08_builtins.cfm         # Built-in functions
 *   **Application.cfc lifecycle** — `onApplicationStart`, `onRequestStart`, `onRequest`, `onRequestEnd`, `onError`
 *   **Scopes** — `local`, `variables`, `arguments`, `request` (per-request), `application` (persistent), `server` (read-only), `session` (server-side via CFID cookie), `cookie` (from request headers)
 *   **Component mappings** — virtual path resolution via `this.mappings` in Application.cfc
-*   **45+ CFML tags** — `<cfset>`, `<cfoutput>`, `<cfif>`, `<cfloop>`, `<cffunction>`, `<cfscript>`, `<cftry>/<cfcatch>/<cffinally>`, `<cfthrow>/<cfrethrow>`, `<cfswitch>/<cfcase>`, `<cfbreak>`, `<cfcontinue>`, `<cfwhile>`, `<cfinclude>`, `<cfdump>`, `<cfparam>`, `<cfabort>`, `<cfhttp>/<cfhttpparam>`, `<cfquery>/<cfqueryparam>`, `<cftransaction>`, `<cflocation>`, `<cfheader>`, `<cfcontent>`, `<cfinvoke>`, `<cfsavecontent>`, `<cflock>`, `<cfsilent>`, `<cflog>`, `<cfsetting>`, `<cfcookie>`, `<cffile>`, `<cfloginuser>/<cflogout>`, and more
+*   **50+ CFML tags** — `<cfset>`, `<cfoutput>`, `<cfif>`, `<cfloop>`, `<cffunction>`, `<cfscript>`, `<cftry>/<cfcatch>/<cffinally>`, `<cfthrow>/<cfrethrow>`, `<cfswitch>/<cfcase>`, `<cfbreak>`, `<cfcontinue>`, `<cfwhile>`, `<cfinclude>`, `<cfdump>`, `<cfparam>`, `<cfabort>`, `<cfhttp>/<cfhttpparam>`, `<cfquery>/<cfqueryparam>`, `<cftransaction>`, `<cflocation>`, `<cfheader>`, `<cfcontent>`, `<cfinvoke>`, `<cfsavecontent>`, `<cflock>`, `<cfsilent>`, `<cflog>`, `<cfsetting>`, `<cfcookie>`, `<cffile>`, `<cfloginuser>/<cflogout>`, `<cfmail>/<cfmailparam>/<cfmailpart>`, `<cfcache>`, `<cfexecute>`, `<cfstoredproc>/<cfprocparam>/<cfprocresult>`, and more
 *   **HTTP client** — `cfhttp` tag and function for GET/POST/PUT/DELETE/PATCH requests with `cfhttpparam` support (headers, formfields, URL params, body, cookies)
 *   **Database connectivity** — `queryExecute()` with SQLite, MySQL, PostgreSQL, and MSSQL support; connection pooling, `cfqueryparam`, `cftransaction`
 *   **Session management** — server-side sessions via CFID cookie, `sessionInvalidate()`, `sessionRotate()`
@@ -381,14 +381,19 @@ cargo run -- examples/08_builtins.cfm         # Built-in functions
 *   **WASM target** — compile to WebAssembly via `wasm-bindgen`
 *   **Debug mode** — inspect tokens, AST, and bytecode with `-d`
 
+*   **Email** — `cfmail`/`cfmailparam`/`cfmailpart` with real SMTP sending (plain text, HTML, attachments via lettre)
+*   **Caching** — in-memory cache with `cachePut()`, `cacheGet()`, `cacheDelete()`, `cacheClear()`, `cacheKeyExists()`, `cacheCount()`, `cacheGetAll()`, `cacheGetAllIds()`, expiry support
+*   **OS commands** — `cfexecute` with stdout/stderr capture, stdin body, variable and buffer output modes
+*   **Stored procedures** — `cfstoredproc`/`cfprocparam`/`cfprocresult` compiled to `queryExecute("CALL ...")`
+*   **Custom tags** — `cfmodule`, `cf_` prefix tags with body mode, caller write-back, thisTag scope
+*   **Password hashing** — bcrypt, scrypt, argon2, PBKDF2
+*   **Locale functions** — 13 `ls*` functions for locale-aware formatting
+
 ### Planned / In Progress
 
-*   **Custom tags** — `cfmodule`, `cf_` prefix tags, tag libraries
-*   **Email** — `cfmail`, `cfmailparam`, `cfmailpart`
-*   **Caching** — `cfcache`, `cacheGet()`, `cachePut()`
+*   **Tag libraries** — `cfimport taglib=`, `.tld` descriptors
 *   **Threading** — `cfthread` equivalent
-*   **Stored procedures** — `cfstoredproc`
-*   **OS commands** — `cfexecute`
+*   **Higher-order generics** — `collectionEach/Map/Filter`, `stringEach/Map/Filter`, generic `each()`
 
 ## Architecture
 
@@ -421,11 +426,11 @@ RustCFML/
 │   ├── cfml-compiler/   # Lexer, Parser, AST, Tag Preprocessor
 │   ├── cfml-codegen/    # Bytecode compiler (AST → BytecodeOp)
 │   ├── cfml-vm/         # Stack-based bytecode execution engine
-│   ├── cfml-stdlib/     # 340+ built-in functions
+│   ├── cfml-stdlib/     # 390+ built-in functions
 │   ├── cli/             # Command-line interface (rustcfml binary)
 │   └── wasm/            # WebAssembly target via wasm-bindgen
 ├── examples/            # Example .cfm files
-├── test_all.cfm         # Comprehensive test suite (64 assertions)
+├── tests/               # Test suite (998 assertions across 74 suites)
 ├── TESTING.md           # Testing guide
 └── Cargo.toml           # Workspace root
 ```
@@ -495,10 +500,10 @@ console.log(output); // "Hello from WASM!"
 
 ## Testing
 
-Run the built-in CFML test suite (64 assertions across 13 categories):
+Run the built-in CFML test suite (998 assertions across 74 suites):
 
 ```plaintext
-cargo run -- test_all.cfm
+cargo run -- tests/runner.cfm
 ```
 
 Run Rust unit tests:
@@ -519,10 +524,11 @@ unit tests, integration tests, and test individual features.
 ## Disclaimer
 
 RustCFML is in active development. The interpreter covers a substantial portion
-of the CFML language — including 340+ built-in functions, 45+ tags, components with
-inheritance, application lifecycle, sessions, database connectivity, closures with
-mutation, and file uploads — and can run real CFScript and tag-based CFML code
-including frameworks like Taffy. It is not yet production-ready.
+of the CFML language — including 390+ built-in functions, 50+ tags, components with
+inheritance, application lifecycle, sessions, database connectivity, SMTP email,
+in-memory caching, closures with mutation, and file uploads — and can run real
+CFScript and tag-based CFML code including frameworks like Taffy. It is not yet
+production-ready.
 
 Contributions are welcome!
 
