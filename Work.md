@@ -51,7 +51,7 @@ local, variables, arguments, request, application (persistent), server, session 
 extends (dot-path), super.method(), isInstanceOf, getMetadata, createObject, interface/implements with inheritance, implicit accessors, onMissingMethod, component mappings (this.mappings).
 
 ### Web Server (Axum)
-`--serve` mode with: HTTP response infrastructure, form scope (url-encoded + multipart), url scope, cgi scope (remote_addr, server_name from Host header, all http_* headers), cookie scope, session management (onSessionStart/onSessionEnd lifecycle, configurable timeout), file uploads, Application.cfc lifecycle, URL rewrite engine (Tuckey-compatible). Real named locks with cflock/cfscript lock (RwLock-based concurrency). Bracket assignment for component mappings.
+`--serve` mode with: HTTP response infrastructure, form scope (url-encoded + multipart), url scope, cgi scope (remote_addr, server_name from Host header, all http_* headers), cookie scope, session management (onSessionStart/onSessionEnd lifecycle, configurable timeout), file uploads, Application.cfc lifecycle, URL rewrite engine (Tuckey-compatible). Real named locks with cflock/cfscript lock (RwLock-based concurrency). Bracket assignment for component mappings. **Bytecode cache**: mtime-based caching skips recompilation for unchanged files across requests (includes, custom tags, CFCs, Application.cfc).
 
 ### Database
 queryExecute with SQLite, MySQL, PostgreSQL, MSSQL. Connection pooling, cfqueryparam, cftransaction, structured query params.

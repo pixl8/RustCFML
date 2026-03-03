@@ -34,7 +34,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-/// TLD cache: prefix → (tag-name → file-name) parsed from .tld files.
+// TLD cache: prefix → (tag-name → file-name) parsed from .tld files.
 thread_local! {
     static TLD_CACHE: RefCell<HashMap<String, HashMap<String, String>>> = RefCell::new(HashMap::new());
 }

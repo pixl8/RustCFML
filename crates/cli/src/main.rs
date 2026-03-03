@@ -14,7 +14,7 @@ use cfml_compiler::lexer;
 use cfml_compiler::parser::Parser as CfmlParser;
 use cfml_compiler::tag_parser;
 use cfml_stdlib::builtins::{get_builtin_functions, get_builtins};
-use cfml_vm::{CfmlVirtualMachine, ServerState};
+use cfml_vm::{CfmlVirtualMachine, ServerState, compile_file_cached};
 
 #[derive(Parser, Debug)]
 #[command(name = "rustcfml")]
@@ -177,77 +177,87 @@ fn compile_and_run(
     http_request_data: Option<CfmlValue>,
     session_id: Option<String>,
 ) -> Result<CfmlResponse, String> {
-    // Strip shebang line if present (e.g. #!/usr/bin/env rustcfml)
-    let source = if source.starts_with("#!") {
-        source.split_once('\n').map_or("", |(_shebang, rest)| rest)
+    // In serve mode with a source file, use the bytecode cache to skip recompilation
+    let program = if !debug && source_file.is_some() && server_state.is_some() {
+        let path = source_file.as_ref().unwrap();
+        let cache = &server_state.unwrap().bytecode_cache;
+        compile_file_cached(path, Some(cache)).map_err(|e| format!("{}", e))?
     } else {
-        source
-    };
+        // CLI mode / inline code / debug: full pipeline
+        // Strip shebang line if present (e.g. #!/usr/bin/env rustcfml)
+        let source = if source.starts_with("#!") {
+            source.split_once('\n').map_or("", |(_shebang, rest)| rest)
+        } else {
+            source
+        };
 
-    // Pre-process: convert CFML tags to script if needed
-    let source = if tag_parser::has_cfml_tags(source) {
-        let converted = tag_parser::tags_to_script(source);
+        // Pre-process: convert CFML tags to script if needed
+        let source = if tag_parser::has_cfml_tags(source) {
+            let converted = tag_parser::tags_to_script(source);
+            if debug {
+                println!("=== TAG CONVERSION ===");
+                println!("{}", converted);
+                println!();
+            }
+            converted
+        } else {
+            source.to_string()
+        };
+        let source = source.as_str();
+
+        // Lexical analysis
+        let tokens = lexer::tokenize(source.to_string());
+
         if debug {
-            println!("=== TAG CONVERSION ===");
-            println!("{}", converted);
+            println!("=== TOKENS ===");
+            for (i, tok) in tokens.iter().enumerate() {
+                println!("{:3}: {:?}", i, tok.token);
+            }
             println!();
         }
-        converted
-    } else {
-        source.to_string()
-    };
-    let source = source.as_str();
 
-    // Lexical analysis
-    let tokens = lexer::tokenize(source.to_string());
+        // Parse to AST
+        let mut parser = CfmlParser::new(source.to_string());
+        let ast = match parser.parse() {
+            Ok(ast) => ast,
+            Err(e) => {
+                return Err(format!(
+                    "Parse Error [line {}, col {}]: {}",
+                    e.line, e.column, e.message
+                ));
+            }
+        };
 
-    if debug {
-        println!("=== TOKENS ===");
-        for (i, tok) in tokens.iter().enumerate() {
-            println!("{:3}: {:?}", i, tok.token);
+        if debug {
+            println!("=== AST ===");
+            println!("{:#?}", ast);
+            println!();
         }
-        println!();
-    }
 
-    // Parse to AST
-    let mut parser = CfmlParser::new(source.to_string());
-    let ast = match parser.parse() {
-        Ok(ast) => ast,
-        Err(e) => {
-            return Err(format!(
-                "Parse Error [line {}, col {}]: {}",
-                e.line, e.column, e.message
-            ));
-        }
-    };
+        // Compile to bytecode
+        let compiler = CfmlCompiler::new();
+        let program = compiler.compile(ast);
 
-    if debug {
-        println!("=== AST ===");
-        println!("{:#?}", ast);
-        println!();
-    }
-
-    // Compile to bytecode
-    let compiler = CfmlCompiler::new();
-    let program = compiler.compile(ast);
-
-    if debug {
-        println!("=== BYTECODE ===");
-        for func in &program.functions {
-            println!("Function: {} (params: {:?})", func.name, func.params);
-            for (i, instr) in func.instructions.iter().enumerate() {
-                match instr {
-                    cfml_codegen::BytecodeOp::LineInfo(line, col) => {
-                        println!("        ; line {}:{}", line, col);
-                    }
-                    _ => {
-                        println!("  {:3}: {:?}", i, instr);
+        if debug {
+            println!("=== BYTECODE ===");
+            for func in &program.functions {
+                println!("Function: {} (params: {:?})", func.name, func.params);
+                for (i, instr) in func.instructions.iter().enumerate() {
+                    match instr {
+                        cfml_codegen::BytecodeOp::LineInfo(line, col) => {
+                            println!("        ; line {}:{}", line, col);
+                        }
+                        _ => {
+                            println!("  {:3}: {:?}", i, instr);
+                        }
                     }
                 }
             }
+            println!();
         }
-        println!();
-    }
+
+        program
+    };
 
     // Execute
     let mut vm = CfmlVirtualMachine::new(program);
@@ -467,19 +477,24 @@ async fn handle_request(
 
     match resolved {
         Some(ref rf) if rf.file_path.extension().map_or(false, |e| e == "cfm") => {
-            // Execute .cfm file
-            let source = match fs::read_to_string(&rf.file_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    return axum::response::Response::builder()
-                        .status(500)
-                        .header("Content-Type", "text/html; charset=utf-8")
-                        .body(axum::body::Body::from(format!(
-                            "<html><body><h1>500 Internal Server Error</h1><p>Error reading file: {}</p></body></html>",
-                            html_escape(&e.to_string())
-                        )))
-                        .unwrap();
+            // Execute .cfm file — in non-debug serve mode the bytecode cache reads the
+            // file itself, so we pass an empty source and skip the redundant read.
+            let source = if debug {
+                match fs::read_to_string(&rf.file_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return axum::response::Response::builder()
+                            .status(500)
+                            .header("Content-Type", "text/html; charset=utf-8")
+                            .body(axum::body::Body::from(format!(
+                                "<html><body><h1>500 Internal Server Error</h1><p>Error reading file: {}</p></body></html>",
+                                html_escape(&e.to_string())
+                            )))
+                            .unwrap();
+                    }
                 }
+            } else {
+                String::new()
             };
 
             // Build web scopes using resolved script_name and path_info

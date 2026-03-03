@@ -5230,11 +5230,14 @@ fn parse_datasource(ds: &str) -> DbDriver {
 // Connection Pool Manager
 // -----------------------------------------------
 
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
 use std::sync::{Mutex, OnceLock};
 
 /// Global pool manager — maps datasource URL → pool instance (type-erased)
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
 static POOL_MANAGER: OnceLock<Mutex<HashMap<String, Box<dyn std::any::Any + Send>>>> = OnceLock::new();
 
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
 fn get_pool_manager() -> &'static Mutex<HashMap<String, Box<dyn std::any::Any + Send>>> {
     POOL_MANAGER.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -6211,6 +6214,7 @@ fn mssql_column_to_cfml(val: Option<&str>) -> CfmlValue {
 // -----------------------------------------------
 
 /// Enum to hold driver-specific transaction connections
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
 enum TransactionConn {
     #[cfg(feature = "sqlite")]
     Sqlite(r2d2::PooledConnection<SqliteConnectionManager>),
@@ -6299,6 +6303,7 @@ fn transaction_begin(datasource: &str) -> Result<TransactionConn, CfmlError> {
 }
 
 /// Commit a transaction
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
 fn transaction_commit(conn: &mut TransactionConn) -> Result<(), CfmlError> {
     match conn {
         #[cfg(feature = "sqlite")]
@@ -6323,6 +6328,7 @@ fn transaction_commit(conn: &mut TransactionConn) -> Result<(), CfmlError> {
 }
 
 /// Rollback a transaction
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
 fn transaction_rollback(conn: &mut TransactionConn) -> Result<(), CfmlError> {
     match conn {
         #[cfg(feature = "sqlite")]
@@ -6347,6 +6353,7 @@ fn transaction_rollback(conn: &mut TransactionConn) -> Result<(), CfmlError> {
 }
 
 /// Execute a query using an existing transaction connection
+#[cfg(any(feature = "sqlite", feature = "mysql_db", feature = "postgres_db", feature = "mssql_db"))]
 fn execute_with_transaction(conn: &mut TransactionConn, sql: &str, params_arg: &CfmlValue, return_type: &str) -> CfmlResult {
     match conn {
         #[cfg(feature = "sqlite")]
@@ -8706,11 +8713,17 @@ fn fn_cfmail(args: Vec<CfmlValue>) -> CfmlResult {
     let subject = get_opt("subject").unwrap_or_default();
     let mail_type = get_opt("type").unwrap_or_else(|| "text".into());
     let body_text = get_opt("body").unwrap_or_default();
+    #[cfg(feature = "smtp")]
     let cc = get_opt("cc");
+    #[cfg(feature = "smtp")]
     let bcc = get_opt("bcc");
+    #[cfg(feature = "smtp")]
     let server = get_opt("server");
+    #[cfg(feature = "smtp")]
     let port_str = get_opt("port");
+    #[cfg(feature = "smtp")]
     let username = get_opt("username");
+    #[cfg(feature = "smtp")]
     let password = get_opt("password");
 
     // Always log to stderr

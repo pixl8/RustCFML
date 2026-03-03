@@ -6,6 +6,7 @@ use cfml_common::vm::{CfmlError, CfmlErrorType, CfmlResult};
 use std::collections::HashMap;
 use indexmap::IndexMap;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::SystemTime;
 
 pub type BuiltinFunction = fn(Vec<CfmlValue>) -> CfmlResult;
 
@@ -42,6 +43,94 @@ pub struct SessionData {
     pub timeout_secs: u64,
 }
 
+/// A cached compiled bytecode program with its source file modification time.
+pub struct CachedProgram {
+    pub program: BytecodeProgram,
+    pub mtime: SystemTime,
+}
+
+/// Thread-safe bytecode cache keyed by file path.
+/// Skips recompilation when a file's mtime is unchanged.
+#[derive(Clone)]
+pub struct BytecodeCache {
+    entries: Arc<parking_lot::RwLock<HashMap<String, CachedProgram>>>,
+}
+
+impl BytecodeCache {
+    pub fn new() -> Self {
+        Self {
+            entries: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Return a cached program if the file's mtime matches the cached entry.
+    pub fn get(&self, path: &str) -> Option<BytecodeProgram> {
+        let mtime = std::fs::metadata(path).ok()?.modified().ok()?;
+        let entries = self.entries.read();
+        let entry = entries.get(path)?;
+        if entry.mtime == mtime {
+            Some(entry.program.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Insert a freshly compiled program into the cache.
+    pub fn insert(&self, path: String, program: BytecodeProgram, mtime: SystemTime) {
+        self.entries.write().insert(path, CachedProgram { program, mtime });
+    }
+}
+
+/// Compile a CFML file to bytecode, using the cache when available.
+/// When `cache` is None (CLI mode), always compiles fresh.
+pub fn compile_file_cached(
+    path: &str,
+    cache: Option<&BytecodeCache>,
+) -> Result<BytecodeProgram, CfmlError> {
+    // Check cache first
+    if let Some(c) = cache {
+        if let Some(program) = c.get(path) {
+            return Ok(program);
+        }
+    }
+
+    // Read source
+    let source_code = std::fs::read_to_string(path).map_err(|e| {
+        CfmlError::runtime(format!("Cannot read '{}': {}", path, e))
+    })?;
+
+    // Tag preprocessing
+    let source_code = if cfml_compiler::tag_parser::has_cfml_tags(&source_code) {
+        let converted = cfml_compiler::tag_parser::tags_to_script(&source_code);
+        if std::env::var("RUSTCFML_DUMP_TAGS").is_ok() {
+            eprintln!("=== TAG CONVERTED: {} ===\n{}\n=== END ===", path, converted);
+        }
+        converted
+    } else {
+        source_code
+    };
+
+    // Parse
+    let ast = cfml_compiler::parser::Parser::new(source_code).parse().map_err(|e| {
+        CfmlError::runtime(format!("Parse error in '{}': {}", path, e.message))
+    })?;
+
+    // Compile
+    let compiler = cfml_codegen::compiler::CfmlCompiler::new();
+    let program = compiler.compile(ast);
+
+    // Cache the result
+    if let Some(c) = cache {
+        if let Ok(meta) = std::fs::metadata(path) {
+            if let Ok(mtime) = meta.modified() {
+                c.insert(path.to_string(), program.clone(), mtime);
+            }
+        }
+    }
+
+    Ok(program)
+}
+
 /// Server-level state, persists across requests in --serve mode.
 #[derive(Clone)]
 pub struct ServerState {
@@ -49,6 +138,8 @@ pub struct ServerState {
     pub sessions: Arc<Mutex<HashMap<String, SessionData>>>,
     /// Named locks for cflock: name → RwLock (exclusive = write, readonly = read)
     pub named_locks: Arc<Mutex<HashMap<String, Arc<RwLock<()>>>>>,
+    /// Bytecode cache — skips recompilation when file mtime is unchanged
+    pub bytecode_cache: BytecodeCache,
 }
 
 impl ServerState {
@@ -57,6 +148,7 @@ impl ServerState {
             applications: Arc::new(Mutex::new(HashMap::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             named_locks: Arc::new(Mutex::new(HashMap::new())),
+            bytecode_cache: BytecodeCache::new(),
         }
     }
 }
@@ -1508,66 +1600,44 @@ impl CfmlVirtualMachine {
                     };
 
                     // Read, parse, compile, and execute the included file
-                    match std::fs::read_to_string(&resolved) {
-                        Ok(source_code) => {
-                            // Check for CFML tags and preprocess
-                            let source_code = if cfml_compiler::tag_parser::has_cfml_tags(&source_code) {
-                                cfml_compiler::tag_parser::tags_to_script(&source_code)
-                            } else {
-                                source_code
-                            };
-
-                            let mut parser = cfml_compiler::parser::Parser::new(source_code);
-                            match parser.parse() {
-                                Ok(ast) => {
-                                    let compiler = cfml_codegen::compiler::CfmlCompiler::new();
-                                    let sub_program = compiler.compile(ast);
-                                    // Execute the included program's main function
-                                    // Copy current locals into the included program's execution
-                                    let old_program = std::mem::replace(&mut self.program, sub_program);
-                                    let old_source = self.source_file.clone();
-                                    self.source_file = Some(resolved.clone());
-                                    let main_idx = self.program.functions.iter()
-                                        .position(|f| f.name == "__main__")
-                                        .unwrap_or(0);
-                                    let inc_func = self.program.functions[main_idx].clone();
-                                    // Isolate try-stack so throws inside the include
-                                    // don't consume outer handlers
-                                    let saved_try_stack = std::mem::take(&mut self.try_stack);
-                                    let result = self.execute_function_with_args(&inc_func, Vec::new(), Some(&locals));
-                                    self.try_stack = saved_try_stack;
-                                    self.program = old_program;
-                                    self.source_file = old_source;
-                                    // Propagate include errors through try-catch
-                                    if let Err(e) = result {
-                                        if let Some(handler) = self.try_stack.pop() {
-                                            while stack.len() > handler.stack_depth {
-                                                stack.pop();
-                                            }
-                                            let mut err_struct = IndexMap::new();
-                                            err_struct.insert("message".to_string(), CfmlValue::String(e.message.clone()));
-                                            err_struct.insert("type".to_string(), CfmlValue::String(format!("{}", e.error_type)));
-                                            err_struct.insert("detail".to_string(), CfmlValue::String(String::new()));
-                                            err_struct.insert("tagcontext".to_string(), self.build_tag_context());
-                                            let error_val = CfmlValue::Struct(err_struct);
-                                            stack.push(error_val);
-                                            ip = handler.catch_ip;
-                                        } else {
-                                            return Err(e);
-                                        }
+                    let cache = self.server_state.as_ref().map(|s| &s.bytecode_cache);
+                    match compile_file_cached(&resolved, cache) {
+                        Ok(sub_program) => {
+                            let old_program = std::mem::replace(&mut self.program, sub_program);
+                            let old_source = self.source_file.clone();
+                            self.source_file = Some(resolved.clone());
+                            let main_idx = self.program.functions.iter()
+                                .position(|f| f.name == "__main__")
+                                .unwrap_or(0);
+                            let inc_func = self.program.functions[main_idx].clone();
+                            // Isolate try-stack so throws inside the include
+                            // don't consume outer handlers
+                            let saved_try_stack = std::mem::take(&mut self.try_stack);
+                            let result = self.execute_function_with_args(&inc_func, Vec::new(), Some(&locals));
+                            self.try_stack = saved_try_stack;
+                            self.program = old_program;
+                            self.source_file = old_source;
+                            // Propagate include errors through try-catch
+                            if let Err(e) = result {
+                                if let Some(handler) = self.try_stack.pop() {
+                                    while stack.len() > handler.stack_depth {
+                                        stack.pop();
                                     }
-                                }
-                                Err(e) => {
-                                    return Err(CfmlError::runtime(
-                                        format!("Include parse error in '{}': {}", resolved, e.message)
-                                    ));
+                                    let mut err_struct = IndexMap::new();
+                                    err_struct.insert("message".to_string(), CfmlValue::String(e.message.clone()));
+                                    err_struct.insert("type".to_string(), CfmlValue::String(format!("{}", e.error_type)));
+                                    err_struct.insert("detail".to_string(), CfmlValue::String(String::new()));
+                                    err_struct.insert("tagcontext".to_string(), self.build_tag_context());
+                                    let error_val = CfmlValue::Struct(err_struct);
+                                    stack.push(error_val);
+                                    ip = handler.catch_ip;
+                                } else {
+                                    return Err(e);
                                 }
                             }
                         }
                         Err(e) => {
-                            return Err(CfmlError::runtime(
-                                format!("Include error: Cannot read '{}': {}", resolved, e)
-                            ));
+                            return Err(e);
                         }
                     }
                 }
@@ -4114,7 +4184,7 @@ impl CfmlVirtualMachine {
                         }
 
                         // Collect thread scope variables
-                        if let Some(CfmlValue::Struct(ts)) = self.globals.remove("thread") {
+                        if let Some(CfmlValue::Struct(ts)) = self.globals.shift_remove("thread") {
                             thread_vars = ts;
                         }
                     }
@@ -5342,23 +5412,8 @@ impl CfmlVirtualMachine {
         template_path: &str,
         tag_locals: &IndexMap<String, CfmlValue>,
     ) -> Result<(), CfmlError> {
-        let source_code = std::fs::read_to_string(template_path).map_err(|e| {
-            CfmlError::runtime(format!("Cannot read custom tag '{}': {}", template_path, e))
-        })?;
-
-        let source_code = if cfml_compiler::tag_parser::has_cfml_tags(&source_code) {
-            cfml_compiler::tag_parser::tags_to_script(&source_code)
-        } else {
-            source_code
-        };
-
-        let mut parser = cfml_compiler::parser::Parser::new(source_code);
-        let ast = parser.parse().map_err(|e| {
-            CfmlError::runtime(format!("Custom tag parse error in '{}': {}", template_path, e.message))
-        })?;
-
-        let compiler = cfml_codegen::compiler::CfmlCompiler::new();
-        let sub_program = compiler.compile(ast);
+        let cache = self.server_state.as_ref().map(|s| &s.bytecode_cache);
+        let sub_program = compile_file_cached(template_path, cache)?;
 
         let old_program = std::mem::replace(&mut self.program, sub_program);
         let old_source = self.source_file.clone();
@@ -5610,19 +5665,8 @@ impl CfmlVirtualMachine {
                 class_name, self.source_file, self.base_template_path, cfc_path,
                 std::path::Path::new(&cfc_path).exists());
         }
-        if let Ok(source_code) = std::fs::read_to_string(&cfc_path) {
-            let source_code = if cfml_compiler::tag_parser::has_cfml_tags(&source_code) {
-                let converted = cfml_compiler::tag_parser::tags_to_script(&source_code);
-                if std::env::var("RUSTCFML_DUMP_TAGS").is_ok() {
-                    eprintln!("=== TAG CONVERTED: {} ===\n{}\n=== END ===", cfc_path, converted);
-                }
-                converted
-            } else {
-                source_code
-            };
-            if let Ok(ast) = cfml_compiler::parser::Parser::new(source_code).parse() {
-                let compiler = cfml_codegen::compiler::CfmlCompiler::new();
-                let sub_program = compiler.compile(ast);
+        let cache = self.server_state.as_ref().map(|s| &s.bytecode_cache);
+        if let Ok(sub_program) = compile_file_cached(&cfc_path, cache) {
                 let old_program = std::mem::replace(&mut self.program, sub_program);
                 // Set source_file to CFC path so parent resolution works relative to CFC
                 let old_source_file = self.source_file.clone();
@@ -5692,7 +5736,6 @@ impl CfmlVirtualMachine {
                 }
                 return result;
             }
-        }
         None
     }
 
@@ -6055,16 +6098,8 @@ impl CfmlVirtualMachine {
 
     /// Load and execute Application.cfc, returning the component struct
     fn load_application_cfc(&mut self, path: &str) -> Option<CfmlValue> {
-        let source_code = std::fs::read_to_string(path).ok()?;
-        let source_code = if cfml_compiler::tag_parser::has_cfml_tags(&source_code) {
-            cfml_compiler::tag_parser::tags_to_script(&source_code)
-        } else {
-            source_code
-        };
-
-        let ast = cfml_compiler::parser::Parser::new(source_code).parse().ok()?;
-        let compiler = cfml_codegen::compiler::CfmlCompiler::new();
-        let sub_program = compiler.compile(ast);
+        let cache = self.server_state.as_ref().map(|s| &s.bytecode_cache);
+        let sub_program = compile_file_cached(path, cache).ok()?;
 
         // Save current program, swap in sub-program
         let old_program = std::mem::replace(&mut self.program, sub_program);
