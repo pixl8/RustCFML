@@ -1,6 +1,7 @@
 //! CFML Code Generator - AST to bytecode
 
 use cfml_compiler::ast::*;
+use std::sync::Arc;
 
 pub struct CfmlCompiler {
     pub program: BytecodeProgram,
@@ -12,7 +13,7 @@ pub struct CfmlCompiler {
 
 #[derive(Debug, Clone)]
 pub struct BytecodeProgram {
-    pub functions: Vec<BytecodeFunction>,
+    pub functions: Vec<Arc<BytecodeFunction>>,
 }
 
 #[derive(Debug, Clone)]
@@ -150,12 +151,12 @@ impl CfmlCompiler {
     pub fn new() -> Self {
         Self {
             program: BytecodeProgram {
-                functions: vec![BytecodeFunction {
+                functions: vec![Arc::new(BytecodeFunction {
                     name: "__main__".to_string(),
                     params: Vec::new(),
                     instructions: Vec::new(),
                     source_file: None,
-                }],
+                })],
             },
             loop_stack: Vec::new(),
             current_finally: None,
@@ -226,7 +227,7 @@ impl CfmlCompiler {
 
         instructions.push(BytecodeOp::Halt);
 
-        self.program.functions[0].instructions = instructions;
+        Arc::get_mut(&mut self.program.functions[0]).unwrap().instructions = instructions;
 
         self.program
     }
@@ -1012,7 +1013,7 @@ impl CfmlCompiler {
         };
 
         let func_idx = self.program.functions.len();
-        self.program.functions.push(bc_func);
+        self.program.functions.push(Arc::new(bc_func));
 
         // Define the function in current scope
         instructions.push(BytecodeOp::DefineFunction(func_idx));
@@ -1621,7 +1622,7 @@ impl CfmlCompiler {
                 };
 
                 let func_idx = self.program.functions.len();
-                self.program.functions.push(bc_func);
+                self.program.functions.push(Arc::new(bc_func));
                 instructions.push(BytecodeOp::DefineFunction(func_idx));
             }
             Expression::ArrowFunction(arrow) => {
@@ -1638,7 +1639,7 @@ impl CfmlCompiler {
                 };
 
                 let func_idx = self.program.functions.len();
-                self.program.functions.push(bc_func);
+                self.program.functions.push(Arc::new(bc_func));
                 instructions.push(BytecodeOp::DefineFunction(func_idx));
             }
             Expression::This(_) => {

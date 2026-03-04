@@ -18,7 +18,7 @@ pub struct ApplicationState {
     pub config: IndexMap<String, CfmlValue>,
     /// Bytecode functions added during onApplicationStart (factory, resources, etc.).
     /// Only the delta (functions added after load_application_cfc) is cached.
-    pub cached_functions: Vec<cfml_codegen::compiler::BytecodeFunction>,
+    pub cached_functions: Vec<std::sync::Arc<cfml_codegen::compiler::BytecodeFunction>>,
     /// The program.functions.len() at which cached_functions were originally inserted.
     /// Used to compute index offsets when restoring on subsequent requests.
     pub cached_functions_original_offset: usize,
@@ -411,17 +411,17 @@ impl CfmlVirtualMachine {
                 format!("Call stack overflow (depth {})", depth)
             )));
         }
-        if depth > 64 {
-            // Collect the last 32 function names
+        if depth > 64 && depth % 256 == 0 {
+            // Throttled cycle detection: only check every 256 calls to avoid
+            // scanning function names on every call in deep recursion.
             let window = 32.min(depth);
             let recent: Vec<&str> = self.call_stack[depth - window..]
                 .iter()
                 .map(|f| f.function_name.as_str())
                 .collect();
-            // Try cycle lengths 1 (A,A,A), 2 (A,B,A,B), 3 (A,B,C,A,B,C)...
             'cycle: for cycle_len in 1..=4 {
                 if window < cycle_len * 4 {
-                    continue; // need at least 4 full repeats to be confident
+                    continue;
                 }
                 let pattern = &recent[recent.len() - cycle_len..];
                 let check_count = window / cycle_len;
@@ -432,7 +432,6 @@ impl CfmlVirtualMachine {
                         continue 'cycle;
                     }
                 }
-                // All checked repetitions matched — likely infinite
                 let cycle_desc = pattern.join(" -> ");
                 return Err(self.wrap_error(CfmlError::runtime(
                     format!(
@@ -492,7 +491,7 @@ impl CfmlVirtualMachine {
             }
 
 
-            let op = func.instructions[ip].clone();
+            let op = &func.instructions[ip];
             ip += 1;
             let is_inside_function = func.name != "__main__";
 
@@ -500,9 +499,9 @@ impl CfmlVirtualMachine {
                 BytecodeOp::Null => stack.push(CfmlValue::Null),
                 BytecodeOp::True => stack.push(CfmlValue::Bool(true)),
                 BytecodeOp::False => stack.push(CfmlValue::Bool(false)),
-                BytecodeOp::Integer(n) => stack.push(CfmlValue::Int(n)),
-                BytecodeOp::Double(d) => stack.push(CfmlValue::Double(d)),
-                BytecodeOp::String(s) => stack.push(CfmlValue::String(s)),
+                BytecodeOp::Integer(n) => stack.push(CfmlValue::Int(*n)),
+                BytecodeOp::Double(d) => stack.push(CfmlValue::Double(*d)),
+                BytecodeOp::String(s) => stack.push(CfmlValue::String(s.clone())),
 
                 BytecodeOp::LoadLocal(name) => {
                     // Handle CFML scope references
@@ -551,9 +550,9 @@ impl CfmlVirtualMachine {
                             os
                         }));
                         CfmlValue::Struct(info)
-                    } else if let Some(val) = locals.get(&name) {
+                    } else if let Some(val) = locals.get(name.as_str()) {
                         val.clone()
-                    } else if let Some(val) = self.globals.get(&name) {
+                    } else if let Some(val) = self.globals.get(name.as_str()) {
                         val.clone()
                     } else {
                         // Case-insensitive local lookup
@@ -607,9 +606,9 @@ impl CfmlVirtualMachine {
                         }
                     } else if name_lower == "server" {
                         CfmlValue::Null // server scope handled by LoadLocal
-                    } else if let Some(val) = locals.get(&name) {
+                    } else if let Some(val) = locals.get(name.as_str()) {
                         val.clone()
-                    } else if let Some(val) = self.globals.get(&name) {
+                    } else if let Some(val) = self.globals.get(name.as_str()) {
                         val.clone()
                     } else {
                         locals
@@ -625,7 +624,7 @@ impl CfmlVirtualMachine {
                 }
                 BytecodeOp::DeclareLocal(name) => {
                     // Mark this variable as function-local (var keyword)
-                    declared_locals.insert(name);
+                    declared_locals.insert(name.clone());
                 }
                 BytecodeOp::StoreLocal(name) => {
                     if let Some(val) = stack.pop() {
@@ -657,28 +656,28 @@ impl CfmlVirtualMachine {
                         } else if name_lower == "thread" && self.globals.contains_key("thread") {
                             self.globals.insert("thread".to_string(), val);
                         } else {
-                            locals.insert(name, val);
+                            locals.insert(name.clone(), val);
                         }
                     }
                 }
                 BytecodeOp::LoadGlobal(name) => {
                     let name_lower = name.to_lowercase();
                     // 1. Check locals (exact, then CI)
-                    if let Some(val) = locals.get(&name) {
+                    if let Some(val) = locals.get(name.as_str()) {
                         stack.push(val.clone());
                     } else if let Some(val) = locals.iter()
                         .find(|(k, _)| k.to_lowercase() == name_lower)
                         .map(|(_, v)| v.clone()) {
                         stack.push(val);
                     // 2. Check globals (exact, then CI)
-                    } else if let Some(val) = self.globals.get(&name) {
+                    } else if let Some(val) = self.globals.get(name.as_str()) {
                         stack.push(val.clone());
                     } else if let Some(val) = self.globals.iter()
                         .find(|(k, _)| k.to_lowercase() == name_lower)
                         .map(|(_, v)| v.clone()) {
                         stack.push(val);
                     // 3. Check builtins/user_functions (exact, then CI)
-                    } else if self.builtins.contains_key(&name) || self.user_functions.contains_key(&name) {
+                    } else if self.builtins.contains_key(name.as_str()) || self.user_functions.contains_key(name.as_str()) {
                         stack.push(CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
                             name: name.clone(),
                             params: Vec::new(),
@@ -730,7 +729,7 @@ impl CfmlVirtualMachine {
                 }
                 BytecodeOp::StoreGlobal(name) => {
                     if let Some(val) = stack.pop() {
-                        self.globals.insert(name, val);
+                        self.globals.insert(name.clone(), val);
                     }
                 }
 
@@ -927,56 +926,64 @@ impl CfmlVirtualMachine {
 
                 // Control flow
                 BytecodeOp::Jump(target) => {
-                    ip = target;
+                    ip = *target;
                 }
                 BytecodeOp::JumpIfFalse(target) => {
                     if let Some(cond) = stack.pop() {
                         if !cond.is_true() {
-                            ip = target;
+                            ip = *target;
                         }
                     }
                 }
                 BytecodeOp::JumpIfTrue(target) => {
                     if let Some(cond) = stack.pop() {
                         if cond.is_true() {
-                            ip = target;
+                            ip = *target;
                         }
                     }
                 }
 
                 BytecodeOp::Call(arg_count) => {
-                    let args: Vec<CfmlValue> =
-                        (0..arg_count).filter_map(|_| stack.pop()).collect::<Vec<_>>().into_iter().rev().collect();
+                    let mut args = Vec::with_capacity(*arg_count);
+                    for _ in 0..*arg_count {
+                        if let Some(v) = stack.pop() { args.push(v); }
+                    }
+                    args.reverse();
 
                     if let Some(func_ref) = stack.pop() {
                         self.closure_parent_writeback = None;
-                        // If the function has a captured scope (closure), snapshot from
-                        // the shared RefCell so the closure sees its defining scope's vars.
-                        // Merge caller's locals on top so the closure also sees the
-                        // caller's scope (but captured vars take lower priority — the
-                        // closure's own params will override via execute_function_with_args).
+                        // For closures with captured scope, merge defining scope + caller locals.
+                        // For plain UDF calls, pass caller locals by reference (no clone).
+                        let merged_scope;
                         let effective_locals = if let CfmlValue::Function(ref f) = func_ref {
                             if let Some(ref shared_env) = f.captured_scope {
-                                let mut merged = shared_env.read().unwrap().clone();
-                                // Caller's locals overlay (for nested closures that
-                                // also need to see their immediate caller's vars)
-                                for (k, v) in &locals {
-                                    if !merged.contains_key(k) {
-                                        merged.insert(k.clone(), v.clone());
+                                merged_scope = {
+                                    let mut m = shared_env.read().unwrap().clone();
+                                    for (k, v) in &locals {
+                                        if !m.contains_key(k) {
+                                            m.insert(k.clone(), v.clone());
+                                        }
                                     }
-                                }
-                                merged
+                                    m
+                                };
+                                &merged_scope
                             } else {
-                                locals.clone()
+                                &locals
                             }
                         } else {
-                            locals.clone()
+                            &locals
                         };
                         // Isolate try-stack so throws inside the callee
                         // don't consume the caller's handlers
-                        let saved_try_stack = std::mem::take(&mut self.try_stack);
-                        let call_result = self.call_function(&func_ref, args, &effective_locals);
-                        self.try_stack = saved_try_stack;
+                        let saved_try_stack = if self.try_stack.is_empty() {
+                            None
+                        } else {
+                            Some(std::mem::take(&mut self.try_stack))
+                        };
+                        let call_result = self.call_function(&func_ref, args, effective_locals);
+                        if let Some(saved) = saved_try_stack {
+                            self.try_stack = saved;
+                        }
                         match call_result {
                             Ok(result) => {
                                 // Write back mutations into the shared closure environment
@@ -1052,7 +1059,7 @@ impl CfmlVirtualMachine {
                 // Collections
                 BytecodeOp::BuildArray(count) => {
                     let mut elements = Vec::new();
-                    for _ in 0..count {
+                    for _ in 0..*count {
                         if let Some(val) = stack.pop() {
                             elements.push(val);
                         }
@@ -1062,7 +1069,7 @@ impl CfmlVirtualMachine {
                 }
                 BytecodeOp::BuildStruct(count) => {
                     let mut pairs = Vec::new();
-                    for _ in 0..count {
+                    for _ in 0..*count {
                         let value = stack.pop().unwrap_or(CfmlValue::Null);
                         let key = stack.pop().unwrap_or(CfmlValue::String(String::new()));
                         pairs.push((key.as_string(), value));
@@ -1131,7 +1138,7 @@ impl CfmlVirtualMachine {
                         match &obj {
                             CfmlValue::Struct(s) => {
                                 let val = s
-                                    .get(&name)
+                                    .get(name.as_str())
                                     .or_else(|| s.get(&name.to_uppercase()))
                                     .or_else(|| s.get(&name.to_lowercase()))
                                     .or_else(|| {
@@ -1200,7 +1207,7 @@ impl CfmlVirtualMachine {
                 BytecodeOp::SetProperty(name) => {
                     if let Some(value) = stack.pop() {
                         if let Some(mut obj) = stack.pop() {
-                            obj.set(name, value);
+                            obj.set(name.clone(), value);
                             stack.push(obj);
                         }
                     }
@@ -1208,7 +1215,7 @@ impl CfmlVirtualMachine {
 
                 BytecodeOp::NewObject(arg_count) => {
                     // Pop constructor arguments first
-                    let ctor_args: Vec<CfmlValue> = (0..arg_count)
+                    let ctor_args: Vec<CfmlValue> = (0..*arg_count)
                         .filter_map(|_| stack.pop())
                         .collect::<Vec<_>>().into_iter().rev().collect();
 
@@ -1285,8 +1292,9 @@ impl CfmlVirtualMachine {
                 }
 
                 BytecodeOp::DefineFunction(func_idx) => {
+                    let func_idx = *func_idx;
                     let func_name = self.program.functions[func_idx].name.clone();
-                    self.user_functions.insert(func_name.clone(), self.program.functions[func_idx].clone());
+                    self.user_functions.insert(func_name.clone(), (*self.program.functions[func_idx]).clone());
                     // Create or reuse a shared closure environment so all closures
                     // defined in this function invocation share the same mutable state.
                     let env = closure_env.get_or_insert_with(|| {
@@ -1321,30 +1329,30 @@ impl CfmlVirtualMachine {
                 }
 
                 BytecodeOp::Increment(name) => {
-                    if let Some(val) = locals.get(&name) {
+                    if let Some(val) = locals.get(name.as_str()) {
                         let new_val = match val {
                             CfmlValue::Int(i) => CfmlValue::Int(i + 1),
                             CfmlValue::Double(d) => CfmlValue::Double(d + 1.0),
                             _ => CfmlValue::Int(1),
                         };
-                        locals.insert(name, new_val);
+                        locals.insert(name.clone(), new_val);
                     }
                 }
                 BytecodeOp::Decrement(name) => {
-                    if let Some(val) = locals.get(&name) {
+                    if let Some(val) = locals.get(name.as_str()) {
                         let new_val = match val {
                             CfmlValue::Int(i) => CfmlValue::Int(i - 1),
                             CfmlValue::Double(d) => CfmlValue::Double(d - 1.0),
                             _ => CfmlValue::Int(-1),
                         };
-                        locals.insert(name, new_val);
+                        locals.insert(name.clone(), new_val);
                     }
                 }
 
                 // Exception handling
                 BytecodeOp::TryStart(catch_ip) => {
                     self.try_stack.push(TryHandler {
-                        catch_ip,
+                        catch_ip: *catch_ip,
                         stack_depth: stack.len(),
                     });
                 }
@@ -1385,7 +1393,7 @@ impl CfmlVirtualMachine {
                 BytecodeOp::CallMethod(method_name, arg_count, write_back) => {
                     // Pop explicit args
                     let mut extra_args: Vec<CfmlValue> =
-                        (0..arg_count).filter_map(|_| stack.pop()).collect::<Vec<_>>().into_iter().rev().collect();
+                        (0..*arg_count).filter_map(|_| stack.pop()).collect::<Vec<_>>().into_iter().rev().collect();
                     // Pop the object (receiver)
                     let object = stack.pop().unwrap_or(CfmlValue::Null);
 
@@ -1576,7 +1584,7 @@ impl CfmlVirtualMachine {
                     // If null, continue (leave null on stack)
                     if let Some(val) = stack.last() {
                         if !matches!(val, CfmlValue::Null) {
-                            ip = target;
+                            ip = *target;
                         }
                     }
                 }
@@ -1701,12 +1709,12 @@ impl CfmlVirtualMachine {
                 }
 
                 BytecodeOp::LineInfo(line, col) => {
-                    self.current_line = line;
-                    self.current_column = col;
+                    self.current_line = *line;
+                    self.current_column = *col;
                     // Update the current call frame's line so the stack trace
                     // reflects where execution is within this function
                     if let Some(frame) = self.call_stack.last_mut() {
-                        frame.line = line;
+                        frame.line = *line;
                     }
                 }
 
@@ -1763,7 +1771,35 @@ impl CfmlVirtualMachine {
         parent_locals: &IndexMap<String, CfmlValue>,
     ) -> CfmlResult {
         if let CfmlValue::Function(func) = func_ref {
-            // Check builtin functions first (case-insensitive)
+            // Fast path: if the function has a stored bytecode index, dispatch directly
+            // (skips all builtin matching for user-defined functions)
+            if let cfml_common::dynamic::CfmlClosureBody::Expression(ref body) = func.body {
+                if let CfmlValue::Int(idx) = body.as_ref() {
+                    let idx = *idx as usize;
+                    if idx < self.program.functions.len() {
+                        // Handle closure scope merging
+                        let effective_locals;
+                        let effective_parent = if let Some(ref shared_env) = func.captured_scope {
+                            effective_locals = {
+                                let mut merged = shared_env.read().unwrap().clone();
+                                for (k, v) in parent_locals {
+                                    if !merged.contains_key(k) {
+                                        merged.insert(k.clone(), v.clone());
+                                    }
+                                }
+                                merged
+                            };
+                            &effective_locals
+                        } else {
+                            parent_locals
+                        };
+                        let user_func = self.program.functions[idx].clone();
+                        return self.execute_function_with_args(&user_func, args, Some(effective_parent));
+                    }
+                }
+            }
+
+            // Check builtin functions (case-insensitive)
             let name_lower = func.name.to_lowercase();
 
             // writeOutput/writeDump must be handled before the builtin lookup
@@ -1837,36 +1873,6 @@ impl CfmlVirtualMachine {
 
                     if let Some(builtin) = builtin_match {
                         return builtin(args);
-                    }
-                }
-            }
-
-            // If the function has a captured scope (closure), merge it with
-            // the caller's parent_locals so the closure sees its defining scope.
-            let effective_locals;
-            let effective_parent = if let Some(ref shared_env) = func.captured_scope {
-                effective_locals = {
-                    let mut merged = shared_env.read().unwrap().clone();
-                    for (k, v) in parent_locals {
-                        if !merged.contains_key(k) {
-                            merged.insert(k.clone(), v.clone());
-                        }
-                    }
-                    merged
-                };
-                &effective_locals
-            } else {
-                parent_locals
-            };
-
-            // If the function has a stored bytecode index, use it directly
-            // (avoids name collision when parent/child have same-named methods)
-            if let cfml_common::dynamic::CfmlClosureBody::Expression(ref body) = func.body {
-                if let CfmlValue::Int(idx) = body.as_ref() {
-                    let idx = *idx as usize;
-                    if idx < self.program.functions.len() {
-                        let user_func = self.program.functions[idx].clone();
-                        return self.execute_function_with_args(&user_func, args, Some(effective_parent));
                     }
                 }
             }
@@ -5687,7 +5693,7 @@ impl CfmlVirtualMachine {
                     if func.name != "__main__" {
                         self.program.functions.push(func.clone());
                         if self.user_functions.contains_key(&func.name) {
-                            self.user_functions.insert(func.name.clone(), func.clone());
+                            self.user_functions.insert(func.name.clone(), (*func).clone());
                         }
                     }
                 }
@@ -6120,7 +6126,7 @@ impl CfmlVirtualMachine {
         for func in sub_funcs {
             if func.name != "__main__" {
                 self.program.functions.push(func.clone());
-                self.user_functions.insert(func.name.clone(), func.clone());
+                self.user_functions.insert(func.name.clone(), (*func).clone());
             }
         }
 
