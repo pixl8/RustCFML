@@ -476,6 +476,9 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("fileUpload".into(), fn_file_upload);
     f.insert("fileUploadAll".into(), fn_file_upload_all);
     f.insert("__cffile_upload".into(), fn_cffile_upload);
+    f.insert("getProfileString".into(), fn_get_profile_string);
+    f.insert("setProfileString".into(), fn_set_profile_string);
+    f.insert("getProfileSections".into(), fn_get_profile_sections);
 
     // ---- Additional builtins ----
     f.insert("encodeForURL".into(), fn_encode_for_url);
@@ -4426,6 +4429,159 @@ fn fn_ls_parse_number(args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 // ===============================================
+// INI FILE FUNCTIONS
+// ===============================================
+
+/// Parse an INI file into sections: HashMap<section_name, Vec<(key, value)>>
+fn parse_ini_file(content: &str) -> (Vec<String>, HashMap<String, Vec<(String, String)>>) {
+    let mut sections: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut section_order: Vec<String> = Vec::new();
+    let mut current_section = String::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            current_section = line[1..line.len()-1].trim().to_string();
+            if !sections.contains_key(&current_section) {
+                section_order.push(current_section.clone());
+                sections.insert(current_section.clone(), Vec::new());
+            }
+        } else if let Some(eq_pos) = line.find('=') {
+            let key = line[..eq_pos].trim().to_string();
+            let value = line[eq_pos+1..].trim().to_string();
+            sections.entry(current_section.clone()).or_default().push((key, value));
+        }
+    }
+    (section_order, sections)
+}
+
+/// getProfileString(iniPath, section, entry) — read a value from an INI file
+fn fn_get_profile_string(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() < 3 {
+        return Err(CfmlError::runtime("getProfileString requires 3 arguments: iniPath, section, entry".to_string()));
+    }
+    let path = get_str(&args, 0);
+    let section = get_str(&args, 1);
+    let entry = get_str(&args, 2);
+
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        CfmlError::runtime(format!("getProfileString: cannot read '{}': {}", path, e))
+    })?;
+
+    let (_, sections) = parse_ini_file(&content);
+    let section_lower = section.to_lowercase();
+    let entry_lower = entry.to_lowercase();
+
+    for (sec_name, entries) in &sections {
+        if sec_name.to_lowercase() == section_lower {
+            for (k, v) in entries {
+                if k.to_lowercase() == entry_lower {
+                    return Ok(CfmlValue::String(v.clone()));
+                }
+            }
+        }
+    }
+    Ok(CfmlValue::String(String::new()))
+}
+
+/// setProfileString(iniPath, section, entry, value) — write a value to an INI file
+fn fn_set_profile_string(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.len() < 4 {
+        return Err(CfmlError::runtime("setProfileString requires 4 arguments: iniPath, section, entry, value".to_string()));
+    }
+    let path = get_str(&args, 0);
+    let section = get_str(&args, 1);
+    let entry = get_str(&args, 2);
+    let value = get_str(&args, 3);
+
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let (section_order, mut sections) = parse_ini_file(&content);
+
+    // Find or create section (case-insensitive match)
+    let section_lower = section.to_lowercase();
+    let actual_section = section_order.iter()
+        .find(|s| s.to_lowercase() == section_lower)
+        .cloned()
+        .unwrap_or_else(|| section.clone());
+
+    let entries = sections.entry(actual_section.clone()).or_default();
+
+    // Update existing key or append new one
+    let entry_lower = entry.to_lowercase();
+    let mut found = false;
+    for (k, v) in entries.iter_mut() {
+        if k.to_lowercase() == entry_lower {
+            *v = value.clone();
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        entries.push((entry.clone(), value.clone()));
+    }
+
+    // Write back — preserve section order, add new sections at end
+    let mut output = String::new();
+    let mut written_sections: Vec<String> = Vec::new();
+
+    for sec_name in &section_order {
+        if let Some(entries) = sections.get(sec_name) {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&format!("[{}]\n", sec_name));
+            for (k, v) in entries {
+                output.push_str(&format!("{}={}\n", k, v));
+            }
+            written_sections.push(sec_name.clone());
+        }
+    }
+    // New sections not in original order
+    for (sec_name, entries) in &sections {
+        if !written_sections.contains(sec_name) {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&format!("[{}]\n", sec_name));
+            for (k, v) in entries {
+                output.push_str(&format!("{}={}\n", k, v));
+            }
+        }
+    }
+
+    std::fs::write(&path, &output).map_err(|e| {
+        CfmlError::runtime(format!("setProfileString: cannot write '{}': {}", path, e))
+    })?;
+
+    Ok(CfmlValue::Null)
+}
+
+/// getProfileSections(iniPath) — return a struct of section names → comma-separated key lists
+fn fn_get_profile_sections(args: Vec<CfmlValue>) -> CfmlResult {
+    if args.is_empty() {
+        return Err(CfmlError::runtime("getProfileSections requires 1 argument: iniPath".to_string()));
+    }
+    let path = get_str(&args, 0);
+
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        CfmlError::runtime(format!("getProfileSections: cannot read '{}': {}", path, e))
+    })?;
+
+    let (section_order, sections) = parse_ini_file(&content);
+    let mut result = IndexMap::new();
+
+    for sec_name in &section_order {
+        if let Some(entries) = sections.get(sec_name) {
+            let keys: Vec<String> = entries.iter().map(|(k, _)| k.clone()).collect();
+            result.insert(sec_name.clone(), CfmlValue::String(keys.join(",")));
+        }
+    }
+
+    Ok(CfmlValue::Struct(result))
+}
+
 // FILE I/O FUNCTIONS
 // ===============================================
 

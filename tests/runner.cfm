@@ -62,6 +62,7 @@ try { include "stdlib/test_listreduceright.cfm"; } catch (any e) { writeOutput("
 try { include "stdlib/test_callstack.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_callstack.cfm | " & e.message & chr(10)); }
 try { include "stdlib/test_precisionevaluate.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_precisionevaluate.cfm | " & e.message & chr(10)); }
 try { include "stdlib/test_htmlparse.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_htmlparse.cfm | " & e.message & chr(10)); }
+try { include "stdlib/test_ini_functions.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_ini_functions.cfm | " & e.message & chr(10)); }
 
 // --- Member Functions ---
 try { include "members/test_string_members.cfm"; } catch (any e) { writeOutput("ERROR | members/test_string_members.cfm | " & e.message & chr(10)); }

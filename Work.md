@@ -39,6 +39,7 @@ Tag preprocessor converts CFML tags to CFScript. Supports: cfset, cfoutput, cfif
 - **Bitmask**: bitMaskClear, bitMaskRead, bitMaskSet
 - **Zip**: cfzip (actions: zip, unzip, list, read, readBinary, delete)
 - **Stack/Precision**: callStackGet, callStackDump, precisionEvaluate
+- **INI**: getProfileString, setProfileString, getProfileSections
 - **Misc**: soundex, metaphone, toScript
 
 ### Member Functions
@@ -67,13 +68,12 @@ CLI (file exec, `-c` inline, `-d` debug, `-r` REPL, `--serve`), WASM target, err
 ## Remaining Work
 
 ### Low Priority
-- cfschedule, cfwddx
-- INI file functions (getProfileString, setProfileString)
-- Real concurrent cfthread execution (currently sequential)
+- (none currently)
 
 ### Explicitly Unsupported
 - **Query-of-Queries (QoQ)**: SQL SELECT on in-memory query objects is not supported
 - Image functions (80+), Spreadsheet functions (40+), ORM (20+), SOAP/WSDL, Flash/Flex UI tags, Exchange, PDF, LDAP, Registry, .NET, Gateway, JWT
+- cfschedule, cfwddx, real concurrent cfthread execution
 
 ### Taffy Framework
 Believed feature-complete. cgi.remote_addr, cgi.server_name (from Host header), and all request headers (cgi.http_*) available for rate limiting and CORS.
@@ -103,4 +103,4 @@ crates/
 
 Reference: [cfdocs.org/functions](https://cfdocs.org/functions) | [cfdocs.org/tags](https://cfdocs.org/tags) | BoxLang ANTLR grammar | Lucee expression grammar
 
-*Last Updated: 2026-03-03* | 1163 tests across 88 suites
+*Last Updated: 2026-03-04* | 1181 tests across 89 suites
