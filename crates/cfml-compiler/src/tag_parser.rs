@@ -103,6 +103,13 @@ pub fn tags_to_script(source: &str) -> String {
 
 /// Internal implementation that threads cfimport prefix→taglib mappings through.
 fn tags_to_script_impl(source: &str, imports: &mut std::collections::HashMap<String, String>) -> String {
+    tags_to_script_inner(source, imports, false)
+}
+
+/// Inner implementation with cfoutput tracking for enableCFOutputOnly support.
+/// When `in_cfoutput` is true, text and hash expressions use writeOutput() directly.
+/// When false, they use __writeText() which the VM can suppress.
+fn tags_to_script_inner(source: &str, imports: &mut std::collections::HashMap<String, String>, in_cfoutput: bool) -> String {
     let mut result = String::new();
     let chars: Vec<char> = source.chars().collect();
     let len = chars.len();
@@ -140,7 +147,9 @@ fn tags_to_script_impl(source: &str, imports: &mut std::collections::HashMap<Str
             // Check if there's a matching closing #
             if let Some(end) = find_closing_hash(&chars, i + 1, len) {
                 let expr: String = chars[i + 1..end].iter().collect();
-                result.push_str(&format!("writeOutput({});", expr));
+                // Inside <cfoutput>: always output. Outside: use __writeText (suppressible).
+                let fn_name = if in_cfoutput { "writeOutput" } else { "__writeText" };
+                result.push_str(&format!("{}({});", fn_name, expr));
                 i = end + 1;
             } else {
                 result.push(chars[i]);
@@ -148,7 +157,8 @@ fn tags_to_script_impl(source: &str, imports: &mut std::collections::HashMap<Str
             }
         } else if chars[i] == '#' && i + 1 < len && chars[i + 1] == '#' {
             // Escaped hash ## -> literal #
-            result.push_str("writeOutput(\"##\");");
+            let fn_name = if in_cfoutput { "writeOutput" } else { "__writeText" };
+            result.push_str(&format!("{}(\"##\");", fn_name));
             i += 2;
         } else {
             // Plain text - collect until we hit a tag, hash expression, or CFML comment
@@ -161,10 +171,12 @@ fn tags_to_script_impl(source: &str, imports: &mut std::collections::HashMap<Str
                 i += 1;
             }
             let text: String = chars[start..i].iter().collect();
-            if !text.is_empty() && text.trim().len() > 0 {
-                // Output plain text
+            if !text.is_empty() {
+                // Output ALL text including whitespace-only nodes.
+                // Outside <cfoutput>: use __writeText (suppressible by enableCFOutputOnly).
+                let fn_name = if in_cfoutput { "writeOutput" } else { "__writeText" };
                 let escaped = text.replace('\\', "\\\\").replace('"', "\"\"").replace('\n', "\\n").replace('\r', "\\r");
-                result.push_str(&format!("writeOutput(\"{}\");", escaped));
+                result.push_str(&format!("{}(\"{}\");", fn_name, escaped));
             }
         }
     }
@@ -358,9 +370,20 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize, imports: &mut std::col
 
     match tag_lower.as_str() {
         "cfoutput" => {
-            // <cfoutput> just marks a region where # expressions are evaluated
-            // The content between cfoutput tags is handled by the main loop
-            (String::new(), tag_end - start)
+            // <cfoutput> marks a region where # expressions are evaluated and
+            // content is always output (even when enableCFOutputOnly is active).
+            // Process body recursively with in_cfoutput=true so text uses writeOutput.
+            if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cfoutput") {
+                let body: String = chars[tag_end..end_tag_pos].iter().collect();
+                let close_end = find_tag_end(chars, end_tag_pos, len);
+                let body_script = tags_to_script_inner(&body, imports, true);
+                (body_script, close_end - start)
+            } else {
+                // No closing tag — treat remaining content as inside cfoutput
+                let body: String = chars[tag_end..len].iter().collect();
+                let body_script = tags_to_script_inner(&body, imports, true);
+                (body_script, len - start)
+            }
         }
         "cfelse" => {
             ("} else {\n".to_string(), tag_end - start)
@@ -856,6 +879,32 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize, imports: &mut std::col
                 }
             }
             (format!("__cflog({{ {} }});\n", parts.join(", ")), tag_end - start)
+        }
+        "cfprocessingdirective" => {
+            let suppress_ws = attrs.get("suppresswhitespace")
+                .map(|v| v.to_lowercase() == "true" || v.to_lowercase() == "yes")
+                .unwrap_or(false);
+            if suppress_ws {
+                if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cfprocessingdirective") {
+                    let body: String = chars[tag_end..end_tag_pos].iter().collect();
+                    let close_end = find_tag_end(chars, end_tag_pos, len);
+                    let body_script = tags_to_script_impl(&body, imports);
+                    // Capture output, collapse whitespace, then re-emit
+                    (format!("__cfsavecontent_start();\n{}writeOutput(__cfprocessingdirective_collapse(__cfsavecontent_end()));\n", body_script), close_end - start)
+                } else {
+                    (String::new(), tag_end - start)
+                }
+            } else {
+                // suppressWhiteSpace=false or just pageEncoding — pass through body
+                if let Some(end_tag_pos) = find_closing_tag(chars, tag_end, len, "cfprocessingdirective") {
+                    let body: String = chars[tag_end..end_tag_pos].iter().collect();
+                    let close_end = find_tag_end(chars, end_tag_pos, len);
+                    let body_script = tags_to_script_impl(&body, imports);
+                    (body_script, close_end - start)
+                } else {
+                    (String::new(), tag_end - start)
+                }
+            }
         }
         "cfsetting" => {
             let mut parts = Vec::new();

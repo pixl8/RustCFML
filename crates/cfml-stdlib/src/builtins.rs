@@ -521,6 +521,10 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("__cfexecute".into(), fn_cfexecute_stub);
     f.insert("__cfmail".into(), fn_cfmail);
 
+    // ---- Whitespace/output control functions (VM-intercepted) ----
+    f.insert("__writeText".into(), fn_write_text_stub);
+    f.insert("__cfprocessingdirective_collapse".into(), fn_cfprocessingdirective_collapse);
+
     // ---- cfthread functions (VM-intercepted) ----
     f.insert("__cfthread_run".into(), fn_cfthread_stub);
     f.insert("__cfthread_join".into(), fn_cfthread_stub);
@@ -6710,6 +6714,58 @@ fn fn_cfsavecontent_end_stub(_args: Vec<CfmlValue>) -> CfmlResult {
 
 fn fn_cfabort_stub(_args: Vec<CfmlValue>) -> CfmlResult {
     Err(CfmlError::runtime("__cfabort requires VM intercept".into()))
+}
+
+fn fn_write_text_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("__writeText requires VM intercept".into()))
+}
+
+/// Collapse whitespace runs in output (cfprocessingdirective suppressWhiteSpace).
+/// Matches Lucee "smart" mode: runs containing a newline → single newline,
+/// runs without a newline → single space. Preserves content inside <pre>/<code>/<textarea>.
+fn fn_cfprocessingdirective_collapse(args: Vec<CfmlValue>) -> CfmlResult {
+    let input = args.get(0).map(|v| v.as_string()).unwrap_or_default();
+    let mut result = String::with_capacity(input.len());
+    let mut in_preserve = false;
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        // Check for <pre>, <code>, <textarea> open/close tags
+        if ch == '<' {
+            let mut tag_text = String::from('<');
+            while let Some(&next) = chars.peek() {
+                tag_text.push(next);
+                chars.next();
+                if next == '>' { break; }
+            }
+            let tag_lower = tag_text.to_lowercase();
+            if tag_lower.starts_with("<pre") || tag_lower.starts_with("<code") || tag_lower.starts_with("<textarea") {
+                in_preserve = true;
+            } else if tag_lower.starts_with("</pre") || tag_lower.starts_with("</code") || tag_lower.starts_with("</textarea") {
+                in_preserve = false;
+            }
+            result.push_str(&tag_text);
+            continue;
+        }
+
+        if in_preserve || !ch.is_whitespace() {
+            result.push(ch);
+        } else {
+            // Collapse whitespace run
+            let mut has_newline = ch == '\n';
+            while let Some(&next) = chars.peek() {
+                if !next.is_whitespace() { break; }
+                if next == '\n' { has_newline = true; }
+                chars.next();
+            }
+            if has_newline {
+                result.push('\n');
+            } else {
+                result.push(' ');
+            }
+        }
+    }
+    Ok(CfmlValue::String(result))
 }
 
 fn fn_invoke_stub(_args: Vec<CfmlValue>) -> CfmlResult {

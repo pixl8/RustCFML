@@ -92,6 +92,7 @@ try { include "tags/test_tags_cfimport.cfm"; } catch (any e) { writeOutput("ERRO
 try { include "tags/test_tags_cfthread.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_cfthread.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_cfzip.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_cfzip.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_tld.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_tld.cfm | " & e.message & chr(10)); }
+try { include "tags/test_tags_whitespace.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_whitespace.cfm | " & e.message & chr(10)); }
 
 printSummary();
 </cfscript>

@@ -240,6 +240,8 @@ pub struct CfmlVirtualMachine {
     custom_tag_stack: Vec<CustomTagState>,
     /// In-memory cache: key -> (value, optional expiry instant)
     pub cache: HashMap<String, (CfmlValue, Option<std::time::Instant>)>,
+    /// cfsetting enableCFOutputOnly counter (>0 means only cfoutput content is emitted)
+    pub enable_cfoutput_only: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -307,6 +309,7 @@ impl CfmlVirtualMachine {
             custom_tag_paths: Vec::new(),
             custom_tag_stack: Vec::new(),
             cache: HashMap::new(),
+            enable_cfoutput_only: 0,
         }
     }
 
@@ -1810,6 +1813,15 @@ impl CfmlVirtualMachine {
                 }
                 return Ok(CfmlValue::Null);
             }
+            // __writeText: same as writeOutput but suppressed when enableCFOutputOnly > 0
+            if name_lower == "__writetext" {
+                if self.enable_cfoutput_only <= 0 {
+                    for arg in &args {
+                        self.output_buffer.push_str(&arg.as_string());
+                    }
+                }
+                return Ok(CfmlValue::Null);
+            }
             if name_lower == "writedump" || name_lower == "dump" {
                 for arg in &args {
                     self.output_buffer.push_str(&format!("{:?}\n", arg));
@@ -1844,6 +1856,7 @@ impl CfmlVirtualMachine {
                 | "isdefined"
                 | "queryexecute"
                 | "__cftransaction_start" | "__cftransaction_commit" | "__cftransaction_rollback"
+                | "__writetext"
                 | "__cflog" | "__cfsetting" | "__cflock_start" | "__cflock_end" | "__cfcookie"
                 | "fileupload" | "fileuploadall" | "__cffile_upload"
                 | "sessioninvalidate" | "sessionrotate" | "sessiongetmetadata"
@@ -3460,17 +3473,19 @@ impl CfmlVirtualMachine {
                 "__cfsetting" => {
                     // Handle cfsetting options
                     if let Some(CfmlValue::Struct(opts)) = args.get(0) {
-                        let _show_debug = opts.iter()
-                            .find(|(k, _)| k.to_lowercase() == "showdebugoutput")
-                            .map(|(_,v)| v.as_string().to_lowercase() == "true" || v.as_string() == "yes");
-                        let _request_timeout = opts.iter()
-                            .find(|(k, _)| k.to_lowercase() == "requesttimeout")
-                            .map(|(_, v)| v.as_string());
-                        let enable_output = opts.iter()
+                        // enableCFOutputOnly: counter-based. true increments, false decrements.
+                        // "reset" forces counter to 0. When > 0, only <cfoutput> content is emitted.
+                        if let Some((_, v)) = opts.iter()
                             .find(|(k, _)| k.to_lowercase() == "enablecfoutputonly")
-                            .map(|(_,v)| v.as_string().to_lowercase() == "true" || v.as_string() == "yes");
-                        if let Some(_enabled) = enable_output {
-                            // Would control output suppression - stub for now
+                        {
+                            let val_str = v.as_string().to_lowercase();
+                            if val_str == "reset" {
+                                self.enable_cfoutput_only = 0;
+                            } else if val_str == "true" || val_str == "yes" || val_str == "1" {
+                                self.enable_cfoutput_only += 1;
+                            } else {
+                                self.enable_cfoutput_only = (self.enable_cfoutput_only - 1).max(0);
+                            }
                         }
                     }
                     return Ok(CfmlValue::Null);

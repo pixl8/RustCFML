@@ -45,7 +45,7 @@ assert("cfthread.t1 status", cfthread.t1.status, "COMPLETED");
 </cfthread>
 
 <cfscript>
-assert("cfthread output capture", cfthread.t3.output, "hello from thread");
+assert("cfthread output capture", trim(cfthread.t3.output), "hello from thread");
 </cfscript>
 
 <!--- Error capture --->
