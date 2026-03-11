@@ -6,6 +6,26 @@ s = {name: "Alice", age: 30};
 assert("struct literal name", s.name, "Alice");
 assert("struct literal age", s.age, 30);
 
+// --- Struct literal with = syntax ---
+se = {name = "Alice", age = 30};
+assert("struct = syntax name", se.name, "Alice");
+assert("struct = syntax age", se.age, 30);
+
+// --- Mixed : and = syntax ---
+sm = {a: 1, b = 2, c: 3};
+assert("struct mixed syntax a", sm.a, 1);
+assert("struct mixed syntax b", sm.b, 2);
+assert("struct mixed syntax c", sm.c, 3);
+
+// --- Nested struct with = syntax ---
+sn = {inner = {x = 10, y = 20}};
+assert("nested struct = syntax", sn.inner.x, 10);
+
+// --- Struct = with boolean/array values ---
+sb = {flag = true, items = [1,2,3]};
+assertTrue("struct = bool value", sb.flag);
+assert("struct = array value len", arrayLen(sb.items), 3);
+
 // --- Quoted keys ---
 sq = {"first-name": "Bob", "last-name": "Smith"};
 assert("quoted key access", sq["first-name"], "Bob");

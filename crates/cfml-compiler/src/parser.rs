@@ -114,9 +114,19 @@ impl Parser {
             Token::Public | Token::Private | Token::Remote | Token::Package
         ) {
             let access = self.parse_access_modifier();
-            // Skip optional return type annotation (e.g. "private array function ...")
-            if matches!(self.peek(0), Token::Identifier(_)) && matches!(self.peek(1), Token::Function) {
-                self.advance(); // skip return type
+            // Skip optional return type annotation (e.g. "private array function ..."
+            // or "public MachII.framework.AppManager function ...")
+            if matches!(self.peek(0), Token::Identifier(_)) {
+                // Look ahead past dotted name: Ident.Ident.Ident... then Function
+                let mut lookahead = 1;
+                while matches!(self.peek(lookahead), Token::Dot) && matches!(self.peek(lookahead + 1), Token::Identifier(_)) {
+                    lookahead += 2;
+                }
+                if matches!(self.peek(lookahead), Token::Function) {
+                    for _ in 0..lookahead {
+                        self.advance(); // skip return type tokens
+                    }
+                }
             }
             if self.match_token(&Token::Function) {
                 let mut func = self.parse_function()?;
@@ -126,9 +136,17 @@ impl Parser {
                 })));
             }
             if self.match_token(&Token::Static) {
-                // Skip optional return type after static
-                if matches!(self.peek(0), Token::Identifier(_)) && matches!(self.peek(1), Token::Function) {
-                    self.advance();
+                // Skip optional return type after static (including dotted names)
+                if matches!(self.peek(0), Token::Identifier(_)) {
+                    let mut lookahead = 1;
+                    while matches!(self.peek(lookahead), Token::Dot) && matches!(self.peek(lookahead + 1), Token::Identifier(_)) {
+                        lookahead += 2;
+                    }
+                    if matches!(self.peek(lookahead), Token::Function) {
+                        for _ in 0..lookahead {
+                            self.advance();
+                        }
+                    }
                 }
                 if self.match_token(&Token::Function) {
                     let mut func = self.parse_function()?;
@@ -2033,21 +2051,57 @@ impl Parser {
                 location: self.current_location(),
             })),
             Token::New => {
-                let class = Box::new(self.parse_call()?);
-                let args = if self.match_token(&Token::LParen) {
-                    let a = self.parse_arguments()?;
-                    self.consume(&Token::RParen)?;
-                    a
+                // After `new`, collect a dotted class name: Ident(.Ident)*
+                // e.g. `new framework.one()`, `new com.myapp.Service()`
+                // Then parse arguments in parens.
+                if let Token::Identifier(_) = self.peek(0) {
+                    let mut name_parts = Vec::new();
+                    if let Token::Identifier(first) = self.advance().token.clone() {
+                        name_parts.push(first);
+                    }
+                    while self.check(&Token::Dot) {
+                        if let Token::Identifier(_) = self.peek(1) {
+                            self.advance(); // consume dot
+                            if let Token::Identifier(part) = self.advance().token.clone() {
+                                name_parts.push(part);
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    let class_name = name_parts.join(".");
+                    let class = Box::new(Expression::Identifier(Identifier {
+                        name: class_name,
+                        location: self.current_location(),
+                    }));
+                    let args = if self.match_token(&Token::LParen) {
+                        let a = self.parse_arguments()?;
+                        self.consume(&Token::RParen)?;
+                        a
+                    } else {
+                        Vec::new()
+                    };
+                    Ok(Expression::New(Box::new(NewExpression {
+                        class,
+                        arguments: args,
+                        location: self.current_location(),
+                    })))
                 } else {
-                    // The call parser might have already consumed the parens
-                    // if the primary was parsed as a function call
-                    Vec::new()
-                };
-                Ok(Expression::New(Box::new(NewExpression {
-                    class,
-                    arguments: args,
-                    location: self.current_location(),
-                })))
+                    // Fallback for non-identifier new (e.g. new (expr)())
+                    let class = Box::new(self.parse_call()?);
+                    let args = if self.match_token(&Token::LParen) {
+                        let a = self.parse_arguments()?;
+                        self.consume(&Token::RParen)?;
+                        a
+                    } else {
+                        Vec::new()
+                    };
+                    Ok(Expression::New(Box::new(NewExpression {
+                        class,
+                        arguments: args,
+                        location: self.current_location(),
+                    })))
+                }
             }
             Token::Function => self.parse_closure(),
             Token::LParen => {
@@ -2147,7 +2201,18 @@ impl Parser {
                     // Use a sentinel key to mark this as a spread entry
                     pairs.push((Expression::Spread(Box::new(expr.clone())), expr));
                 } else {
-                    let key = self.parse_expression()?;
+                    // In struct literals, `=` is a key-value separator (like `:`),
+                    // NOT an assignment operator. We must parse the key without
+                    // consuming `=` as assignment.
+                    // Check for simple `identifier =` pattern first (most common case).
+                    let is_key_eq = matches!(self.peek(0), Token::Identifier(_))
+                        && matches!(self.peek(1), Token::Equal);
+                    let key = if is_key_eq {
+                        // Parse just the identifier, don't let parse_expression consume `=`
+                        self.parse_ternary()?
+                    } else {
+                        self.parse_expression()?
+                    };
 
                     // Support both : and = for struct initialization
                     if self.match_token(&Token::Colon) || self.match_token(&Token::Equal) {
