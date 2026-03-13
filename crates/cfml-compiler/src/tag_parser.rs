@@ -173,6 +173,8 @@ fn tags_to_script_inner(source: &str, imports: &mut std::collections::HashMap<St
             let text: String = chars[start..i].iter().collect();
             if !text.is_empty() {
                 // Output ALL text including whitespace-only nodes.
+                // Standard CFML outputs everything; whitespace suppression is opt-in
+                // via cfprocessingdirective or cfsetting enableCFOutputOnly.
                 // Outside <cfoutput>: use __writeText (suppressible by enableCFOutputOnly).
                 let fn_name = if in_cfoutput { "writeOutput" } else { "__writeText" };
                 let escaped = text.replace('\\', "\\\\").replace('"', "\"\"").replace('\n', "\\n").replace('\r', "\\r");
@@ -499,10 +501,10 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize, imports: &mut std::col
                 "component ".to_string()
             };
             if let Some(ext) = extends {
-                decl.push_str(&format!("extends {} ", ext));
+                decl.push_str(&format!("extends=\"{}\" ", ext));
             }
             if let Some(imp) = implements {
-                decl.push_str(&format!("implements {} ", imp));
+                decl.push_str(&format!("implements=\"{}\" ", imp));
             }
             // Pass through extra attributes as metadata key="value" pairs
             for (k, v) in &attrs {
@@ -522,7 +524,7 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize, imports: &mut std::col
                 "interface ".to_string()
             };
             if let Some(ext) = extends {
-                decl.push_str(&format!("extends {} ", ext));
+                decl.push_str(&format!("extends=\"{}\" ", ext));
             }
             // Pass through extra attributes as metadata key="value" pairs
             for (k, v) in &attrs {
@@ -892,6 +894,7 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize, imports: &mut std::col
                     // Capture output, collapse whitespace, then re-emit
                     (format!("__cfsavecontent_start();\n{}writeOutput(__cfprocessingdirective_collapse(__cfsavecontent_end()));\n", body_script), close_end - start)
                 } else {
+                    // Self-closing or no body — just ignore
                     (String::new(), tag_end - start)
                 }
             } else {
@@ -1411,7 +1414,56 @@ fn parse_tag_attributes(
                 let quote = chars[i];
                 i += 1;
                 let val_start = i;
-                while i < len && chars[i] != quote {
+                // Parse attribute value, handling:
+                // - #expr# hash expressions (may contain quotes internally)
+                // - Doubled-quote escaping ("" or '')
+                while i < len {
+                    if chars[i] == '#' && i + 1 < len && chars[i + 1] != '#' {
+                        // Hash expression: skip to closing # (respecting nested strings)
+                        i += 1;
+                        let mut hash_depth = 0;
+                        while i < len {
+                            if chars[i] == '#' && hash_depth == 0 {
+                                i += 1; // skip closing #
+                                break;
+                            }
+                            if chars[i] == '"' || chars[i] == '\'' {
+                                // Skip string literal inside hash expression
+                                // CFML does NOT use backslash escaping — quotes are
+                                // escaped by doubling ("" or '')
+                                let inner_quote = chars[i];
+                                i += 1;
+                                while i < len {
+                                    if chars[i] == inner_quote {
+                                        if i + 1 < len && chars[i + 1] == inner_quote {
+                                            i += 2; // doubled quote escape
+                                            continue;
+                                        }
+                                        break; // closing quote
+                                    }
+                                    i += 1;
+                                }
+                                if i < len { i += 1; } // skip closing inner quote
+                                continue;
+                            }
+                            if chars[i] == '(' { hash_depth += 1; }
+                            if chars[i] == ')' && hash_depth > 0 { hash_depth -= 1; }
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    if chars[i] == '#' && i + 1 < len && chars[i + 1] == '#' {
+                        i += 2; // escaped ##
+                        continue;
+                    }
+                    if chars[i] == quote {
+                        // Check for doubled quote (e.g., "" inside "...")
+                        if i + 1 < len && chars[i + 1] == quote {
+                            i += 2;
+                            continue;
+                        }
+                        break; // closing quote
+                    }
                     i += 1;
                 }
                 let val: String = chars[val_start..i].iter().collect();
@@ -1460,6 +1512,13 @@ fn quote_if_needed(s: &str) -> String {
         return s.to_string();
     }
     // Contains operators or function calls - looks like an expression
+    // But paths like "/foo/bar.cfm" should still be quoted.
+    // Distinguish: if it starts with "/" and looks like a file path, quote it.
+    let looks_like_path = s.starts_with('/') && !s.contains('(')
+        && (s.contains('.') && s.split('/').all(|seg| seg.is_empty() || seg.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')));
+    if looks_like_path {
+        return format!("\"{}\"", s.replace('"', "\\\""));
+    }
     if s.contains('(') || s.contains('+') || s.contains('-') || s.contains('*')
         || s.contains('/') || s.contains('&') || s.contains('.') || s.contains('[')
     {

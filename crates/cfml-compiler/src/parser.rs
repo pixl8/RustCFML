@@ -295,6 +295,12 @@ impl Parser {
             )));
         }
 
+        // cfscript param statement: param name="varName" default="value";
+        // or shorthand: param varName = defaultValue;
+        if self.match_token(&Token::Param) {
+            return self.parse_param_statement(stmt_loc);
+        }
+
         // cfscript lock block: lock name="x" type="exclusive" timeout="5" { body }
         if self.match_token(&Token::Lock) {
             return self.parse_lock(stmt_loc);
@@ -320,6 +326,64 @@ impl Parser {
             return Ok(CfmlNode::Statement(Statement::Import(Import {
                 path,
                 alias,
+                location: stmt_loc,
+            })));
+        }
+
+        // Handle 'savecontent variable="varname" { body }' in CFScript
+        if matches!(self.peek(0), Token::Identifier(ref s) if s.to_lowercase() == "savecontent") {
+            self.advance(); // consume 'savecontent'
+            // Parse attributes: variable = "name"
+            let mut var_name = "__savecontent_result".to_string();
+            while !self.check(&Token::LBrace) && !self.is_at_end() {
+                if self.is_identifier_like() && matches!(self.peek(1), Token::Equal) {
+                    let attr_name = self.extract_identifier()?;
+                    self.advance(); // consume =
+                    let attr_value = self.parse_expression()?;
+                    if attr_name.to_lowercase() == "variable" {
+                        if let Expression::Literal(ref lit) = attr_value {
+                            if let LiteralValue::String(ref s) = lit.value {
+                                var_name = s.clone();
+                            }
+                        } else if let Expression::Identifier(ref id) = attr_value {
+                            var_name = id.name.clone();
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+            // Parse body block
+            let body = self.parse_block()?;
+            // Convert to: __cfsavecontent_start(); body; varname = __cfsavecontent_end();
+            let mut stmts = Vec::new();
+            stmts.push(Statement::Expression(ExpressionStatement {
+                expr: Expression::FunctionCall(Box::new(FunctionCall {
+                    name: Box::new(Expression::Identifier(Identifier {
+                        name: "__cfsavecontent_start".to_string(),
+                        location: stmt_loc.clone(),
+                    })),
+                    arguments: vec![],
+                    location: stmt_loc.clone(),
+                })),
+                location: stmt_loc.clone(),
+            }));
+            stmts.extend(body);
+            stmts.push(Statement::Assignment(Assignment {
+                target: AssignTarget::Variable(var_name),
+                value: Expression::FunctionCall(Box::new(FunctionCall {
+                    name: Box::new(Expression::Identifier(Identifier {
+                        name: "__cfsavecontent_end".to_string(),
+                        location: stmt_loc.clone(),
+                    })),
+                    arguments: vec![],
+                    location: stmt_loc.clone(),
+                })),
+                operator: AssignOp::Equal,
+                location: stmt_loc.clone(),
+            }));
+            return Ok(CfmlNode::Statement(Statement::Output(Output {
+                body: stmts,
                 location: stmt_loc,
             })));
         }
@@ -593,7 +657,7 @@ impl Parser {
                     self.advance(); // consume 'in'
                     let iterable = self.parse_expression()?;
                     self.consume(&Token::RParen)?;
-                    let body = self.parse_block()?;
+                    let body = self.parse_block_or_statement()?;
                     return Ok(CfmlNode::Statement(Statement::ForIn(ForIn {
                         variable: name,
                         iterable,
@@ -805,7 +869,13 @@ impl Parser {
             self.consume(&Token::LParen)?;
 
             // catch (type varname) or catch (varname) or catch (any e)
-            let first = self.extract_identifier()?;
+            // Exception types can be dotted: catch (FW1.AbortControllerException e)
+            let mut first = self.extract_identifier()?;
+            while self.check(&Token::Dot) && self.is_identifier_like_at(1) {
+                self.advance(); // consume dot
+                let part = self.extract_identifier()?;
+                first = format!("{}.{}", first, part);
+            }
 
             let (var_type, var_name) = if self.check(&Token::RParen) {
                 (None, first)
@@ -838,6 +908,180 @@ impl Parser {
 
     /// Parse cfscript lock block: lock name="x" type="exclusive" timeout="5" { body }
     /// Desugars to: __cflock_start({name:"x", type:"exclusive", timeout:5}); try { body } finally { __cflock_end("x"); }
+    /// Parse cfscript `param` statement:
+    ///   param name="varName" default="value" type="string";
+    ///   param varName = defaultValue;
+    /// Converts to: if (!isDefined("varName")) varName = defaultValue;
+    fn parse_param_statement(&mut self, loc: SourceLocation) -> Result<CfmlNode, ParseError> {
+        // Check if it's the named-attribute form: param name="..." default="..."
+        let is_named_form = matches!(self.peek(0), Token::Identifier(ref s) if s.to_lowercase() == "name")
+            && matches!(self.peek(1), Token::Equal);
+
+        if is_named_form {
+            // Parse name=value attributes and emit __cfparam(name, default) call
+            let mut name_expr: Option<Expression> = None;
+            let mut default_expr: Option<Expression> = None;
+            while (self.is_identifier_like() || matches!(self.peek(0), Token::Identifier(_)))
+                && matches!(self.peek(1), Token::Equal) {
+                let attr_name = self.extract_identifier()?.to_lowercase();
+                self.advance(); // consume =
+                let attr_value = self.parse_expression()?;
+                match attr_name.as_str() {
+                    "name" => name_expr = Some(attr_value),
+                    "default" => default_expr = Some(attr_value),
+                    _ => {} // ignore type, etc.
+                }
+            }
+            self.match_token(&Token::Semicolon);
+
+            let name_val = name_expr.unwrap_or(Expression::Literal(Literal {
+                value: LiteralValue::String(String::new()),
+                location: loc,
+            }));
+
+            // For simple string literal names, try to do compile-time expansion
+            if let Expression::Literal(ref lit) = name_val {
+                if let LiteralValue::String(ref var_name) = lit.value {
+                    if !var_name.is_empty() {
+                        let default_val = default_expr.unwrap_or(Expression::Literal(Literal {
+                            value: LiteralValue::String(String::new()),
+                            location: loc,
+                        }));
+                        let condition = Expression::FunctionCall(Box::new(FunctionCall {
+                            name: Box::new(Expression::Identifier(Identifier {
+                                name: "isDefined".to_string(),
+                                location: loc,
+                            })),
+                            arguments: vec![Expression::Literal(Literal {
+                                value: LiteralValue::String(var_name.clone()),
+                                location: loc,
+                            })],
+                            location: loc,
+                        }));
+
+                        let assign_stmt = if let Some(dot_pos) = var_name.find('.') {
+                            let root = var_name[..dot_pos].to_string();
+                            let rest = &var_name[dot_pos + 1..];
+                            let parts: Vec<&str> = rest.split('.').collect();
+                            let mut expr = Expression::Identifier(Identifier {
+                                name: root.clone(),
+                                location: loc,
+                            });
+                            for (i, part) in parts.iter().enumerate() {
+                                if i < parts.len() - 1 {
+                                    expr = Expression::MemberAccess(Box::new(MemberAccess {
+                                        object: Box::new(expr),
+                                        member: part.to_string(),
+                                        null_safe: false,
+                                        location: loc,
+                                    }));
+                                }
+                            }
+                            let last_part = parts.last().unwrap().to_string();
+                            Statement::Assignment(Assignment {
+                                target: if parts.len() == 1 {
+                                    AssignTarget::StructAccess(Box::new(Expression::Identifier(Identifier {
+                                        name: root,
+                                        location: loc,
+                                    })), last_part)
+                                } else {
+                                    AssignTarget::StructAccess(Box::new(expr), last_part)
+                                },
+                                value: default_val,
+                                operator: AssignOp::Equal,
+                                location: loc,
+                            })
+                        } else {
+                            Statement::Assignment(Assignment {
+                                target: AssignTarget::Variable(var_name.clone()),
+                                value: default_val,
+                                operator: AssignOp::Equal,
+                                location: loc,
+                            })
+                        };
+
+                        return Ok(CfmlNode::Statement(Statement::If(If {
+                            condition: Expression::UnaryOp(Box::new(UnaryOp {
+                                operator: UnaryOpType::Not,
+                                operand: Box::new(condition),
+                                location: loc,
+                            })),
+                            then_branch: vec![assign_stmt],
+                            else_if: vec![],
+                            else_branch: None,
+                            location: loc,
+                        })));
+                    }
+                }
+            }
+
+            // Dynamic name (e.g., string interpolation) — emit __cfparam(nameExpr, defaultExpr)
+            let default_val = default_expr.unwrap_or(Expression::Literal(Literal {
+                value: LiteralValue::String(String::new()),
+                location: loc,
+            }));
+            let call = Expression::FunctionCall(Box::new(FunctionCall {
+                name: Box::new(Expression::Identifier(Identifier {
+                    name: "__cfparam".to_string(),
+                    location: loc,
+                })),
+                arguments: vec![name_val, default_val],
+                location: loc,
+            }));
+            return Ok(CfmlNode::Statement(Statement::Expression(ExpressionStatement {
+                expr: call,
+                location: loc,
+            })));
+        }
+
+        // Shorthand form: param varName = defaultValue;
+        // or: param type varName = defaultValue;
+        let _type = if self.is_identifier_like() && !matches!(self.peek(1), Token::Equal | Token::Semicolon) {
+            Some(self.extract_identifier()?)
+        } else {
+            None
+        };
+        let var_name = self.extract_identifier()?;
+        let default_value = if self.match_token(&Token::Equal) {
+            self.parse_expression()?
+        } else {
+            Expression::Literal(Literal {
+                value: LiteralValue::String(String::new()),
+                location: loc,
+            })
+        };
+        self.match_token(&Token::Semicolon);
+
+        let condition = Expression::FunctionCall(Box::new(FunctionCall {
+            name: Box::new(Expression::Identifier(Identifier {
+                name: "isDefined".to_string(),
+                location: loc,
+            })),
+            arguments: vec![Expression::Literal(Literal {
+                value: LiteralValue::String(var_name.clone()),
+                location: loc,
+            })],
+            location: loc,
+        }));
+
+        Ok(CfmlNode::Statement(Statement::If(If {
+            condition: Expression::UnaryOp(Box::new(UnaryOp {
+                operator: UnaryOpType::Not,
+                operand: Box::new(condition),
+                location: loc,
+            })),
+            then_branch: vec![Statement::Assignment(Assignment {
+                target: AssignTarget::Variable(var_name),
+                value: default_value,
+                operator: AssignOp::Equal,
+                location: loc,
+            })],
+            else_if: vec![],
+            else_branch: None,
+            location: loc,
+        })))
+    }
+
     fn parse_lock(&mut self, loc: SourceLocation) -> Result<CfmlNode, ParseError> {
         // Parse key=value attributes before the block
         let mut attrs: Vec<(String, Expression)> = Vec::new();
@@ -1303,8 +1547,9 @@ impl Parser {
                 .extract_identifier()
                 .unwrap_or_else(|_| "arg".to_string());
 
-            // If next is also an identifier, then first was the type
-            let name = if let Token::Identifier(_) = self.peek(0) {
+            // If next is also an identifier (or soft keyword usable as identifier),
+            // then first was the type annotation and next is the param name.
+            let name = if self.is_identifier_like() {
                 param_type = Some(first);
                 self.extract_identifier()
                     .unwrap_or_else(|_| "arg".to_string())
@@ -1348,6 +1593,36 @@ impl Parser {
         Ok(statements)
     }
 
+    /// Parse either a braced block or a single statement (CFML allows braceless for/if/while bodies)
+    fn parse_block_or_statement(&mut self) -> Result<Vec<Statement>, ParseError> {
+        if self.check(&Token::LBrace) {
+            self.parse_block()
+        } else {
+            let node = self.parse_statement()?;
+            if let CfmlNode::Statement(s) = node {
+                Ok(vec![s])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    /// Check if the next token can be used as an identifier (true Identifier or soft keyword).
+    fn is_identifier_like(&self) -> bool {
+        self.is_identifier_like_at(0)
+    }
+
+    /// Check if the token at offset can be used as an identifier.
+    fn is_identifier_like_at(&self, offset: usize) -> bool {
+        matches!(self.peek(offset),
+            Token::Identifier(_) | Token::Local | Token::Param | Token::Output
+            | Token::Required | Token::Default | Token::Include | Token::Import
+            | Token::Property | Token::Abstract | Token::Final | Token::Static | Token::Lock
+            | Token::Function | Token::Var | Token::Throw | Token::Component
+            | Token::Interface | Token::Package | Token::Remote
+        )
+    }
+
     fn extract_identifier(&mut self) -> Result<String, ParseError> {
         match self.peek(0) {
             Token::Identifier(_) => {
@@ -1370,6 +1645,13 @@ impl Parser {
             Token::Final => { self.advance(); Ok("final".to_string()) }
             Token::Static => { self.advance(); Ok("static".to_string()) }
             Token::Lock => { self.advance(); Ok("lock".to_string()) }
+            Token::Function => { self.advance(); Ok("function".to_string()) }
+            Token::Var => { self.advance(); Ok("var".to_string()) }
+            Token::Throw => { self.advance(); Ok("throw".to_string()) }
+            Token::Component => { self.advance(); Ok("component".to_string()) }
+            Token::Interface => { self.advance(); Ok("interface".to_string()) }
+            Token::Package => { self.advance(); Ok("package".to_string()) }
+            Token::Remote => { self.advance(); Ok("remote".to_string()) }
             _ => Err(self.parse_error("Expected identifier")),
         }
     }
@@ -1913,7 +2195,25 @@ impl Parser {
                 let expr = self.parse_expression()?;
                 args.push(Expression::Spread(Box::new(expr)));
             } else {
-                args.push(self.parse_expression()?);
+                // Check for named argument: identifier = value
+                // CFML supports foo(name = value, name2 = value2)
+                // We must detect this before parse_expression consumes `=` as assignment.
+                let is_named_arg = (matches!(self.peek(0), Token::Identifier(_)) || self.is_identifier_like())
+                    && matches!(self.peek(1), Token::Equal);
+                if is_named_arg {
+                    let name = self.extract_identifier()?;
+                    self.advance(); // consume =
+                    let value = self.parse_expression()?;
+                    // Encode named arg as a struct entry: argumentCollection-style
+                    // Use a NamedArgument expression node or encode as key:value
+                    args.push(Expression::NamedArgument(Box::new(NamedArgument {
+                        name,
+                        value: Box::new(value),
+                        location: self.current_location(),
+                    })));
+                } else {
+                    args.push(self.parse_expression()?);
+                }
             }
             if !self.match_token(&Token::Comma) {
                 break;
@@ -2149,6 +2449,18 @@ impl Parser {
         self.consume(&Token::LParen)?;
         let params = self.parse_param_list()?;
         self.consume(&Token::RParen)?;
+
+        // Skip optional closure metadata attributes (e.g., `localmode = "classic"`)
+        // These appear between the RParen and LBrace
+        while !self.check(&Token::LBrace) && !self.is_at_end() {
+            if self.is_identifier_like() && matches!(self.peek(1), Token::Equal) {
+                self.advance(); // skip attribute name
+                self.advance(); // skip =
+                self.parse_expression()?; // skip attribute value
+            } else {
+                break;
+            }
+        }
 
         let body = self.parse_block()?;
 

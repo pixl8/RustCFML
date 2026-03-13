@@ -312,12 +312,20 @@ pub enum Expression {
     StringInterpolation(StringInterpolation),
     Elvis(Box<Elvis>),
     Spread(Box<Expression>),
+    NamedArgument(Box<NamedArgument>),
     Empty,
 }
 
 #[derive(Debug, Clone)]
 pub struct StringInterpolation {
     pub parts: Vec<Expression>,
+    pub location: SourceLocation,
+}
+
+#[derive(Debug, Clone)]
+pub struct NamedArgument {
+    pub name: String,
+    pub value: Box<Expression>,
     pub location: SourceLocation,
 }
 
