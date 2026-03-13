@@ -249,8 +249,8 @@ impl Lexer {
         let start_line = self.line;
         let start_column = self.column;
 
-        // For double-quoted strings, handle #expr# interpolation
-        if quote == '"' {
+        // Handle #expr# interpolation in both single and double-quoted strings
+        {
             let mut parts: Vec<(bool, String)> = Vec::new(); // (is_expr, content)
             let mut current_str = String::new();
             let mut has_interpolation = false;
@@ -376,58 +376,6 @@ impl Lexer {
                     ),
                 });
             }
-        } else {
-            // Single-quoted strings: no interpolation
-            let mut value = String::new();
-            while !self.is_at_end() {
-                // Check for closing quote (but doubled quote '' is an escape)
-                if self.current() == quote {
-                    if self.peek(1) == quote {
-                        // Doubled quote: '' → literal '
-                        value.push(quote);
-                        self.advance(); // skip first quote
-                        self.advance(); // skip second quote
-                        continue;
-                    } else {
-                        break; // End of string
-                    }
-                }
-                if self.current() == '\\' {
-                    // CFML: only \n, \t, \r, \\, \# are recognized escape sequences.
-                    // \' is NOT an escape — CFML uses '' for embedded quotes.
-                    let next = self.peek(1);
-                    match next {
-                        'n' | 't' | 'r' | '\\' | '#' => {
-                            self.advance(); // skip backslash
-                            match self.current() {
-                                'n' => value.push('\n'),
-                                't' => value.push('\t'),
-                                'r' => value.push('\r'),
-                                '\\' => value.push('\\'),
-                                '#' => value.push('#'),
-                                _ => unreachable!(),
-                            }
-                        }
-                        _ => {
-                            // Backslash is literal
-                            value.push('\\');
-                        }
-                    }
-                } else {
-                    value.push(self.current());
-                }
-                self.advance();
-            }
-            if !self.is_at_end() {
-                self.advance(); // closing quote
-            }
-            self.tokens.push(TokenWithLoc {
-                token: Token::String(value),
-                location: SourceLocation::new(
-                    Position::new(start_line, start_column),
-                    Position::new(self.line, self.column),
-                ),
-            });
         }
     }
 

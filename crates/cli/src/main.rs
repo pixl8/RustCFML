@@ -352,6 +352,7 @@ fn run_server(doc_root: &Path, port: u16, debug: bool, single_threaded: bool) {
     } else {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
+            .thread_stack_size(8 * 1024 * 1024) // 8MB stack like main thread
             .build()
             .unwrap()
     };

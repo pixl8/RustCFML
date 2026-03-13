@@ -55,10 +55,10 @@ assertTrue("encodeForHTMLAttribute encodes gt", find("&gt;", htmlAttr) > 0);
 assertTrue("encodeForHTMLAttribute encodes quote", find("&quot;", htmlAttr) > 0);
 
 htmlAttrQuote = encodeForHTMLAttribute("it's");
-assertTrue("encodeForHTMLAttribute encodes apos", find('&#x27;', htmlAttrQuote) > 0);
+assertTrue("encodeForHTMLAttribute encodes apos", find('&##x27;', htmlAttrQuote) > 0);
 
 htmlAttrSlash = encodeForHTMLAttribute("a/b");
-assertTrue("encodeForHTMLAttribute encodes slash", find('&#x2f;', htmlAttrSlash) > 0);
+assertTrue("encodeForHTMLAttribute encodes slash", find('&##x2f;', htmlAttrSlash) > 0);
 
 // ========================================
 // encodeForXML
@@ -76,7 +76,7 @@ assertTrue("encodeForXML encodes apos", find("&apos;", xmlApos) > 0);
 // ========================================
 xmlAttr = encodeForXMLAttribute('<tag>' & chr(9) & chr(10));
 assertTrue("encodeForXMLAttribute encodes lt", find("&lt;", xmlAttr) > 0);
-assertTrue("encodeForXMLAttribute encodes tab", find('&#x9;', xmlAttr) > 0);
+assertTrue("encodeForXMLAttribute encodes tab", find('&##x9;', xmlAttr) > 0);
 assertTrue("encodeForXMLAttribute encodes newline", find("&##xA;", xmlAttr) > 0);
 
 // ========================================
@@ -98,7 +98,7 @@ efCss = encodeFor("css", "<div>");
 assertTrue("encodeFor css returns string", len(efCss) > 0);
 
 efHtmlAttr = encodeFor("htmlAttribute", "it's");
-assertTrue("encodeFor htmlAttribute encodes apos", find('&#x27;', efHtmlAttr) > 0);
+assertTrue("encodeFor htmlAttribute encodes apos", find('&##x27;', efHtmlAttr) > 0);
 
 // ========================================
 // decodeForHTML

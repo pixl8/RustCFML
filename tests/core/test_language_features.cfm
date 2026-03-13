@@ -21,9 +21,9 @@ label = "test";
 st = { msg: "label=#label#" };
 assert("interpolation in struct literal", st.msg, "label=test");
 
-// --- String interpolation: with pound in single quotes (no interpolation) ---
-noInterp = 'Hello #name#';
-assert("single quotes no interpolation", noInterp, "Hello ##name##");
+// --- String interpolation: single-quoted strings also interpolate in CFML ---
+singleInterp = 'Hello #name#';
+assert("single quotes interpolation", singleInterp, "Hello World");
 
 // --- Elvis operator: null case ---
 nullVar = javacast("null", "");

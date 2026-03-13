@@ -112,7 +112,7 @@ pub fn compile_file_cached(
 
     // Parse
     let ast = cfml_compiler::parser::Parser::new(source_code).parse().map_err(|e| {
-        CfmlError::runtime(format!("Parse error in '{}': {}", path, e.message))
+        CfmlError::runtime(format!("Parse error in '{}' [line {}, col {}]: {}", path, e.line, e.column, e.message))
     })?;
 
     // Compile
@@ -186,6 +186,9 @@ pub struct CfmlVirtualMachine {
     /// After a component method executes, holds the modified `this` for write-back
     /// to the caller's object variable. Set by execute_function_with_args.
     method_this_writeback: Option<CfmlValue>,
+    /// After a component method executes, holds modified variables scope entries for
+    /// write-back to the component's __variables. Enables `variables.x = y` to persist.
+    method_variables_writeback: Option<IndexMap<String, CfmlValue>>,
     /// After a closure executes, holds modified parent-scope variables for write-back
     /// to the caller's locals. Enables closures to mutate parent scope.
     closure_parent_writeback: Option<IndexMap<String, CfmlValue>>,
@@ -283,6 +286,7 @@ impl CfmlVirtualMachine {
             current_line: 0,
             current_column: 0,
             method_this_writeback: None,
+            method_variables_writeback: None,
             closure_parent_writeback: None,
             request_scope: IndexMap::new(),
             application_scope: None,
@@ -956,11 +960,24 @@ impl CfmlVirtualMachine {
                     if let Some(func_ref) = stack.pop() {
                         self.closure_parent_writeback = None;
                         // For closures with captured scope, merge defining scope + caller locals.
+                        // For CFC method calls (this in locals), caller locals take priority.
                         // For plain UDF calls, pass caller locals by reference (no clone).
                         let merged_scope;
                         let effective_locals = if let CfmlValue::Function(ref f) = func_ref {
                             if let Some(ref shared_env) = f.captured_scope {
-                                merged_scope = {
+                                let is_cfc_context = locals.contains_key("this");
+                                merged_scope = if is_cfc_context {
+                                    // CFC methods: start with captured scope (has runtime data),
+                                    // then overlay functions from caller locals (correct method overrides),
+                                    // then add remaining caller locals (like `this`).
+                                    let mut m = shared_env.read().unwrap().clone();
+                                    for (k, v) in &locals {
+                                        if matches!(v, CfmlValue::Function(_)) || !m.contains_key(k) {
+                                            m.insert(k.clone(), v.clone());
+                                        }
+                                    }
+                                    m
+                                } else {
                                     let mut m = shared_env.read().unwrap().clone();
                                     for (k, v) in &locals {
                                         if !m.contains_key(k) {
@@ -1015,6 +1032,123 @@ impl CfmlVirtualMachine {
                                         err_struct.insert("tagcontext".to_string(), self.build_tag_context());
                                         CfmlValue::Struct(err_struct)
                                     });
+                                    self.last_exception = Some(error_val.clone());
+                                    stack.push(error_val);
+                                    ip = handler.catch_ip;
+                                } else {
+                                    return Err(e);
+                                }
+                            }
+                        }
+                    } else {
+                        stack.push(CfmlValue::Null);
+                    }
+                }
+
+                BytecodeOp::CallNamed(names, arg_count) => {
+                    let mut named_values = Vec::with_capacity(*arg_count);
+                    for _ in 0..*arg_count {
+                        if let Some(v) = stack.pop() { named_values.push(v); }
+                    }
+                    named_values.reverse();
+
+                    if let Some(func_ref) = stack.pop() {
+                        // Reorder named args to match function param positions
+                        let args = if let CfmlValue::Function(ref f) = func_ref {
+                            let mut positional = vec![CfmlValue::Null; f.params.len().max(names.len())];
+                            for (i, name) in names.iter().enumerate() {
+                                if name.is_empty() {
+                                    // Positional arg — keep in place
+                                    if i < positional.len() {
+                                        positional[i] = named_values.get(i).cloned().unwrap_or(CfmlValue::Null);
+                                    }
+                                } else {
+                                    // Named arg — find matching param
+                                    let mut placed = false;
+                                    for (pi, param) in f.params.iter().enumerate() {
+                                        if param.name.eq_ignore_ascii_case(name) {
+                                            if pi < positional.len() {
+                                                positional[pi] = named_values.get(i).cloned().unwrap_or(CfmlValue::Null);
+                                            }
+                                            placed = true;
+                                            break;
+                                        }
+                                    }
+                                    if !placed {
+                                        // No matching param — append at end (will be in arguments scope by position)
+                                        positional.push(named_values.get(i).cloned().unwrap_or(CfmlValue::Null));
+                                    }
+                                }
+                            }
+                            positional
+                        } else {
+                            named_values
+                        };
+
+                        self.closure_parent_writeback = None;
+                        let merged_scope;
+                        let effective_locals = if let CfmlValue::Function(ref f) = func_ref {
+                            if let Some(ref shared_env) = f.captured_scope {
+                                let is_cfc_context = locals.contains_key("this");
+                                merged_scope = if is_cfc_context {
+                                    let mut m = shared_env.read().unwrap().clone();
+                                    for (k, v) in &locals {
+                                        if matches!(v, CfmlValue::Function(_)) || !m.contains_key(k) {
+                                            m.insert(k.clone(), v.clone());
+                                        }
+                                    }
+                                    m
+                                } else {
+                                    let mut m = shared_env.read().unwrap().clone();
+                                    for (k, v) in &locals {
+                                        if !m.contains_key(k) {
+                                            m.insert(k.clone(), v.clone());
+                                        }
+                                    }
+                                    m
+                                };
+                                &merged_scope
+                            } else {
+                                &locals
+                            }
+                        } else {
+                            &locals
+                        };
+                        let saved_try_stack = if self.try_stack.is_empty() {
+                            None
+                        } else {
+                            Some(std::mem::take(&mut self.try_stack))
+                        };
+                        let call_result = self.call_function(&func_ref, args, effective_locals);
+                        if let Some(saved) = saved_try_stack {
+                            self.try_stack = saved;
+                        }
+                        match call_result {
+                            Ok(result) => {
+                                if let Some(ref writeback) = self.closure_parent_writeback {
+                                    Self::write_back_to_captured_scope(&func_ref, writeback);
+                                }
+                                if let Some(writeback) = self.closure_parent_writeback.take() {
+                                    for (k, v) in writeback {
+                                        locals.insert(k, v);
+                                    }
+                                }
+                                stack.push(result);
+                            }
+                            Err(e) => {
+                                if let Some(handler) = self.try_stack.pop() {
+                                    while stack.len() > handler.stack_depth {
+                                        stack.pop();
+                                    }
+                                    let error_val = self.last_exception.clone().unwrap_or_else(|| {
+                                        let mut err_struct = IndexMap::new();
+                                        err_struct.insert("message".to_string(), CfmlValue::String(e.message.clone()));
+                                        err_struct.insert("type".to_string(), CfmlValue::String(format!("{}", e.error_type)));
+                                        err_struct.insert("detail".to_string(), CfmlValue::String(String::new()));
+                                        err_struct.insert("tagcontext".to_string(), self.build_tag_context());
+                                        CfmlValue::Struct(err_struct)
+                                    });
+                                    self.last_exception = Some(error_val.clone());
                                     stack.push(error_val);
                                     ip = handler.catch_ip;
                                 } else {
@@ -1031,6 +1165,22 @@ impl CfmlVirtualMachine {
                     // Save modified 'this' for component method write-back
                     if let Some(this_val) = locals.get("this") {
                         self.method_this_writeback = Some(this_val.clone());
+                        // Save variables scope mutations for component write-back
+                        // Collect all locals that aren't function-internal (args, var-declared, etc.)
+                        let mut vars_wb = IndexMap::new();
+                        for (k, v) in &locals {
+                            let kl = k.to_lowercase();
+                            if kl == "this" || kl == "arguments" || k.starts_with("__")
+                                || func.params.contains(k)
+                                || declared_locals.contains(k.as_str())
+                            {
+                                continue;
+                            }
+                            vars_wb.insert(k.clone(), v.clone());
+                        }
+                        if !vars_wb.is_empty() {
+                            self.method_variables_writeback = Some(vars_wb);
+                        }
                     }
                     // Closure parent scope write-back on early return
                     if let Some(parent) = parent_scope {
@@ -1266,7 +1416,19 @@ impl CfmlVirtualMachine {
                                 if matches!(init_func, CfmlValue::Function(_)) {
                                     let mut init_locals = locals.clone();
                                     init_locals.insert("this".to_string(), instance.clone());
+                                    // Inject component __variables scope for init
+                                    if let CfmlValue::Struct(ref cs) = instance {
+                                        if let Some(CfmlValue::Struct(vars)) = cs.get("__variables") {
+                                            for (k, v) in vars {
+                                                init_locals.insert(k.clone(), v.clone());
+                                            }
+                                        }
+                                    }
+                                    self.closure_parent_writeback = None;
                                     if let Ok(result) = self.call_function(init_func, ctor_args, &init_locals) {
+                                        // Discard any writeback — init runs in its own scope
+                                        self.closure_parent_writeback = None;
+                                        self.method_variables_writeback = None;
                                         // After init, check method_this_writeback for modified this
                                         if let Some(modified_this) = self.method_this_writeback.take() {
                                             modified_this
@@ -1494,6 +1656,7 @@ impl CfmlVirtualMachine {
                                     err_struct.insert("tagcontext".to_string(), self.build_tag_context());
                                     CfmlValue::Struct(err_struct)
                                 });
+                                self.last_exception = Some(error_val.clone());
                                 stack.push(error_val);
                                 ip = handler.catch_ip;
                                 continue;
@@ -1537,6 +1700,42 @@ impl CfmlVirtualMachine {
                                     let props = &path[1..];
                                     Self::deep_set(&mut root_obj, props, modified_this);
                                     self.scope_aware_store(var_name, root_obj, &mut locals);
+                                }
+                            }
+                        }
+                    }
+
+                    // Propagate component method `variables` scope mutations back.
+                    // When a method writes `variables.x = y`, persist it in __variables.
+                    if let Some(vars_wb) = self.method_variables_writeback.take() {
+                        if let Some(ref path) = write_back {
+                            let var_name = &path[0];
+                            // Load the component object, update __variables, store it back
+                            let load_path = if path.len() == 1 { path.clone() } else { path[..path.len()-1].to_vec() };
+                            if let Some(mut comp_obj) = self.scope_aware_load(&load_path[0], &locals) {
+                                if load_path.len() > 1 {
+                                    // Navigate to the component object
+                                    for part in &load_path[1..] {
+                                        comp_obj = comp_obj.get(part).unwrap_or(CfmlValue::Null);
+                                    }
+                                }
+                                if let CfmlValue::Struct(ref mut s) = comp_obj {
+                                    let vars = s.entry("__variables".to_string())
+                                        .or_insert_with(|| CfmlValue::Struct(IndexMap::new()));
+                                    if let CfmlValue::Struct(ref mut vs) = vars {
+                                        for (k, v) in vars_wb {
+                                            vs.insert(k, v);
+                                        }
+                                    }
+                                }
+                                // Store back
+                                if load_path.len() == 1 {
+                                    self.scope_aware_store(var_name, comp_obj, &mut locals);
+                                } else {
+                                    if let Some(mut root_obj) = self.scope_aware_load(var_name, &locals) {
+                                        Self::deep_set(&mut root_obj, &load_path[1..], comp_obj);
+                                        self.scope_aware_store(var_name, root_obj, &mut locals);
+                                    }
                                 }
                             }
                         }
@@ -1614,7 +1813,7 @@ impl CfmlVirtualMachine {
                     let cache = self.server_state.as_ref().map(|s| &s.bytecode_cache);
                     match compile_file_cached(&resolved, cache) {
                         Ok(sub_program) => {
-                            let old_program = std::mem::replace(&mut self.program, sub_program);
+                            let mut old_program = std::mem::replace(&mut self.program, sub_program);
                             let old_source = self.source_file.clone();
                             self.source_file = Some(resolved.clone());
                             let main_idx = self.program.functions.iter()
@@ -1626,9 +1825,128 @@ impl CfmlVirtualMachine {
                             let saved_try_stack = std::mem::take(&mut self.try_stack);
                             let result = self.execute_function_with_args(&inc_func, Vec::new(), Some(&locals));
                             self.try_stack = saved_try_stack;
+                            // For cfinclude inside a component body (indicated by `this`
+                            // being in locals), merge the include's scope changes back
+                            // so cfparam vars and other variables are available to the
+                            // component's methods. This is essential for frameworks like
+                            // Mach-II that define variables via cfinclude in CFC bodies.
+                            if locals.contains_key("this") {
+                                if let Some(inc_locals) = self.captured_locals.take() {
+                                    for (k, v) in inc_locals {
+                                        if k == "arguments" { continue; }
+                                        locals.insert(k, v);
+                                    }
+                                }
+                            } else {
+                                // Discard captured_locals for non-component includes
+                                self.captured_locals.take();
+                            }
+                            // Merge included sub-program's non-main functions into old_program
+                            // so that func_idx references (from DefineFunction) remain valid.
+                            let sub_func_count = self.program.functions.len();
+                            let base_idx = old_program.functions.len();
+                            for i in 0..sub_func_count {
+                                if self.program.functions[i].name != "__main__" {
+                                    old_program.functions.push(self.program.functions[i].clone());
+                                }
+                            }
+                            // Fix func_idx in any CfmlFunction values stored in locals
+                            // that were created by DefineFunction in the include.
+                            // Sub-program index i → old_program index (base_idx + i - 1)
+                            // (subtract 1 because __main__ at index 0 was skipped)
+                            if base_idx > 0 && sub_func_count > 1 {
+                                for (_, v) in locals.iter_mut() {
+                                    Self::fixup_included_func_indices(v, base_idx, sub_func_count);
+                                }
+                                for (_, v) in self.globals.iter_mut() {
+                                    Self::fixup_included_func_indices(v, base_idx, sub_func_count);
+                                }
+                            }
                             self.program = old_program;
                             self.source_file = old_source;
                             // Propagate include errors through try-catch
+                            if let Err(e) = result {
+                                if let Some(handler) = self.try_stack.pop() {
+                                    while stack.len() > handler.stack_depth {
+                                        stack.pop();
+                                    }
+                                    let mut err_struct = IndexMap::new();
+                                    err_struct.insert("message".to_string(), CfmlValue::String(e.message.clone()));
+                                    err_struct.insert("type".to_string(), CfmlValue::String(format!("{}", e.error_type)));
+                                    err_struct.insert("detail".to_string(), CfmlValue::String(String::new()));
+                                    err_struct.insert("tagcontext".to_string(), self.build_tag_context());
+                                    let error_val = CfmlValue::Struct(err_struct);
+                                    stack.push(error_val);
+                                    ip = handler.catch_ip;
+                                } else {
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            return Err(e);
+                        }
+                    }
+                }
+
+                BytecodeOp::IncludeDynamic => {
+                    // Pop dynamic path from stack and include
+                    let path = stack.pop().unwrap_or(CfmlValue::Null).as_string();
+
+                    let resolved = if let Some(ref source) = self.source_file {
+                        let source_dir = std::path::Path::new(source).parent()
+                            .unwrap_or_else(|| std::path::Path::new("."));
+                        source_dir.join(&path).to_string_lossy().to_string()
+                    } else {
+                        path.clone()
+                    };
+
+                    let resolved = if !std::path::Path::new(&resolved).exists() && path.starts_with('/') {
+                        self.resolve_include_with_mappings(&path).unwrap_or(resolved)
+                    } else {
+                        resolved
+                    };
+
+                    let cache = self.server_state.as_ref().map(|s| &s.bytecode_cache);
+                    match compile_file_cached(&resolved, cache) {
+                        Ok(sub_program) => {
+                            let mut old_program = std::mem::replace(&mut self.program, sub_program);
+                            let old_source = self.source_file.clone();
+                            self.source_file = Some(resolved.clone());
+                            let main_idx = self.program.functions.iter()
+                                .position(|f| f.name == "__main__")
+                                .unwrap_or(0);
+                            let inc_func = self.program.functions[main_idx].clone();
+                            let saved_try_stack = std::mem::take(&mut self.try_stack);
+                            let result = self.execute_function_with_args(&inc_func, Vec::new(), Some(&locals));
+                            self.try_stack = saved_try_stack;
+                            if locals.contains_key("this") {
+                                if let Some(inc_locals) = self.captured_locals.take() {
+                                    for (k, v) in inc_locals {
+                                        if k == "arguments" { continue; }
+                                        locals.insert(k, v);
+                                    }
+                                }
+                            } else {
+                                self.captured_locals.take();
+                            }
+                            let sub_func_count = self.program.functions.len();
+                            let base_idx = old_program.functions.len();
+                            for i in 0..sub_func_count {
+                                if self.program.functions[i].name != "__main__" {
+                                    old_program.functions.push(self.program.functions[i].clone());
+                                }
+                            }
+                            if base_idx > 0 && sub_func_count > 1 {
+                                for (_, v) in locals.iter_mut() {
+                                    Self::fixup_included_func_indices(v, base_idx, sub_func_count);
+                                }
+                                for (_, v) in self.globals.iter_mut() {
+                                    Self::fixup_included_func_indices(v, base_idx, sub_func_count);
+                                }
+                            }
+                            self.program = old_program;
+                            self.source_file = old_source;
                             if let Err(e) = result {
                                 if let Some(handler) = self.try_stack.pop() {
                                     while stack.len() > handler.stack_depth {
@@ -1728,9 +2046,24 @@ impl CfmlVirtualMachine {
         // Pop call frame on function exit
         self.call_stack.pop();
 
-        // Save modified 'this' for component method write-back
+        // Save modified 'this' and variables scope for component method write-back
         if let Some(this_val) = locals.get("this") {
             self.method_this_writeback = Some(this_val.clone());
+            // Save variables scope mutations for component write-back
+            let mut vars_wb = IndexMap::new();
+            for (k, v) in &locals {
+                let kl = k.to_lowercase();
+                if kl == "this" || kl == "arguments" || k.starts_with("__")
+                    || func.params.contains(k)
+                    || declared_locals.contains(k.as_str())
+                {
+                    continue;
+                }
+                vars_wb.insert(k.clone(), v.clone());
+            }
+            if !vars_wb.is_empty() {
+                self.method_variables_writeback = Some(vars_wb);
+            }
         }
 
         // Closure parent scope write-back: compute diff of parent-scope vars
@@ -1783,7 +2116,23 @@ impl CfmlVirtualMachine {
                         // Handle closure scope merging
                         let effective_locals;
                         let effective_parent = if let Some(ref shared_env) = func.captured_scope {
-                            effective_locals = {
+                            // For CFC method calls (identified by `this` in parent_locals),
+                            // parent_locals takes priority — it contains __variables with
+                            // correctly overridden methods from inheritance.
+                            // For regular closures, captured scope takes priority (lexical scoping).
+                            let is_cfc_method = parent_locals.contains_key("this");
+                            effective_locals = if is_cfc_method {
+                                // CFC methods: start with captured scope (has runtime data),
+                                // then overlay functions from parent locals (correct method overrides),
+                                // then add remaining parent locals (like `this`).
+                                let mut merged = shared_env.read().unwrap().clone();
+                                for (k, v) in parent_locals {
+                                    if matches!(v, CfmlValue::Function(_)) || !merged.contains_key(k) {
+                                        merged.insert(k.clone(), v.clone());
+                                    }
+                                }
+                                merged
+                            } else {
                                 let mut merged = shared_env.read().unwrap().clone();
                                 for (k, v) in parent_locals {
                                     if !merged.contains_key(k) {
@@ -1813,6 +2162,8 @@ impl CfmlVirtualMachine {
                 }
                 return Ok(CfmlValue::Null);
             }
+
+
             // __writeText: same as writeOutput but suppressed when enableCFOutputOnly > 0
             if name_lower == "__writetext" {
                 if self.enable_cfoutput_only <= 0 {
@@ -5084,6 +5435,8 @@ impl CfmlVirtualMachine {
             if let Some(ref wb) = self.closure_parent_writeback {
                 Self::write_back_to_captured_scope(&func_ref, wb);
             }
+            // Clear writeback — component method calls don't leak to calling scope
+            self.closure_parent_writeback = None;
             return Ok(result);
         }
 
@@ -5252,9 +5605,7 @@ impl CfmlVirtualMachine {
             if let Some(ref shared_env) = f.captured_scope {
                 let mut env = shared_env.write().unwrap();
                 for (k, v) in writeback {
-                    if env.contains_key(k) {
-                        env.insert(k.clone(), v.clone());
-                    }
+                    env.insert(k.clone(), v.clone());
                 }
             }
         }
@@ -5457,7 +5808,15 @@ impl CfmlVirtualMachine {
     /// Adjust func_idx values in CfmlFunction bodies within a component struct.
     /// When sub-program functions are merged into the main program at an offset,
     /// the stored func_idx values need to be updated to reflect their new positions.
+    /// Also fixes up func_idx values inside captured closure scopes so that
+    /// CFC methods sharing a closure environment reference the correct indices.
     fn fixup_func_indices(val: &mut CfmlValue, offset: usize) {
+        // Track which captured scopes we've already fixed (they're shared via Arc)
+        let mut fixed_scopes: Vec<usize> = Vec::new();
+        Self::fixup_func_indices_inner(val, offset, &mut fixed_scopes);
+    }
+
+    fn fixup_func_indices_inner(val: &mut CfmlValue, offset: usize, fixed_scopes: &mut Vec<usize>) {
         match val {
             CfmlValue::Struct(s) => {
                 // We need to collect keys first, then mutate
@@ -5472,9 +5831,63 @@ impl CfmlVirtualMachine {
                                         *idx += offset as i64;
                                     }
                                 }
+                                // Also fix up func_idx values inside the captured scope
+                                if let Some(ref shared_env) = f.captured_scope {
+                                    let ptr = Arc::as_ptr(shared_env) as usize;
+                                    if !fixed_scopes.contains(&ptr) {
+                                        fixed_scopes.push(ptr);
+                                        if let Ok(mut env) = shared_env.write() {
+                                            let env_keys: Vec<String> = env.keys().cloned().collect();
+                                            for ek in env_keys {
+                                                if let Some(ev) = env.get_mut(&ek) {
+                                                    if let CfmlValue::Function(ref mut ef) = ev {
+                                                        if let cfml_common::dynamic::CfmlClosureBody::Expression(ref mut body) = ef.body {
+                                                            if let CfmlValue::Int(ref mut idx) = body.as_mut() {
+                                                                *idx += offset as i64;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             CfmlValue::Struct(_) => {
-                                Self::fixup_func_indices(v, offset);
+                                Self::fixup_func_indices_inner(v, offset, fixed_scopes);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Fix func_idx for functions that came from a cfinclude sub-program.
+    /// Sub-program func at index i (where i > 0, skipping __main__) is now at
+    /// base_idx + (i - 1) in the merged program.
+    fn fixup_included_func_indices(val: &mut CfmlValue, base_idx: usize, sub_func_count: usize) {
+        match val {
+            CfmlValue::Struct(s) => {
+                let keys: Vec<String> = s.keys().cloned().collect();
+                for key in keys {
+                    if let Some(v) = s.get_mut(&key) {
+                        match v {
+                            CfmlValue::Function(ref mut f) => {
+                                if let cfml_common::dynamic::CfmlClosureBody::Expression(ref mut body) = f.body {
+                                    if let CfmlValue::Int(ref mut idx) = body.as_mut() {
+                                        let i = *idx as usize;
+                                        // Only fix indices that belong to the sub-program
+                                        if i > 0 && i < sub_func_count {
+                                            *idx = (base_idx + i - 1) as i64;
+                                        }
+                                    }
+                                }
+                            }
+                            CfmlValue::Struct(_) => {
+                                Self::fixup_included_func_indices(v, base_idx, sub_func_count);
                             }
                             _ => {}
                         }
@@ -5696,6 +6109,9 @@ impl CfmlVirtualMachine {
                     .position(|f| f.name == "__main__")
                     .unwrap_or(0);
                 let cfc_func = self.program.functions[main_idx].clone();
+                // Snapshot user_functions before CFC body execution so we can detect
+                // functions added by cfinclude inside the component body
+                let pre_exec_func_names: std::collections::HashSet<String> = self.user_functions.keys().cloned().collect();
                 let _ = self.execute_function_with_args(&cfc_func, Vec::new(), Some(locals));
                 self.source_file = old_source_file;
                 // Capture component body variables
@@ -5737,22 +6153,65 @@ impl CfmlVirtualMachine {
                 if let Some(CfmlValue::Struct(ref mut s)) = result {
                     s.insert("__source_file".to_string(), CfmlValue::String(cfc_path.clone()));
                 }
-                // Store component body variables as __variables
-                if !component_variables.is_empty() {
-                    if let Some(CfmlValue::Struct(ref mut s)) = result {
-                        let mut vars_scope: IndexMap<String, CfmlValue> = IndexMap::new();
-                        for (k, v) in &component_variables {
-                            let k_lower = k.to_lowercase();
-                            if k_lower == "this" || k_lower == "arguments" || k.starts_with("__")
-                                || matches!(v, CfmlValue::Function(_))
+                // Inject functions added by cfinclude inside the component body
+                // These were registered in user_functions during execution but aren't
+                // in the component struct (which was built at compile time)
+                if let Some(CfmlValue::Struct(ref mut s)) = result {
+                    let existing_keys: std::collections::HashSet<String> = s.keys()
+                        .map(|k| k.to_lowercase())
+                        .collect();
+                    for (func_name, func_def) in &self.user_functions {
+                        if !pre_exec_func_names.contains(func_name)
+                            && !existing_keys.contains(&func_name.to_lowercase())
+                        {
+                            // Find the func_idx in the merged program
+                            if let Some(idx) = self.program.functions.iter()
+                                .position(|f| f.name == *func_name)
                             {
-                                continue;
+                                let cf = CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
+                                    name: func_name.clone(),
+                                    params: func_def.params.iter().map(|name| {
+                                        cfml_common::dynamic::CfmlParam {
+                                            name: name.clone(),
+                                            param_type: None,
+                                            default: None,
+                                            required: false,
+                                        }
+                                    }).collect(),
+                                    body: cfml_common::dynamic::CfmlClosureBody::Expression(
+                                        Box::new(CfmlValue::Int(idx as i64)),
+                                    ),
+                                    return_type: None,
+                                    access: cfml_common::dynamic::CfmlAccess::Public,
+                                    captured_scope: None,
+                                });
+                                s.insert(func_name.clone(), cf);
                             }
+                        }
+                    }
+                }
+                // Store component body variables + all methods as __variables
+                // In CFML, component methods live in the variables scope so
+                // unqualified calls inside methods resolve via the normal scope chain.
+                if let Some(CfmlValue::Struct(ref mut s)) = result {
+                    let mut vars_scope: IndexMap<String, CfmlValue> = IndexMap::new();
+                    // Add component body variables (non-function values from pseudo-constructor)
+                    for (k, v) in &component_variables {
+                        let k_lower = k.to_lowercase();
+                        if k_lower == "this" || k_lower == "arguments" || k.starts_with("__") {
+                            continue;
+                        }
+                        vars_scope.insert(k.clone(), v.clone());
+                    }
+                    // Add all component methods (public + private) to variables scope
+                    for (k, v) in s.iter() {
+                        if k.starts_with("__") { continue; }
+                        if matches!(v, CfmlValue::Function(_)) {
                             vars_scope.insert(k.clone(), v.clone());
                         }
-                        if !vars_scope.is_empty() {
-                            s.insert("__variables".to_string(), CfmlValue::Struct(vars_scope));
-                        }
+                    }
+                    if !vars_scope.is_empty() {
+                        s.insert("__variables".to_string(), CfmlValue::Struct(vars_scope));
                     }
                 }
                 return result;
@@ -6041,6 +6500,13 @@ impl CfmlVirtualMachine {
                 continue; // Already merged above; don't overwrite
             }
             parent_map.insert(k.clone(), v.clone());
+            // Also update __variables when child overrides a method, so
+            // unqualified calls within CFC methods resolve to the override
+            if matches!(v, CfmlValue::Function(_)) && !k.starts_with("__") {
+                if let Some(CfmlValue::Struct(ref mut vars)) = parent_map.get_mut("__variables") {
+                    vars.insert(k.clone(), v.clone());
+                }
+            }
         }
 
         // Add __super struct
@@ -6335,12 +6801,12 @@ impl CfmlVirtualMachine {
     /// Call a lifecycle method on the Application.cfc template
     fn call_lifecycle_method(
         &mut self,
-        template: &CfmlValue,
+        template: &mut CfmlValue,
         method: &str,
         args: Vec<CfmlValue>,
     ) -> Result<bool, CfmlError> {
         let s = match template {
-            CfmlValue::Struct(s) => s,
+            CfmlValue::Struct(ref s) => s.clone(),
             _ => return Ok(false),
         };
 
@@ -6364,7 +6830,35 @@ impl CfmlVirtualMachine {
                     }
                 }
                 parent_locals.insert("this".to_string(), template.clone());
-                match self.call_function(func, args, &parent_locals) {
+                let result = self.call_function(func, args, &parent_locals);
+
+                // Propagate variables scope mutations back into __variables
+                if let Some(vars_wb) = self.method_variables_writeback.take() {
+                    if let CfmlValue::Struct(ref mut ts) = template {
+                        let vars = ts.entry("__variables".to_string())
+                            .or_insert_with(|| CfmlValue::Struct(IndexMap::new()));
+                        if let CfmlValue::Struct(ref mut vs) = vars {
+                            for (k, v) in vars_wb {
+                                vs.insert(k, v);
+                            }
+                        }
+                    }
+                }
+
+                // Propagate this modifications back into template
+                if let Some(modified_this) = self.method_this_writeback.take() {
+                    if let CfmlValue::Struct(ref mut ts) = template {
+                        if let CfmlValue::Struct(ref modified_s) = modified_this {
+                            for (k, v) in modified_s {
+                                if k != "__variables" && k != "__extends" {
+                                    ts.insert(k.clone(), v.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                match result {
                     Ok(_) => Ok(true),
                     Err(e) => Err(e),
                 }
@@ -6384,7 +6878,7 @@ impl CfmlVirtualMachine {
         };
 
         // 2. Load Application.cfc
-        let template = match self.load_application_cfc(&app_cfc_path) {
+        let mut template = match self.load_application_cfc(&app_cfc_path) {
             Some(t) => t,
             None => return self.execute(), // Failed to load, fall through
         };
@@ -6460,7 +6954,7 @@ impl CfmlVirtualMachine {
                 // (e.g. factory components, resource CFCs).
                 let funcs_before = self.program.functions.len();
 
-                match self.call_lifecycle_method(&template, "onApplicationStart", vec![]) {
+                match self.call_lifecycle_method(&mut template, "onApplicationStart", vec![]) {
                     Ok(_) => {
                         // Cache only the functions ADDED during onApplicationStart.
                         let funcs_after = self.program.functions.len();
@@ -6476,7 +6970,7 @@ impl CfmlVirtualMachine {
                         }
                     }
                     Err(e) => {
-                        let _ = self.call_lifecycle_method(&template, "onError", vec![
+                        let _ = self.call_lifecycle_method(&mut template, "onError", vec![
                             CfmlValue::String(e.message.clone()),
                             CfmlValue::String("onApplicationStart".to_string()),
                         ]);
@@ -6517,7 +7011,7 @@ impl CfmlVirtualMachine {
             self.application_scope = Some(scope);
 
             // Still call onApplicationStart in CLI mode
-            let _ = self.call_lifecycle_method(&template, "onApplicationStart", vec![]);
+            let _ = self.call_lifecycle_method(&mut template, "onApplicationStart", vec![]);
         }
 
         // 5b. Session lifecycle
@@ -6541,7 +7035,7 @@ impl CfmlVirtualMachine {
                         drop(sessions);
 
                         // Call onSessionStart
-                        let _ = self.call_lifecycle_method(&template, "onSessionStart", vec![]);
+                        let _ = self.call_lifecycle_method(&mut template, "onSessionStart", vec![]);
                     } else {
                         // Update last_accessed
                         if let Some(session) = sessions.get_mut(&sid) {
@@ -6557,7 +7051,7 @@ impl CfmlVirtualMachine {
         // 6. onRequestStart
         let target_page = self.source_file.clone().unwrap_or_default();
         match self.call_lifecycle_method(
-            &template,
+            &mut template,
             "onRequestStart",
             vec![CfmlValue::String(target_page.clone())],
         ) {
@@ -6576,7 +7070,7 @@ impl CfmlVirtualMachine {
 
         let result = if has_on_request {
             match self.call_lifecycle_method(
-                &template,
+                &mut template,
                 "onRequest",
                 vec![CfmlValue::String(target_page.clone())],
             ) {
@@ -6594,7 +7088,7 @@ impl CfmlVirtualMachine {
 
         // 8. onRequestEnd
         let _ = self.call_lifecycle_method(
-            &template,
+            &mut template,
             "onRequestEnd",
             vec![CfmlValue::String(target_page)],
         );
@@ -6616,7 +7110,7 @@ impl CfmlVirtualMachine {
                     for (sid, session_vars) in &expired {
                         // Call onSessionEnd(sessionScope, applicationScope)
                         let _ = self.call_lifecycle_method(
-                            &template,
+                            &mut template,
                             "onSessionEnd",
                             vec![CfmlValue::Struct(session_vars.clone()), app_scope_val.clone()],
                         );

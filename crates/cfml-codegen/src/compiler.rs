@@ -119,7 +119,8 @@ pub enum BytecodeOp {
     GetKeys,  // Pop value: if struct, push array of keys; if array, leave as-is
 
     // Include
-    Include(String),  // Include and execute a file
+    Include(String),  // Include and execute a file (static path)
+    IncludeDynamic,   // Include: pop path from stack (dynamic expression)
 
     // Null handling
     IsNull,                // Pop value, push bool (true if Null)
@@ -145,6 +146,10 @@ pub enum BytecodeOp {
 
     // Declare a variable as function-local (var keyword) — prevents writeback to parent scope
     DeclareLocal(String),
+
+    // Named function call: like Call but carries argument names for name-to-param mapping
+    // (names, arg_count) — names[i] corresponds to the i-th arg on the stack
+    CallNamed(Vec<String>, usize),
 }
 
 impl CfmlCompiler {
@@ -619,12 +624,16 @@ impl CfmlCompiler {
                 self.compile_interface(&iface_decl.interface, instructions);
             }
             Statement::Include(inc) => {
-                // Extract the path string from the include expression
+                // Static path: emit Include(path) directly
                 if let Expression::Literal(lit) = &inc.path {
                     if let LiteralValue::String(path) = &lit.value {
                         instructions.push(BytecodeOp::Include(path.clone()));
+                        return;
                     }
                 }
+                // Dynamic path: compile expression, pop from stack at runtime
+                self.compile_expression(&inc.path, instructions);
+                instructions.push(BytecodeOp::IncludeDynamic);
             }
             Statement::Import(_) => {
                 // Import not yet supported at bytecode level
@@ -1387,6 +1396,7 @@ impl CfmlCompiler {
                 }
 
                 let has_spread = call.arguments.iter().any(|a| matches!(a, Expression::Spread(_)));
+                let has_named = call.arguments.iter().any(|a| matches!(a, Expression::NamedArgument(_)));
                 if has_spread {
                     // Push function reference first
                     if let Expression::Identifier(ident) = &*call.name {
@@ -1407,6 +1417,25 @@ impl CfmlCompiler {
                         }
                     }
                     instructions.push(BytecodeOp::CallSpread);
+                } else if has_named {
+                    // Named arguments: push function ref, then compile values, emit CallNamed
+                    if let Expression::Identifier(ident) = &*call.name {
+                        instructions.push(BytecodeOp::LoadGlobal(ident.name.clone()));
+                    } else {
+                        self.compile_expression(&call.name, instructions);
+                    }
+                    let mut names = Vec::new();
+                    for arg in &call.arguments {
+                        if let Expression::NamedArgument(named) = arg {
+                            names.push(named.name.clone());
+                            self.compile_expression(&named.value, instructions);
+                        } else {
+                            // Positional arg mixed with named — use empty name
+                            names.push(String::new());
+                            self.compile_expression(arg, instructions);
+                        }
+                    }
+                    instructions.push(BytecodeOp::CallNamed(names, call.arguments.len()));
                 } else {
                     // Push function reference first
                     if let Expression::Identifier(ident) = &*call.name {
@@ -1683,6 +1712,11 @@ impl CfmlCompiler {
                 instructions.push(BytecodeOp::Pop);
                 self.compile_expression(&elvis.right, instructions);
                 instructions[jump_idx] = BytecodeOp::JumpIfNotNull(instructions.len());
+            }
+            Expression::NamedArgument(named) => {
+                // Named arguments are handled at the call site; if we get here
+                // in a non-call context, just compile the value
+                self.compile_expression(&named.value, instructions);
             }
             Expression::Spread(inner) => {
                 // Spread in a general context just compiles the inner expression
