@@ -211,6 +211,11 @@ impl CfmlCompiler {
                         false
                     }
                 }
+                Expression::MethodCall(call) => {
+                    // For chained calls like a.b().c(), extract the root path
+                    // so all calls in the chain write back to the same variable
+                    collect_path(&call.object, path)
+                }
                 _ => false,
             }
         }
