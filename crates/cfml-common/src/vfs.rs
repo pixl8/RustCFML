@@ -352,27 +352,42 @@ pub fn extract_embedded_archive() -> Option<HashMap<String, Vec<u8>>> {
 }
 
 /// Extract archive from raw binary bytes (testable without exe).
+///
+/// On macOS, `codesign` may append a code signature after our archive trailer,
+/// so we scan backwards (up to 64KB) for the RCFML magic bytes.
 pub fn extract_archive_from_bytes(data: &[u8]) -> Option<HashMap<String, Vec<u8>>> {
     let len = data.len();
-    if len < ARCHIVE_MAGIC.len() + 8 {
+    let min_size = ARCHIVE_MAGIC.len() + 8;
+    if len < min_size {
         return None;
     }
 
-    // Check magic bytes at the end
-    let magic_start = len - ARCHIVE_MAGIC.len();
-    if &data[magic_start..] != ARCHIVE_MAGIC.as_slice() {
-        return None;
+    // Scan backwards for RCFML magic (code signature may follow it)
+    let scan_limit = len.saturating_sub(64 * 1024).max(min_size);
+    let mut magic_start = None;
+    let mut pos = len - ARCHIVE_MAGIC.len();
+    while pos >= scan_limit {
+        if &data[pos..pos + ARCHIVE_MAGIC.len()] == ARCHIVE_MAGIC.as_slice() {
+            magic_start = Some(pos);
+            break;
+        }
+        if pos == 0 { break; }
+        pos -= 1;
     }
+    let magic_start = magic_start?;
 
     // Read archive length (u64 LE before magic)
+    if magic_start < 8 {
+        return None;
+    }
     let len_start = magic_start - 8;
     let archive_len = u64::from_le_bytes(data[len_start..len_start + 8].try_into().ok()?) as usize;
 
     // Extract archive data
-    let archive_start = len_start - archive_len;
-    if archive_start > len_start {
+    if archive_len > len_start {
         return None;
     }
+    let archive_start = len_start - archive_len;
     let archive_data = &data[archive_start..len_start];
     deserialize_archive(archive_data).ok()
 }

@@ -150,6 +150,28 @@ Run it:
 ./myserver stop                     # Graceful shutdown
 ```
 
+#### Sandbox Mode
+
+Self-contained binaries can run in **sandbox mode**, which completely isolates the application from the host filesystem.
+
+```plaintext
+./myserver --sandbox                # No host filesystem access
+./myserver --sandbox --port 3000    # Sandbox + custom port
+```
+
+In sandbox mode:
+
+- **Embedded files are readable** — `fileRead()`, `fileExists()`, `directoryList()`, `expandPath()`, and `include` all work against the embedded virtual filesystem. Your application can read its own bundled config files, templates, and assets normally.
+- **Host filesystem is invisible** — `fileExists("/etc/passwd")` returns `false`. `fileRead()` on any host path returns "file not found". The application cannot discover or read files outside the embedded archive.
+- **All writes are blocked** — `fileWrite()`, `fileAppend()`, `fileDelete()`, `directoryCreate()`, and all other write operations throw an error: *"filesystem writes are disabled in sandbox mode"*.
+
+This means even if application code is compromised (e.g. via a code injection vulnerability), the attacker cannot:
+- Read sensitive files from the host (`/etc/passwd`, environment files, SSH keys)
+- Write persistent backdoors, web shells, or malware to disk
+- Modify or delete files on the host system
+
+The embedded virtual filesystem is **read-only and non-persistent** — there is no writable overlay. Any state the application needs to persist should use external services (databases, APIs).
+
 #### Binary Sizes
 
 | Build | Size |
@@ -190,7 +212,7 @@ RustCFML covers a substantial portion of the CFML language:
 - **Threading** — `cfthread` tag (sequential execution model)
 - **Closures** — scope capture with parent write-back, arrow functions, spread operator
 - **WASM target** — compile to WebAssembly via `wasm-bindgen`
-- **Self-contained binaries** — package CFML apps as single executables (CLI tools or web servers)
+- **Self-contained binaries** — package CFML apps as single executables (CLI tools or web servers) with optional sandbox mode for host filesystem isolation
 
 See [Work.md](Work.md) for detailed implementation status.
 

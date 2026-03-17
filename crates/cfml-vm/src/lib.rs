@@ -248,6 +248,8 @@ pub struct CfmlVirtualMachine {
     pub cache: HashMap<String, (CfmlValue, Option<std::time::Instant>)>,
     /// cfsetting enableCFOutputOnly counter (>0 means only cfoutput content is emitted)
     pub enable_cfoutput_only: i32,
+    /// Sandbox mode: blocks host filesystem access, routes reads through VFS
+    pub sandbox: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -318,6 +320,7 @@ impl CfmlVirtualMachine {
             custom_tag_stack: Vec::new(),
             cache: HashMap::new(),
             enable_cfoutput_only: 0,
+            sandbox: false,
         }
     }
 
@@ -372,6 +375,15 @@ impl CfmlVirtualMachine {
             CfmlValue::Struct(entry)
         }).collect();
         CfmlValue::Array(context)
+    }
+
+    fn build_error_struct(e: &CfmlError, tag_context: CfmlValue) -> CfmlValue {
+        let mut err_struct = IndexMap::new();
+        err_struct.insert("message".to_string(), CfmlValue::String(e.message.clone()));
+        err_struct.insert("type".to_string(), CfmlValue::String(format!("{}", e.error_type)));
+        err_struct.insert("detail".to_string(), CfmlValue::String(String::new()));
+        err_struct.insert("tagcontext".to_string(), tag_context);
+        CfmlValue::Struct(err_struct)
     }
 
     fn wrap_error(&self, mut err: CfmlError) -> CfmlError {
@@ -1079,14 +1091,23 @@ impl CfmlVirtualMachine {
                                     while stack.len() > handler.stack_depth {
                                         stack.pop();
                                     }
-                                    let error_val = self.last_exception.clone().unwrap_or_else(|| {
-                                        let mut err_struct = IndexMap::new();
-                                        err_struct.insert("message".to_string(), CfmlValue::String(e.message.clone()));
-                                        err_struct.insert("type".to_string(), CfmlValue::String(format!("{}", e.error_type)));
-                                        err_struct.insert("detail".to_string(), CfmlValue::String(String::new()));
-                                        err_struct.insert("tagcontext".to_string(), self.build_tag_context());
-                                        CfmlValue::Struct(err_struct)
-                                    });
+                                    // Use last_exception only if it was set by this call
+                                    // (e.g. an inner throw). Build from the CfmlError
+                                    // otherwise, to avoid reusing a stale exception from
+                                    // a previous catch block.
+                                    let error_val = if let Some(ref exc) = self.last_exception {
+                                        if let CfmlValue::Struct(ref s) = exc {
+                                            if s.get("message").map(|v| v.as_string()) == Some(e.message.clone()) {
+                                                exc.clone()
+                                            } else {
+                                                Self::build_error_struct(&e, self.build_tag_context())
+                                            }
+                                        } else {
+                                            Self::build_error_struct(&e, self.build_tag_context())
+                                        }
+                                    } else {
+                                        Self::build_error_struct(&e, self.build_tag_context())
+                                    };
                                     self.last_exception = Some(error_val.clone());
                                     stack.push(error_val);
                                     ip = handler.catch_ip;
@@ -1195,14 +1216,19 @@ impl CfmlVirtualMachine {
                                     while stack.len() > handler.stack_depth {
                                         stack.pop();
                                     }
-                                    let error_val = self.last_exception.clone().unwrap_or_else(|| {
-                                        let mut err_struct = IndexMap::new();
-                                        err_struct.insert("message".to_string(), CfmlValue::String(e.message.clone()));
-                                        err_struct.insert("type".to_string(), CfmlValue::String(format!("{}", e.error_type)));
-                                        err_struct.insert("detail".to_string(), CfmlValue::String(String::new()));
-                                        err_struct.insert("tagcontext".to_string(), self.build_tag_context());
-                                        CfmlValue::Struct(err_struct)
-                                    });
+                                    let error_val = if let Some(ref exc) = self.last_exception {
+                                        if let CfmlValue::Struct(ref s) = exc {
+                                            if s.get("message").map(|v| v.as_string()) == Some(e.message.clone()) {
+                                                exc.clone()
+                                            } else {
+                                                Self::build_error_struct(&e, self.build_tag_context())
+                                            }
+                                        } else {
+                                            Self::build_error_struct(&e, self.build_tag_context())
+                                        }
+                                    } else {
+                                        Self::build_error_struct(&e, self.build_tag_context())
+                                    };
                                     self.last_exception = Some(error_val.clone());
                                     stack.push(error_val);
                                     ip = handler.catch_ip;
@@ -1713,14 +1739,19 @@ impl CfmlVirtualMachine {
                                 while stack.len() > handler.stack_depth {
                                     stack.pop();
                                 }
-                                let error_val = self.last_exception.clone().unwrap_or_else(|| {
-                                    let mut err_struct = IndexMap::new();
-                                    err_struct.insert("message".to_string(), CfmlValue::String(e.message.clone()));
-                                    err_struct.insert("type".to_string(), CfmlValue::String(format!("{}", e.error_type)));
-                                    err_struct.insert("detail".to_string(), CfmlValue::String(String::new()));
-                                    err_struct.insert("tagcontext".to_string(), self.build_tag_context());
-                                    CfmlValue::Struct(err_struct)
-                                });
+                                let error_val = if let Some(ref exc) = self.last_exception {
+                                    if let CfmlValue::Struct(ref s) = exc {
+                                        if s.get("message").map(|v| v.as_string()) == Some(e.message.clone()) {
+                                            exc.clone()
+                                        } else {
+                                            Self::build_error_struct(&e, self.build_tag_context())
+                                        }
+                                    } else {
+                                        Self::build_error_struct(&e, self.build_tag_context())
+                                    }
+                                } else {
+                                    Self::build_error_struct(&e, self.build_tag_context())
+                                };
                                 self.last_exception = Some(error_val.clone());
                                 stack.push(error_val);
                                 ip = handler.catch_ip;
@@ -2291,6 +2322,12 @@ impl CfmlVirtualMachine {
                     // Will be handled at the end of this function (needs VM access)
                 }
                 _ => {
+                    // Sandbox mode: intercept file operations
+                    if self.sandbox {
+                        if let Some(result) = self.sandbox_intercept(&name_lower, &args) {
+                            return result;
+                        }
+                    }
                     // Try exact match first, then case-insensitive
                     if let Some(builtin) = self.builtins.get(&func.name) {
                         return builtin(args);
@@ -6640,6 +6677,291 @@ impl CfmlVirtualMachine {
         }
 
         CfmlValue::Struct(parent_map)
+    }
+
+    // ---------------------------------------------------------------------------
+    // Sandbox mode: intercept file builtins
+    // ---------------------------------------------------------------------------
+
+    /// In sandbox mode, intercept file I/O builtins:
+    /// - Read operations route through the VFS (embedded archive)
+    /// - Write operations are blocked
+    /// Returns None if the function is not a file operation (let normal dispatch handle it).
+    fn sandbox_intercept(&self, name: &str, args: &[CfmlValue]) -> Option<CfmlResult> {
+        let get_str = |idx: usize| -> String {
+            args.get(idx).map(|v| v.as_string()).unwrap_or_default()
+        };
+
+        match name {
+            // --- Read operations: route through VFS ---
+            "fileread" => {
+                let path = get_str(0);
+                Some(self.vfs.read_to_string(&path)
+                    .map(CfmlValue::String)
+                    .map_err(|e| CfmlError::runtime(format!("fileRead: {}", e))))
+            }
+            "filereadbinary" => {
+                let path = get_str(0);
+                Some(self.vfs.read(&path)
+                    .map(CfmlValue::Binary)
+                    .map_err(|e| CfmlError::runtime(format!("fileReadBinary: {}", e))))
+            }
+            "fileexists" => {
+                let path = get_str(0);
+                Some(Ok(CfmlValue::Bool(self.vfs.exists(&path))))
+            }
+            "directoryexists" => {
+                let path = get_str(0);
+                Some(Ok(CfmlValue::Bool(self.vfs.is_dir(&path))))
+            }
+            "directorylist" => {
+                let path = get_str(0);
+                let recurse = args.get(1).map(|v| v.is_true()).unwrap_or(false);
+                let list_info = args.get(2).map(|v| v.as_string().to_lowercase()).unwrap_or_else(|| "path".to_string());
+                Some(self.sandbox_directory_list(&path, recurse, &list_info))
+            }
+            "getfileinfo" => {
+                let path = get_str(0);
+                Some(self.sandbox_get_file_info(&path))
+            }
+            "getprofilestring" => {
+                if args.len() < 3 {
+                    return Some(Err(CfmlError::runtime("getProfileString requires 3 arguments".to_string())));
+                }
+                let path = get_str(0);
+                let section = get_str(1);
+                let entry = get_str(2);
+                Some(self.sandbox_get_profile_string(&path, &section, &entry))
+            }
+            "getprofilesections" => {
+                let path = get_str(0);
+                Some(self.sandbox_get_profile_sections(&path))
+            }
+            "filegetmimetype" => {
+                // No FS access needed — just path extension parsing, let builtin handle it
+                None
+            }
+            "filereadline" => {
+                // Route through VFS: read file, return Nth line
+                if let Some(CfmlValue::Struct(handle)) = args.first() {
+                    let path = handle.get("path").map(|v| v.as_string()).unwrap_or_default();
+                    let line_num = handle.get("line").and_then(|v| match v {
+                        CfmlValue::Int(i) => Some(*i as usize),
+                        _ => None,
+                    }).unwrap_or(0);
+                    Some(self.vfs.read_to_string(&path)
+                        .map(|content| {
+                            let lines: Vec<&str> = content.lines().collect();
+                            if line_num < lines.len() {
+                                CfmlValue::String(lines[line_num].to_string())
+                            } else {
+                                CfmlValue::String(String::new())
+                            }
+                        })
+                        .map_err(|e| CfmlError::runtime(format!("fileReadLine: {}", e))))
+                } else {
+                    Some(Err(CfmlError::runtime("fileReadLine requires a file handle".to_string())))
+                }
+            }
+            "fileiseof" => {
+                if let Some(CfmlValue::Struct(handle)) = args.first() {
+                    let path = handle.get("path").map(|v| v.as_string()).unwrap_or_default();
+                    let line_num = handle.get("line").and_then(|v| match v {
+                        CfmlValue::Int(i) => Some(*i as usize),
+                        _ => None,
+                    }).unwrap_or(0);
+                    Some(self.vfs.read_to_string(&path)
+                        .map(|content| CfmlValue::Bool(line_num >= content.lines().count()))
+                        .map_err(|e| CfmlError::runtime(format!("fileIsEOF: {}", e))))
+                } else {
+                    Some(Ok(CfmlValue::Bool(true)))
+                }
+            }
+            "fileopen" => {
+                // Allow opening for read (returns handle struct), but the path must exist in VFS
+                let path = get_str(0);
+                if self.vfs.exists(&path) {
+                    let mut handle = IndexMap::new();
+                    handle.insert("path".to_string(), CfmlValue::String(path));
+                    handle.insert("isOpen".to_string(), CfmlValue::Bool(true));
+                    handle.insert("line".to_string(), CfmlValue::Int(0));
+                    Some(Ok(CfmlValue::Struct(handle)))
+                } else {
+                    Some(Err(CfmlError::runtime(format!("fileOpen: file not found in sandbox: {}", path))))
+                }
+            }
+            "fileclose" => Some(Ok(CfmlValue::Null)),
+            "gettempdirectory" => Some(Ok(CfmlValue::String(std::env::temp_dir().to_string_lossy().to_string()))),
+
+            // --- Write operations: blocked ---
+            "filewrite" | "fileappend" | "filedelete" | "filemove" | "filecopy"
+            | "filewriteline"
+            | "directorycreate" | "directorydelete" | "directoryrename" | "directorycopy"
+            | "setprofilestring"
+            | "filesetaccessmode" | "filesetattribute" | "filesetlastmodified"
+            | "gettempfile" => {
+                Some(Err(CfmlError::runtime(format!(
+                    "{}(): filesystem writes are disabled in sandbox mode", name
+                ))))
+            }
+
+            // --- cfdirectory tag: allow list, block create/delete/rename ---
+            "cfdirectory" | "__cfdirectory" => {
+                if let Some(CfmlValue::Struct(opts)) = args.first() {
+                    let action = opts.iter()
+                        .find(|(k, _)| k.to_lowercase() == "action")
+                        .map(|(_, v)| v.as_string().to_lowercase())
+                        .unwrap_or_else(|| "list".to_string());
+                    match action.as_str() {
+                        "list" => {
+                            let dir = opts.iter()
+                                .find(|(k, _)| k.to_lowercase() == "directory")
+                                .map(|(_, v)| v.as_string())
+                                .unwrap_or_default();
+                            Some(self.sandbox_directory_list(&dir, false, "query"))
+                        }
+                        _ => Some(Err(CfmlError::runtime(format!(
+                            "cfdirectory action='{}': filesystem writes are disabled in sandbox mode", action
+                        )))),
+                    }
+                } else {
+                    None
+                }
+            }
+
+            // Not a file operation — let normal dispatch handle it
+            _ => None,
+        }
+    }
+
+    /// Sandbox directoryList: list entries from the VFS.
+    fn sandbox_directory_list(&self, path: &str, recurse: bool, list_info: &str) -> CfmlResult {
+        let mut entries = Vec::new();
+        self.sandbox_collect_entries(path, recurse, &mut entries)?;
+
+        if list_info == "name" {
+            Ok(CfmlValue::Array(entries.into_iter().map(|(name, _, _)| CfmlValue::String(name)).collect()))
+        } else if list_info == "query" {
+            // Return a query object with name, directory, size, type, dateLastModified columns
+            let mut names = Vec::new();
+            let mut dirs = Vec::new();
+            let mut sizes = Vec::new();
+            let mut types = Vec::new();
+            let mut dates = Vec::new();
+            for (name, full_path, is_dir) in &entries {
+                names.push(CfmlValue::String(name.clone()));
+                dirs.push(CfmlValue::String(path.to_string()));
+                sizes.push(CfmlValue::Int(0));
+                types.push(CfmlValue::String(if *is_dir { "Dir".to_string() } else { "File".to_string() }));
+                dates.push(CfmlValue::String(String::new()));
+                let _ = full_path; // suppress unused
+            }
+            let mut columns = IndexMap::new();
+            columns.insert("name".to_string(), CfmlValue::Array(names));
+            columns.insert("directory".to_string(), CfmlValue::Array(dirs));
+            columns.insert("size".to_string(), CfmlValue::Array(sizes));
+            columns.insert("type".to_string(), CfmlValue::Array(types));
+            columns.insert("datelastmodified".to_string(), CfmlValue::Array(dates));
+            let mut q = IndexMap::new();
+            q.insert("__type".to_string(), CfmlValue::String("query".to_string()));
+            q.insert("__columns".to_string(), CfmlValue::Struct(columns));
+            q.insert("recordcount".to_string(), CfmlValue::Int(entries.len() as i64));
+            Ok(CfmlValue::Struct(q))
+        } else {
+            // "path" mode: return array of full paths
+            Ok(CfmlValue::Array(entries.into_iter().map(|(_, full, _)| CfmlValue::String(full)).collect()))
+        }
+    }
+
+    fn sandbox_collect_entries(&self, path: &str, recurse: bool, out: &mut Vec<(String, String, bool)>) -> Result<(), CfmlError> {
+        let entries = self.vfs.read_dir(path).map_err(|e| CfmlError::runtime(format!("directoryList: {}", e)))?;
+        for entry in entries {
+            let full_path = if path.ends_with('/') {
+                format!("{}{}", path, entry.name)
+            } else {
+                format!("{}/{}", path, entry.name)
+            };
+            out.push((entry.name.clone(), full_path.clone(), entry.is_dir));
+            if recurse && entry.is_dir {
+                self.sandbox_collect_entries(&full_path, true, out)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Sandbox getFileInfo: return metadata from VFS.
+    fn sandbox_get_file_info(&self, path: &str) -> CfmlResult {
+        if !self.vfs.exists(path) {
+            return Err(CfmlError::runtime(format!("getFileInfo: file not found: {}", path)));
+        }
+        let is_file = self.vfs.is_file(path);
+        let name = std::path::Path::new(path).file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let size = if is_file {
+            self.vfs.read(path).map(|d| d.len() as i64).unwrap_or(0)
+        } else {
+            0
+        };
+        let mut info = IndexMap::new();
+        info.insert("name".to_string(), CfmlValue::String(name));
+        info.insert("path".to_string(), CfmlValue::String(path.to_string()));
+        info.insert("size".to_string(), CfmlValue::Int(size));
+        info.insert("type".to_string(), CfmlValue::String(if is_file { "file" } else { "dir" }.to_string()));
+        info.insert("canRead".to_string(), CfmlValue::Bool(true));
+        info.insert("canWrite".to_string(), CfmlValue::Bool(false));
+        info.insert("isHidden".to_string(), CfmlValue::Bool(false));
+        Ok(CfmlValue::Struct(info))
+    }
+
+    /// Sandbox getProfileString: read INI from VFS.
+    fn sandbox_get_profile_string(&self, path: &str, section: &str, entry: &str) -> CfmlResult {
+        let content = self.vfs.read_to_string(path)
+            .map_err(|e| CfmlError::runtime(format!("getProfileString: {}", e)))?;
+        // Simple INI parser inline
+        let section_lower = section.to_lowercase();
+        let entry_lower = entry.to_lowercase();
+        let mut in_section = false;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                let name = trimmed[1..trimmed.len()-1].trim().to_lowercase();
+                in_section = name == section_lower;
+            } else if in_section && trimmed.contains('=') {
+                let (key, val) = trimmed.split_once('=').unwrap();
+                if key.trim().to_lowercase() == entry_lower {
+                    return Ok(CfmlValue::String(val.trim().to_string()));
+                }
+            }
+        }
+        Ok(CfmlValue::String(String::new()))
+    }
+
+    /// Sandbox getProfileSections: read INI sections from VFS.
+    fn sandbox_get_profile_sections(&self, path: &str) -> CfmlResult {
+        let content = self.vfs.read_to_string(path)
+            .map_err(|e| CfmlError::runtime(format!("getProfileSections: {}", e)))?;
+        let mut result = IndexMap::new();
+        let mut current_section = String::new();
+        let mut current_keys: Vec<String> = Vec::new();
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                if !current_section.is_empty() {
+                    result.insert(current_section.clone(), CfmlValue::String(current_keys.join(",")));
+                }
+                current_section = trimmed[1..trimmed.len()-1].trim().to_string();
+                current_keys = Vec::new();
+            } else if !current_section.is_empty() && trimmed.contains('=') {
+                if let Some((key, _)) = trimmed.split_once('=') {
+                    current_keys.push(key.trim().to_string());
+                }
+            }
+        }
+        if !current_section.is_empty() {
+            result.insert(current_section, CfmlValue::String(current_keys.join(",")));
+        }
+        Ok(CfmlValue::Struct(result))
     }
 
     /// Walk up the directory tree from source_file to find Application.cfc

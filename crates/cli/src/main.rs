@@ -133,7 +133,7 @@ fn real_main() {
             eprintln!("Error: Document root is not a directory: {}", doc_root.display());
             exit(1);
         }
-        run_server(&doc_root, args.port, args.debug, args.single_threaded, vfs::real_fs());
+        run_server(&doc_root, args.port, args.debug, args.single_threaded, vfs::real_fs(), false);
         return;
     }
 
@@ -177,7 +177,7 @@ fn execute_code(source: &str, debug: bool) {
 }
 
 fn execute_code_with_file(source: &str, debug: bool, source_file: Option<String>) {
-    match compile_and_run(source, debug, source_file, IndexMap::new(), None, None, None, vfs::real_fs()) {
+    match compile_and_run(source, debug, source_file, IndexMap::new(), None, None, None, vfs::real_fs(), false) {
         Ok(response) => {
             if !response.output.is_empty() {
                 print!("{}", response.output);
@@ -201,8 +201,9 @@ fn compile_and_run_with_session(
     http_request_data: Option<CfmlValue>,
     session_id: Option<String>,
     vfs: Arc<dyn Vfs>,
+    sandbox: bool,
 ) -> Result<CfmlResponse, String> {
-    compile_and_run(source, debug, source_file, extra_globals, server_state, http_request_data, session_id, vfs)
+    compile_and_run(source, debug, source_file, extra_globals, server_state, http_request_data, session_id, vfs, sandbox)
 }
 
 fn compile_and_run(
@@ -214,6 +215,7 @@ fn compile_and_run(
     http_request_data: Option<CfmlValue>,
     session_id: Option<String>,
     vfs: Arc<dyn Vfs>,
+    sandbox: bool,
 ) -> Result<CfmlResponse, String> {
     // In serve mode with a source file, use the bytecode cache to skip recompilation
     let program = if !debug && source_file.is_some() && server_state.is_some() {
@@ -300,6 +302,7 @@ fn compile_and_run(
     // Execute
     let mut vm = CfmlVirtualMachine::new(program);
     vm.vfs = vfs;
+    vm.sandbox = sandbox;
     vm.base_template_path = source_file.clone();
     vm.source_file = source_file;
 
@@ -381,9 +384,10 @@ struct AppState {
     server_state: ServerState,
     rewrite_rules: Vec<rewrite::RewriteRule>,
     vfs: Arc<dyn Vfs>,
+    sandbox: bool,
 }
 
-fn run_server(doc_root: &Path, port: u16, debug: bool, single_threaded: bool, vfs: Arc<dyn Vfs>) {
+fn run_server(doc_root: &Path, port: u16, debug: bool, single_threaded: bool, vfs: Arc<dyn Vfs>, sandbox: bool) {
     let rt = if single_threaded {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -396,10 +400,10 @@ fn run_server(doc_root: &Path, port: u16, debug: bool, single_threaded: bool, vf
             .build()
             .unwrap()
     };
-    rt.block_on(async_run_server(doc_root, port, debug, single_threaded, vfs));
+    rt.block_on(async_run_server(doc_root, port, debug, single_threaded, vfs, sandbox));
 }
 
-async fn async_run_server(doc_root: &Path, port: u16, debug: bool, single_threaded: bool, vfs: Arc<dyn Vfs>) {
+async fn async_run_server(doc_root: &Path, port: u16, debug: bool, single_threaded: bool, vfs: Arc<dyn Vfs>, sandbox: bool) {
     let server_state = ServerState::new();
 
     // Load URL rewrite rules if urlrewrite.xml exists
@@ -425,6 +429,7 @@ async fn async_run_server(doc_root: &Path, port: u16, debug: bool, single_thread
         server_state,
         rewrite_rules,
         vfs,
+        sandbox,
     });
 
     let app = axum::Router::new()
@@ -548,6 +553,7 @@ async fn handle_request(
             let file_path = rf.file_path.to_string_lossy().to_string();
             let server_state = state.server_state.clone();
             let vfs = state.vfs.clone();
+            let sandbox = state.sandbox;
 
             // Extract or generate session ID from cookies
             let session_id = {
@@ -583,6 +589,7 @@ async fn handle_request(
                     Some(http_request_data),
                     Some(session_id_clone),
                     vfs,
+                    sandbox,
                 )
             }).await.unwrap();
 
@@ -1122,6 +1129,13 @@ fn build_self_contained(app_dir: &str, output: &str, mode: &str, entry: &str) {
     // If the current exe already has an archive, strip it first
     let base_binary = strip_existing_archive(&base_binary);
 
+    // On macOS, strip the code signature from the base binary before appending.
+    // Apple Silicon requires signed binaries, so we'll re-sign after writing.
+    #[cfg(target_os = "macos")]
+    let base_binary = strip_macos_signature(base_binary.to_vec());
+    #[cfg(not(target_os = "macos"))]
+    let base_binary = base_binary.to_vec();
+
     // Create self-contained binary
     let output_data = vfs::create_self_contained_binary(&base_binary, &files);
 
@@ -1136,6 +1150,23 @@ fn build_self_contained(app_dir: &str, output: &str, mode: &str, entry: &str) {
         let mut perms = fs::metadata(&output_path).unwrap().permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&output_path, perms).unwrap();
+    }
+
+    // On macOS (especially Apple Silicon), binaries must be code-signed.
+    // The base binary's signature was stripped before appending; now re-sign.
+    #[cfg(target_os = "macos")]
+    {
+        let out = output_path.to_str().unwrap_or("");
+        let status = std::process::Command::new("codesign")
+            .args(["--force", "--sign", "-", "--no-strict", out])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if let Ok(s) = status {
+            if !s.success() {
+                eprintln!("Warning: Failed to re-sign binary (codesign). The binary may not run on macOS.");
+            }
+        }
     }
 
     println!("Built: {} ({:.1} MB)", output_path.display(), output_data.len() as f64 / (1024.0 * 1024.0));
@@ -1177,6 +1208,31 @@ fn collect_files(base: &Path, dir: &Path, files: &mut std::collections::HashMap<
             }
         }
     }
+}
+
+/// Strip macOS code signature from binary data using codesign CLI.
+/// This is needed because appending data to a signed Mach-O invalidates the
+/// signature, and codesign won't re-sign a binary with a stale signature.
+#[cfg(target_os = "macos")]
+fn strip_macos_signature(data: Vec<u8>) -> Vec<u8> {
+    let tmp = std::env::temp_dir().join("rustcfml_strip_sig");
+    if fs::write(&tmp, &data).is_ok() {
+        let status = std::process::Command::new("codesign")
+            .args(["--remove-signature", tmp.to_str().unwrap_or("")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if let Ok(s) = status {
+            if s.success() {
+                if let Ok(stripped) = fs::read(&tmp) {
+                    let _ = fs::remove_file(&tmp);
+                    return stripped;
+                }
+            }
+        }
+        let _ = fs::remove_file(&tmp);
+    }
+    data
 }
 
 /// Strip an existing embedded archive from a binary (if present).
@@ -1242,13 +1298,15 @@ fn run_embedded_app(mut files: std::collections::HashMap<String, Vec<u8>>) {
 fn run_embedded_cli(vfs: Arc<dyn Vfs>, base_dir: &str, entry: &str, file_count: usize) {
     let cli_args: Vec<String> = std::env::args().collect();
 
-    // Check for --help / --version
+    let mut sandbox = false;
+    // Check for --help / --version / --sandbox
     for arg in &cli_args[1..] {
         match arg.as_str() {
             "--version" => {
                 println!("Built with RustCFML v{} ({} embedded files)", env!("CARGO_PKG_VERSION"), file_count);
                 exit(0);
             }
+            "--sandbox" => { sandbox = true; }
             _ => {}
         }
     }
@@ -1309,7 +1367,7 @@ fn run_embedded_cli(vfs: Arc<dyn Vfs>, base_dir: &str, entry: &str, file_count: 
     extra_globals.insert("cli".to_string(), CfmlValue::Struct(cli_scope));
 
     // Execute
-    match compile_and_run(&source, false, Some(entry_path), extra_globals, None, None, None, vfs) {
+    match compile_and_run(&source, false, Some(entry_path), extra_globals, None, None, None, vfs, sandbox) {
         Ok(response) => {
             if !response.output.is_empty() {
                 print!("{}", response.output);
@@ -1329,6 +1387,7 @@ fn run_embedded_serve(vfs: Arc<dyn Vfs>, base_dir: &str, file_count: usize) {
     // Parse args
     let mut port: u16 = 8500;
     let mut single_threaded = false;
+    let mut sandbox = false;
     let mut command = ""; // "", "start", "stop", "status"
     let mut i = 1;
     while i < cli_args.len() {
@@ -1339,6 +1398,10 @@ fn run_embedded_serve(vfs: Arc<dyn Vfs>, base_dir: &str, file_count: usize) {
             }
             "--single-threaded" => {
                 single_threaded = true;
+                i += 1;
+            }
+            "--sandbox" => {
+                sandbox = true;
                 i += 1;
             }
             "--version" => {
@@ -1374,15 +1437,17 @@ fn run_embedded_serve(vfs: Arc<dyn Vfs>, base_dir: &str, file_count: usize) {
         "start" => {
             embedded_start(&pid_file, port, file_count);
             // After daemonizing, the child process continues here
+            if sandbox { println!("Sandbox mode: host filesystem access disabled"); }
             println!("RustCFML self-contained app ({} embedded files)", file_count);
             let doc_root = PathBuf::from(base_dir);
-            run_server(&doc_root, port, false, single_threaded, vfs);
+            run_server(&doc_root, port, false, single_threaded, vfs, sandbox);
         }
         _ => {
             // Foreground mode (default: just run)
+            if sandbox { println!("Sandbox mode: host filesystem access disabled"); }
             println!("RustCFML self-contained app ({} embedded files)", file_count);
             let doc_root = PathBuf::from(base_dir);
-            run_server(&doc_root, port, false, single_threaded, vfs);
+            run_server(&doc_root, port, false, single_threaded, vfs, sandbox);
         }
     }
 }
