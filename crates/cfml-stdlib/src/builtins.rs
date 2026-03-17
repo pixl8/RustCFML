@@ -3439,10 +3439,18 @@ fn fn_now_server(_args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::String(Local::now().format("%Y-%m-%d %H:%M:%S").to_string()))
 }
 
-fn fn_get_tick_count(_args: Vec<CfmlValue>) -> CfmlResult {
+fn fn_get_tick_count(args: Vec<CfmlValue>) -> CfmlResult {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
-    Ok(CfmlValue::Int(ms))
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let unit = args.first()
+        .and_then(|v| if let CfmlValue::String(s) = v { Some(s.to_lowercase()) } else { None })
+        .unwrap_or_else(|| "milli".to_string());
+    let val = match unit.as_str() {
+        "nano" => duration.as_nanos() as i64,
+        "second" => duration.as_secs() as i64,
+        _ => duration.as_millis() as i64,
+    };
+    Ok(CfmlValue::Int(val))
 }
 
 fn fn_get_function_list(_args: Vec<CfmlValue>) -> CfmlResult {
