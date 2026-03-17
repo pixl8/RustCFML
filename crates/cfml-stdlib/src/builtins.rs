@@ -3440,17 +3440,30 @@ fn fn_now_server(_args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn fn_get_tick_count(args: Vec<CfmlValue>) -> CfmlResult {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let unit = args.first()
         .and_then(|v| if let CfmlValue::String(s) = v { Some(s.to_lowercase()) } else { None })
         .unwrap_or_else(|| "milli".to_string());
-    let val = match unit.as_str() {
-        "nano" => duration.as_nanos() as i64,
-        "second" => duration.as_secs() as i64,
-        _ => duration.as_millis() as i64,
-    };
-    Ok(CfmlValue::Int(val))
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let val = match unit.as_str() {
+            "nano" => duration.as_nanos() as i64,
+            "second" => duration.as_secs() as i64,
+            _ => duration.as_millis() as i64,
+        };
+        Ok(CfmlValue::Int(val))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let ms = chrono::Utc::now().timestamp_millis();
+        let val = match unit.as_str() {
+            "nano" => ms * 1_000_000,
+            "second" => ms / 1000,
+            _ => ms,
+        };
+        Ok(CfmlValue::Int(val))
+    }
 }
 
 fn fn_get_function_list(_args: Vec<CfmlValue>) -> CfmlResult {
