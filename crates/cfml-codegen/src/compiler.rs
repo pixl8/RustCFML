@@ -1319,13 +1319,41 @@ impl CfmlCompiler {
                 instructions.push(op);
             }
             Expression::UnaryOp(unary) => {
-                self.compile_expression(&unary.operand, instructions);
-                let op = match unary.operator {
-                    UnaryOpType::Minus => BytecodeOp::Negate,
-                    UnaryOpType::Not => BytecodeOp::Not,
-                    UnaryOpType::BitNot => BytecodeOp::Not,
-                };
-                instructions.push(op);
+                match unary.operator {
+                    UnaryOpType::PrefixIncrement | UnaryOpType::PrefixDecrement => {
+                        // ++i / --i: increment/decrement and leave NEW value on stack
+                        if let Expression::Identifier(ident) = &*unary.operand {
+                            instructions.push(BytecodeOp::LoadLocal(ident.name.clone()));
+                            instructions.push(BytecodeOp::Integer(1));
+                            if matches!(unary.operator, UnaryOpType::PrefixIncrement) {
+                                instructions.push(BytecodeOp::Add);
+                            } else {
+                                instructions.push(BytecodeOp::Sub);
+                            }
+                            instructions.push(BytecodeOp::Dup);
+                            instructions.push(BytecodeOp::StoreLocal(ident.name.clone()));
+                        } else {
+                            // Fallback: evaluate operand, add/subtract 1
+                            self.compile_expression(&unary.operand, instructions);
+                            instructions.push(BytecodeOp::Integer(1));
+                            if matches!(unary.operator, UnaryOpType::PrefixIncrement) {
+                                instructions.push(BytecodeOp::Add);
+                            } else {
+                                instructions.push(BytecodeOp::Sub);
+                            }
+                        }
+                    }
+                    _ => {
+                        self.compile_expression(&unary.operand, instructions);
+                        let op = match unary.operator {
+                            UnaryOpType::Minus => BytecodeOp::Negate,
+                            UnaryOpType::Not => BytecodeOp::Not,
+                            UnaryOpType::BitNot => BytecodeOp::Not,
+                            _ => unreachable!(),
+                        };
+                        instructions.push(op);
+                    }
+                }
             }
             Expression::PostfixOp(postfix) => {
                 if let Expression::Identifier(ident) = &*postfix.operand {

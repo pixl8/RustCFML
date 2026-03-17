@@ -421,6 +421,8 @@ pub enum UnaryOpType {
     Minus,
     Not,
     BitNot,
+    PrefixIncrement,
+    PrefixDecrement,
 }
 
 #[derive(Debug, Clone)]

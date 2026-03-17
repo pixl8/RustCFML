@@ -2084,7 +2084,15 @@ impl Parser {
         if self.match_token(&Token::PlusPlus) {
             let operand = Box::new(self.parse_call()?);
             return Ok(Expression::UnaryOp(Box::new(UnaryOp {
-                operator: UnaryOpType::Minus, // We'll handle prefix increment at compile time
+                operator: UnaryOpType::PrefixIncrement,
+                operand,
+                location: self.current_location(),
+            })));
+        }
+        if self.match_token(&Token::MinusMinus) {
+            let operand = Box::new(self.parse_call()?);
+            return Ok(Expression::UnaryOp(Box::new(UnaryOp {
+                operator: UnaryOpType::PrefixDecrement,
                 operand,
                 location: self.current_location(),
             })));

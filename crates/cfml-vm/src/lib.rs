@@ -497,7 +497,6 @@ impl CfmlVirtualMachine {
                 break;
             }
 
-
             let op = &func.instructions[ip];
             ip += 1;
             let is_inside_function = func.name != "__main__";
@@ -515,13 +514,18 @@ impl CfmlVirtualMachine {
                     let name_lower = name.to_lowercase();
                     let val = if name_lower == "variables" || (name_lower == "local" && is_inside_function) {
                         // Return a struct representing the local/variables scope
-                        // At top level, merge globals so setVariable/direct-global writes are visible
                         if !is_inside_function {
                             let mut merged = self.globals.clone();
                             for (k, v) in &locals {
                                 merged.insert(k.clone(), v.clone());
                             }
                             CfmlValue::Struct(merged)
+                        } else if let Some(CfmlValue::Struct(vars)) = locals.get("__variables") {
+                            // CFC method: variables scope IS the __variables struct.
+                            // Like Lucee/BoxLang, this is a dedicated scope, not a
+                            // merge of all locals. Methods and local vars live in
+                            // their own scopes (local, arguments).
+                            CfmlValue::Struct(vars.clone())
                         } else {
                             CfmlValue::Struct(locals.clone())
                         }
@@ -559,19 +563,27 @@ impl CfmlVirtualMachine {
                         CfmlValue::Struct(info)
                     } else if let Some(val) = locals.get(name.as_str()) {
                         val.clone()
-                    } else if let Some(val) = self.globals.get(name.as_str()) {
-                        val.clone()
                     } else {
-                        // Case-insensitive local lookup
-                        if let Some(val) = locals
-                            .iter()
+                        // Check __variables scope for CFC methods (like Lucee/BoxLang)
+                        let from_vars = if let Some(CfmlValue::Struct(vars)) = locals.get("__variables") {
+                            vars.get(name.as_str()).cloned()
+                                .or_else(|| vars.iter()
+                                    .find(|(k, _)| k.eq_ignore_ascii_case(&name_lower))
+                                    .map(|(_, v)| v.clone()))
+                        } else {
+                            None
+                        };
+                        if let Some(val) = from_vars {
+                            val
+                        } else if let Some(val) = self.globals.get(name.as_str()) {
+                            val.clone()
+                        } else if let Some(val) = locals.iter()
                             .find(|(k, _)| k.to_lowercase() == name_lower)
                             .map(|(_, v)| v.clone()) {
                             val
                         } else if let Some(val) = self.globals.iter()
                             .find(|(k, _)| k.to_lowercase() == name_lower)
                             .map(|(_, v)| v.clone()) {
-                            // Case-insensitive globals lookup
                             val
                         } else {
                             // Variable not found — check try_stack for error handler
@@ -598,7 +610,11 @@ impl CfmlVirtualMachine {
                     // Safe load: returns Null for undefined vars (used by Elvis, null-safe, isNull)
                     let name_lower = name.to_lowercase();
                     let val = if name_lower == "variables" || (name_lower == "local" && is_inside_function) {
-                        CfmlValue::Struct(locals.clone())
+                        if let Some(CfmlValue::Struct(vars)) = locals.get("__variables") {
+                            CfmlValue::Struct(vars.clone())
+                        } else {
+                            CfmlValue::Struct(locals.clone())
+                        }
                     } else if name_lower == "request" {
                         CfmlValue::Struct(self.request_scope.clone())
                     } else if name_lower == "application" {
@@ -615,13 +631,21 @@ impl CfmlVirtualMachine {
                         CfmlValue::Null // server scope handled by LoadLocal
                     } else if let Some(val) = locals.get(name.as_str()) {
                         val.clone()
-                    } else if let Some(val) = self.globals.get(name.as_str()) {
-                        val.clone()
                     } else {
-                        locals
-                            .iter()
-                            .find(|(k, _)| k.to_lowercase() == name_lower)
-                            .map(|(_, v)| v.clone())
+                        // Check __variables scope for CFC methods
+                        let from_vars = if let Some(CfmlValue::Struct(vars)) = locals.get("__variables") {
+                            vars.get(name.as_str()).cloned()
+                                .or_else(|| vars.iter()
+                                    .find(|(k, _)| k.eq_ignore_ascii_case(&name_lower))
+                                    .map(|(_, v)| v.clone()))
+                        } else {
+                            None
+                        };
+                        from_vars
+                            .or_else(|| self.globals.get(name.as_str()).cloned())
+                            .or_else(|| locals.iter()
+                                .find(|(k, _)| k.to_lowercase() == name_lower)
+                                .map(|(_, v)| v.clone()))
                             .or_else(|| self.globals.iter()
                                 .find(|(k, _)| k.to_lowercase() == name_lower)
                                 .map(|(_, v)| v.clone()))
@@ -637,11 +661,15 @@ impl CfmlVirtualMachine {
                     if let Some(val) = stack.pop() {
                         let name_lower = name.to_lowercase();
                         if name_lower == "variables" || (name_lower == "local" && is_inside_function) {
-                            // Writing to local/variables scope: merge keys back
-                            // (preserves arguments, this, etc. that may not be in the snapshot)
                             if let CfmlValue::Struct(s) = val {
-                                for (k, v) in s {
-                                    locals.insert(k, v);
+                                if locals.contains_key("__variables") {
+                                    // CFC method: write back to the __variables scope
+                                    locals.insert("__variables".to_string(), CfmlValue::Struct(s));
+                                } else {
+                                    // Non-CFC: merge keys back into locals
+                                    for (k, v) in s {
+                                        locals.insert(k, v);
+                                    }
                                 }
                             }
                         } else if name_lower == "request" {
@@ -662,6 +690,16 @@ impl CfmlVirtualMachine {
                             }
                         } else if name_lower == "thread" && self.globals.contains_key("thread") {
                             self.globals.insert("thread".to_string(), val);
+                        } else if locals.contains_key("__variables")
+                            && !declared_locals.contains(name)
+                            && !declared_locals.contains(&name_lower)
+                            && !locals.contains_key(name.as_str())
+                            && name_lower != "arguments" && name_lower != "cfcatch"
+                        {
+                            // CFC method: unscoped, non-local variables go to __variables
+                            if let Some(CfmlValue::Struct(ref mut vars)) = locals.get_mut("__variables") {
+                                vars.insert(name.clone(), val);
+                            }
                         } else {
                             locals.insert(name.clone(), val);
                         }
@@ -675,6 +713,16 @@ impl CfmlVirtualMachine {
                     } else if let Some(val) = locals.iter()
                         .find(|(k, _)| k.to_lowercase() == name_lower)
                         .map(|(_, v)| v.clone()) {
+                        stack.push(val);
+                    // 1b. Check __variables scope for CFC methods
+                    } else if let Some(val) = locals.get("__variables").and_then(|v| {
+                        if let CfmlValue::Struct(vars) = v {
+                            vars.get(name.as_str()).cloned()
+                                .or_else(|| vars.iter()
+                                    .find(|(k, _)| k.eq_ignore_ascii_case(&name_lower))
+                                    .map(|(_, v)| v.clone()))
+                        } else { None }
+                    }) {
                         stack.push(val);
                     // 2. Check globals (exact, then CI)
                     } else if let Some(val) = self.globals.get(name.as_str()) {
@@ -970,9 +1018,12 @@ impl CfmlVirtualMachine {
                                     // CFC methods: start with captured scope (has runtime data),
                                     // then overlay functions from caller locals (correct method overrides),
                                     // then add remaining caller locals (like `this`).
+                                    // __variables and this ALWAYS come from caller (current state).
                                     let mut m = shared_env.read().unwrap().clone();
                                     for (k, v) in &locals {
-                                        if matches!(v, CfmlValue::Function(_)) || !m.contains_key(k) {
+                                        if matches!(v, CfmlValue::Function(_)) || !m.contains_key(k)
+                                            || k == "__variables" || k == "this"
+                                        {
                                             m.insert(k.clone(), v.clone());
                                         }
                                     }
@@ -1166,28 +1217,34 @@ impl CfmlVirtualMachine {
                     if let Some(this_val) = locals.get("this") {
                         self.method_this_writeback = Some(this_val.clone());
                         // Save variables scope mutations for component write-back
-                        // Collect all locals that aren't function-internal (args, var-declared, etc.)
-                        let mut vars_wb = IndexMap::new();
-                        for (k, v) in &locals {
-                            let kl = k.to_lowercase();
-                            if kl == "this" || kl == "arguments" || k.starts_with("__")
-                                || func.params.contains(k)
-                                || declared_locals.contains(k.as_str())
-                            {
-                                continue;
+                        if let Some(CfmlValue::Struct(vars)) = locals.get("__variables") {
+                            if !vars.is_empty() {
+                                self.method_variables_writeback = Some(vars.clone());
                             }
-                            vars_wb.insert(k.clone(), v.clone());
-                        }
-                        if !vars_wb.is_empty() {
-                            self.method_variables_writeback = Some(vars_wb);
+                        } else {
+                            let mut vars_wb = IndexMap::new();
+                            for (k, v) in &locals {
+                                let kl = k.to_lowercase();
+                                if kl == "this" || kl == "arguments" || k.starts_with("__")
+                                    || func.params.contains(k)
+                                    || declared_locals.contains(k.as_str())
+                                {
+                                    continue;
+                                }
+                                vars_wb.insert(k.clone(), v.clone());
+                            }
+                            if !vars_wb.is_empty() {
+                                self.method_variables_writeback = Some(vars_wb);
+                            }
                         }
                     }
                     // Closure parent scope write-back on early return
                     if let Some(parent) = parent_scope {
                         let mut writeback = IndexMap::new();
                         for (k, v) in &locals {
-                            // Skip function params, arguments scope, 'this', and var-declared locals
-                            if k == "arguments" || k == "this" || func.params.contains(k)
+                            // Skip function params, arguments scope, 'this', var-declared locals,
+                            if k == "arguments" || k == "this"
+                                || func.params.contains(k)
                                 || declared_locals.contains(k.as_str())
                             {
                                 continue;
@@ -1414,29 +1471,35 @@ impl CfmlVirtualMachine {
                                 .cloned();
                             if let Some(ref init_func) = has_init {
                                 if matches!(init_func, CfmlValue::Function(_)) {
-                                    let mut init_locals = locals.clone();
+                                    // Build init scope from the component's own scope,
+                                    // NOT the caller's locals (which may be a different CFC)
+                                    let mut init_locals = IndexMap::new();
                                     init_locals.insert("this".to_string(), instance.clone());
-                                    // Inject component __variables scope for init
+                                    // Inject component __variables as a dedicated scope (like Lucee/BoxLang)
                                     if let CfmlValue::Struct(ref cs) = instance {
-                                        if let Some(CfmlValue::Struct(vars)) = cs.get("__variables") {
-                                            for (k, v) in vars {
-                                                init_locals.insert(k.clone(), v.clone());
-                                            }
+                                        if let Some(vars) = cs.get("__variables") {
+                                            init_locals.insert("__variables".to_string(), vars.clone());
                                         }
                                     }
                                     self.closure_parent_writeback = None;
-                                    if let Ok(result) = self.call_function(init_func, ctor_args, &init_locals) {
-                                        // Discard any writeback — init runs in its own scope
+                                if let Ok(result) = self.call_function(init_func, ctor_args, &init_locals) {
                                         self.closure_parent_writeback = None;
-                                        self.method_variables_writeback = None;
-                                        // After init, check method_this_writeback for modified this
-                                        if let Some(modified_this) = self.method_this_writeback.take() {
+                                        // Apply variables scope writeback from init() to the component
+                                        let vars_wb = self.method_variables_writeback.take();
+                                        let mut final_obj = if let Some(modified_this) = self.method_this_writeback.take() {
                                             modified_this
                                         } else if let CfmlValue::Struct(_) = &result {
                                             result
                                         } else {
                                             instance
+                                        };
+                                        // Merge init()'s __variables mutations back into the component
+                                        if let Some(vars) = vars_wb {
+                                            if let CfmlValue::Struct(ref mut s) = final_obj {
+                                                s.insert("__variables".to_string(), CfmlValue::Struct(vars));
+                                            }
                                         }
+                                        final_obj
                                     } else {
                                         instance
                                     }
@@ -1596,13 +1659,11 @@ impl CfmlVirtualMachine {
                                         method_locals.insert(k.clone(), v.clone());
                                     }
                                 }
-                                // Inject component __variables scope from this
+                                // Inject component __variables as a dedicated scope
                                 let this_ref = locals.get("this").unwrap_or(&object);
                                 if let CfmlValue::Struct(ref ts) = this_ref {
-                                    if let Some(CfmlValue::Struct(vars)) = ts.get("__variables") {
-                                        for (k, v) in vars {
-                                            method_locals.insert(k.clone(), v.clone());
-                                        }
+                                    if let Some(vars) = ts.get("__variables") {
+                                        method_locals.insert("__variables".to_string(), vars.clone());
                                     }
                                 }
                                 // Use the actual child 'this' from caller's locals
@@ -2050,19 +2111,27 @@ impl CfmlVirtualMachine {
         if let Some(this_val) = locals.get("this") {
             self.method_this_writeback = Some(this_val.clone());
             // Save variables scope mutations for component write-back
-            let mut vars_wb = IndexMap::new();
-            for (k, v) in &locals {
-                let kl = k.to_lowercase();
-                if kl == "this" || kl == "arguments" || k.starts_with("__")
-                    || func.params.contains(k)
-                    || declared_locals.contains(k.as_str())
-                {
-                    continue;
+            if let Some(CfmlValue::Struct(vars)) = locals.get("__variables") {
+                // With dedicated __variables scope, just pass it through
+                if !vars.is_empty() {
+                    self.method_variables_writeback = Some(vars.clone());
                 }
-                vars_wb.insert(k.clone(), v.clone());
-            }
-            if !vars_wb.is_empty() {
-                self.method_variables_writeback = Some(vars_wb);
+            } else {
+                // Non-CFC or legacy path: collect from locals
+                let mut vars_wb = IndexMap::new();
+                for (k, v) in &locals {
+                    let kl = k.to_lowercase();
+                    if kl == "this" || kl == "arguments" || k.starts_with("__")
+                        || func.params.contains(k)
+                        || declared_locals.contains(k.as_str())
+                    {
+                        continue;
+                    }
+                    vars_wb.insert(k.clone(), v.clone());
+                }
+                if !vars_wb.is_empty() {
+                    self.method_variables_writeback = Some(vars_wb);
+                }
             }
         }
 
@@ -2070,8 +2139,10 @@ impl CfmlVirtualMachine {
         if let Some(parent) = parent_scope {
             let mut writeback = IndexMap::new();
             for (k, v) in &locals {
-                // Skip function params, arguments scope, 'this', and var-declared locals
-                if k == "arguments" || k == "this" || func.params.contains(k)
+                // Skip function params, arguments scope, 'this', var-declared locals,
+                // and __variables (handled by method_variables_writeback)
+                if k == "arguments" || k == "this" || k == "__variables"
+                    || func.params.contains(k)
                     || declared_locals.contains(k.as_str())
                 {
                     continue;
@@ -2092,8 +2163,8 @@ impl CfmlVirtualMachine {
             }
         }
 
-        // Capture locals for component variables scope (only for __main__)
-        if func.name == "__main__" {
+        // Capture locals for component variables scope (for __main__ and __cfc_body__)
+        if func.name == "__main__" || func.name == "__cfc_body__" {
             self.captured_locals = Some(locals);
         }
 
@@ -2116,15 +2187,8 @@ impl CfmlVirtualMachine {
                         // Handle closure scope merging
                         let effective_locals;
                         let effective_parent = if let Some(ref shared_env) = func.captured_scope {
-                            // For CFC method calls (identified by `this` in parent_locals),
-                            // parent_locals takes priority — it contains __variables with
-                            // correctly overridden methods from inheritance.
-                            // For regular closures, captured scope takes priority (lexical scoping).
                             let is_cfc_method = parent_locals.contains_key("this");
                             effective_locals = if is_cfc_method {
-                                // CFC methods: start with captured scope (has runtime data),
-                                // then overlay functions from parent locals (correct method overrides),
-                                // then add remaining parent locals (like `this`).
                                 let mut merged = shared_env.read().unwrap().clone();
                                 for (k, v) in parent_locals {
                                     if matches!(v, CfmlValue::Function(_)) || !merged.contains_key(k) {
@@ -4821,8 +4885,11 @@ impl CfmlVirtualMachine {
     /// Load a variable by name, checking locals, globals, and special scopes (application, request, local/variables).
     fn scope_aware_load(&self, name: &str, locals: &IndexMap<String, CfmlValue>) -> Option<CfmlValue> {
         let name_lower = name.to_lowercase();
-        // "local" / "variables" → snapshot of all locals as a struct (mirrors LoadLocal behavior)
+        // "local" / "variables" → snapshot (mirrors LoadLocal behavior)
         if name_lower == "local" || name_lower == "variables" {
+            if let Some(CfmlValue::Struct(vars)) = locals.get("__variables") {
+                return Some(CfmlValue::Struct(vars.clone()));
+            }
             return Some(CfmlValue::Struct(locals.clone()));
         }
         if name_lower == "application" {
@@ -4838,6 +4905,14 @@ impl CfmlVirtualMachine {
         if let Some(v) = locals.get(name) {
             return Some(v.clone());
         }
+        // Check __variables scope for CFC methods
+        if let Some(CfmlValue::Struct(vars)) = locals.get("__variables") {
+            if let Some(v) = vars.get(name).or_else(|| vars.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&name_lower))
+                .map(|(_, v)| v)) {
+                return Some(v.clone());
+            }
+        }
         if let Some(v) = self.globals.get(name) {
             return Some(v.clone());
         }
@@ -4847,11 +4922,15 @@ impl CfmlVirtualMachine {
     /// Store a variable by name, routing to the correct scope (locals, globals, application, request, local/variables).
     fn scope_aware_store(&mut self, name: &str, val: CfmlValue, locals: &mut IndexMap<String, CfmlValue>) {
         let name_lower = name.to_lowercase();
-        // "local" / "variables" → merge keys back into locals (mirrors StoreLocal behavior)
+        // "local" / "variables" → mirrors StoreLocal behavior
         if name_lower == "local" || name_lower == "variables" {
             if let CfmlValue::Struct(s) = val {
-                for (k, v) in s {
-                    locals.insert(k, v);
+                if locals.contains_key("__variables") {
+                    locals.insert("__variables".to_string(), CfmlValue::Struct(s));
+                } else {
+                    for (k, v) in s {
+                        locals.insert(k, v);
+                    }
                 }
             }
         } else if name_lower == "application" {
@@ -5423,10 +5502,8 @@ impl CfmlVirtualMachine {
             // Bind 'this' to the object + inject component variables scope
             let mut method_locals = IndexMap::new();
             if let CfmlValue::Struct(ref s) = object {
-                if let Some(CfmlValue::Struct(vars)) = s.get("__variables") {
-                    for (k, v) in vars {
-                        method_locals.insert(k.clone(), v.clone());
-                    }
+                if let Some(vars) = s.get("__variables") {
+                    method_locals.insert("__variables".to_string(), vars.clone());
                 }
             }
             method_locals.insert("this".to_string(), object.clone());
@@ -5482,6 +5559,11 @@ impl CfmlVirtualMachine {
                     missing_args.insert((i + 1).to_string(), a.clone());
                 }
                 let mut method_locals = IndexMap::new();
+                if let CfmlValue::Struct(ref s2) = object {
+                    if let Some(vars) = s2.get("__variables") {
+                        method_locals.insert("__variables".to_string(), vars.clone());
+                    }
+                }
                 method_locals.insert("this".to_string(), object.clone());
                 return self.call_function(
                     &handler,
@@ -5592,8 +5674,11 @@ impl CfmlVirtualMachine {
                     b.get(k).map_or(false, |bv| Self::values_equal_shallow(v, bv))
                 })
             }
-            // Functions/Closures/Components/Queries/Binary: treat as always different
-            // to ensure write-back happens (avoids recursing into captured scopes).
+            // Functions: compare by name only (avoids recursing into captured scopes).
+            // Functions with the same name are considered equal for writeback diffing
+            // since function definitions don't change at runtime.
+            (CfmlValue::Function(a), CfmlValue::Function(b)) => a.name == b.name,
+            // Components/Queries/Binary: treat as always different
             _ => false,
         }
     }
@@ -6094,11 +6179,6 @@ impl CfmlVirtualMachine {
             }
         };
 
-        if std::env::var("RUSTCFML_DEBUG_RESOLVE").is_ok() {
-            eprintln!("[resolve] class='{}' source_file={:?} base={:?} → cfc_path='{}'  exists={}",
-                class_name, self.source_file, self.base_template_path, cfc_path,
-                std::path::Path::new(&cfc_path).exists());
-        }
         let cache = self.server_state.as_ref().map(|s| &s.bytecode_cache);
         if let Ok(sub_program) = compile_file_cached(&cfc_path, cache) {
                 let old_program = std::mem::replace(&mut self.program, sub_program);
@@ -6112,7 +6192,14 @@ impl CfmlVirtualMachine {
                 // Snapshot user_functions before CFC body execution so we can detect
                 // functions added by cfinclude inside the component body
                 let pre_exec_func_names: std::collections::HashSet<String> = self.user_functions.keys().cloned().collect();
-                let _ = self.execute_function_with_args(&cfc_func, Vec::new(), Some(locals));
+                // CFC body executes with a clean scope — the caller's locals
+                // should NOT leak into the component being constructed.
+                // Mark as "__cfc_body__" so the VM treats it as function scope
+                // (prevents globals leaking into `variables` via LoadLocal)
+                let mut cfc_body = (*cfc_func).clone();
+                cfc_body.name = "__cfc_body__".to_string();
+                let clean_scope = IndexMap::new();
+                let _ = self.execute_function_with_args(&cfc_body, Vec::new(), Some(&clean_scope));
                 self.source_file = old_source_file;
                 // Capture component body variables
                 let component_variables = self.captured_locals.take().unwrap_or_default();
@@ -6594,8 +6681,12 @@ impl CfmlVirtualMachine {
             .position(|f| f.name == "__main__")
             .unwrap_or(0);
         let cfc_func = self.program.functions[main_idx].clone();
+        // Mark as __cfc_body__ so the VM treats it as function scope
+        // (prevents globals leaking into `variables` via LoadLocal)
+        let mut cfc_body = (*cfc_func).clone();
+        cfc_body.name = "__cfc_body__".to_string();
         let empty_locals = IndexMap::new();
-        let _ = self.execute_function_with_args(&cfc_func, Vec::new(), Some(&empty_locals));
+        let _ = self.execute_function_with_args(&cfc_body, Vec::new(), Some(&empty_locals));
 
         // Capture component body locals as the variables scope
         let component_variables = self.captured_locals.take().unwrap_or_default();
@@ -6818,16 +6909,13 @@ impl CfmlVirtualMachine {
 
         match func_val {
             Some(ref func @ CfmlValue::Function(_)) => {
-                // Bind `this` to the template + inject component variables scope
+                // Bind `this` and __variables as a single struct (not expanded)
                 let mut parent_locals = IndexMap::new();
-                // Inject __variables (component body vars like variables.framework)
-                if let Some(CfmlValue::Struct(vars)) = s.iter()
+                if let Some(vars) = s.iter()
                     .find(|(k, _)| *k == "__variables")
                     .map(|(_, v)| v.clone())
                 {
-                    for (k, v) in vars {
-                        parent_locals.insert(k, v);
-                    }
+                    parent_locals.insert("__variables".to_string(), vars);
                 }
                 parent_locals.insert("this".to_string(), template.clone());
                 let result = self.call_function(func, args, &parent_locals);
