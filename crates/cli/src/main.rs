@@ -1169,7 +1169,15 @@ fn build_self_contained(app_dir: &str, output: &str, mode: &str, entry: &str) {
         }
     }
 
-    println!("Built: {} ({:.1} MB)", output_path.display(), output_data.len() as f64 / (1024.0 * 1024.0));
+    // Verify the archive is extractable from the final binary
+    let final_data = fs::read(&output_path).expect("Cannot read output binary for verification");
+    if vfs::extract_archive_from_bytes(&final_data).is_none() {
+        eprintln!("Error: Archive verification failed — the embedded archive is not readable.");
+        eprintln!("This may be caused by code signing. Try running: codesign --remove-signature {}", output_path.display());
+        exit(1);
+    }
+
+    println!("Built: {} ({:.1} MB)", output_path.display(), final_data.len() as f64 / (1024.0 * 1024.0));
     println!("Run with: ./{}", output_path.display());
 }
 

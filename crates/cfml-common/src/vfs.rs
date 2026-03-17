@@ -362,8 +362,12 @@ pub fn extract_archive_from_bytes(data: &[u8]) -> Option<HashMap<String, Vec<u8>
         return None;
     }
 
-    // Scan backwards for RCFML magic (code signature may follow it)
-    let scan_limit = len.saturating_sub(64 * 1024).max(min_size);
+    // Scan backwards for RCFML magic (code signature may follow it).
+    // macOS code signatures scale with binary size (~8 bytes per 4KB page
+    // for SHA-256 hashes, plus overhead). Use 5% of binary size or 1MB,
+    // whichever is larger, to handle any realistic binary.
+    let scan_window = (len / 20).max(1024 * 1024);
+    let scan_limit = len.saturating_sub(scan_window).max(min_size);
     let mut magic_start = None;
     let mut pos = len - ARCHIVE_MAGIC.len();
     while pos >= scan_limit {
