@@ -101,6 +101,65 @@ chmod +x myscript.cfm
 ./myscript.cfm
 ```
 
+### Self-Contained Binaries
+
+Package a CFML application into a single executable — no runtime dependencies, no source files to deploy. The binary includes the RustCFML interpreter, web server, and all your application files.
+
+#### CLI Tools
+
+Build command-line tools from CFML. Arguments are available via the `cli` scope, which works like CFML's `arguments` scope — named keys for flags, 1-based numeric keys for positional args.
+
+```plaintext
+rustcfml --build ./myapp -o greet --mode cli --entry main.cfm
+```
+
+**myapp/main.cfm:**
+```cfml
+<cfscript>
+name = cli.name ?: "World";
+writeOutput("Hello, #name#!" & chr(10));
+
+// Positional args: cli[1], cli[2], ...
+for (i = 1; i <= structCount(cli); i++) {
+    if (isNumeric(i) && structKeyExists(cli, i))
+        writeOutput("  arg #i#: #cli[i]#" & chr(10));
+}
+</cfscript>
+```
+
+```plaintext
+./greet                     # Hello, World!
+./greet --name Alex         # Hello, Alex!
+./greet foo bar             # positional: cli[1]="foo", cli[2]="bar"
+```
+
+#### Web Applications
+
+Package a web application as a single binary with an embedded HTTP server.
+
+```plaintext
+rustcfml --build ./webapp -o myserver --mode serve
+```
+
+Run it:
+```plaintext
+./myserver                          # Foreground on port 8500
+./myserver --port 3000              # Custom port
+./myserver start --port 3000        # Daemonize (background)
+./myserver status                   # Check if running
+./myserver stop                     # Graceful shutdown
+```
+
+#### Binary Sizes
+
+| Build | Size |
+|---|---|
+| Release binary (no app) | ~13 MB |
+| + small web app | ~13 MB |
+| + large app (100+ files) | ~13-15 MB |
+
+No JRE, no runtime, no dependencies. Compare: Lucee/BoxLang require a 200+ MB JRE.
+
 ## Performance
 
 Benchmarked serving a "Hello World" `.cfm` page using Apache Bench (`ab -n 100 -c 1`):
@@ -131,6 +190,7 @@ RustCFML covers a substantial portion of the CFML language:
 - **Threading** — `cfthread` tag (sequential execution model)
 - **Closures** — scope capture with parent write-back, arrow functions, spread operator
 - **WASM target** — compile to WebAssembly via `wasm-bindgen`
+- **Self-contained binaries** — package CFML apps as single executables (CLI tools or web servers)
 
 See [Work.md](Work.md) for detailed implementation status.
 
@@ -196,7 +256,7 @@ const output = CfmlEngine.new().execute('writeOutput("Hello from WASM!");');
 ## Testing
 
 ```plaintext
-cargo run -- tests/runner.cfm    # 1181 assertions across 89 suites
+cargo run -- tests/runner.cfm    # 1197 assertions across 90 suites
 cargo test                        # Rust unit tests
 ```
 

@@ -2,6 +2,7 @@
 
 use cfml_codegen::{BytecodeFunction, BytecodeOp, BytecodeProgram};
 use cfml_common::dynamic::CfmlValue;
+use cfml_common::vfs::{Vfs, RealFs};
 use cfml_common::vm::{CfmlError, CfmlErrorType, CfmlResult};
 use std::collections::HashMap;
 use indexmap::IndexMap;
@@ -64,8 +65,8 @@ impl BytecodeCache {
     }
 
     /// Return a cached program if the file's mtime matches the cached entry.
-    pub fn get(&self, path: &str) -> Option<BytecodeProgram> {
-        let mtime = std::fs::metadata(path).ok()?.modified().ok()?;
+    pub fn get(&self, path: &str, vfs: &dyn Vfs) -> Option<BytecodeProgram> {
+        let mtime = vfs.modified(path).ok()?;
         let entries = self.entries.read();
         let entry = entries.get(path)?;
         if entry.mtime == mtime {
@@ -83,19 +84,21 @@ impl BytecodeCache {
 
 /// Compile a CFML file to bytecode, using the cache when available.
 /// When `cache` is None (CLI mode), always compiles fresh.
+/// Reads source from the provided VFS (real filesystem or embedded).
 pub fn compile_file_cached(
     path: &str,
     cache: Option<&BytecodeCache>,
+    vfs: &dyn Vfs,
 ) -> Result<BytecodeProgram, CfmlError> {
     // Check cache first
     if let Some(c) = cache {
-        if let Some(program) = c.get(path) {
+        if let Some(program) = c.get(path, vfs) {
             return Ok(program);
         }
     }
 
-    // Read source
-    let source_code = std::fs::read_to_string(path).map_err(|e| {
+    // Read source via VFS
+    let source_code = vfs.read_to_string(path).map_err(|e| {
         CfmlError::runtime(format!("Cannot read '{}': {}", path, e))
     })?;
 
@@ -121,10 +124,8 @@ pub fn compile_file_cached(
 
     // Cache the result
     if let Some(c) = cache {
-        if let Ok(meta) = std::fs::metadata(path) {
-            if let Ok(mtime) = meta.modified() {
-                c.insert(path.to_string(), program.clone(), mtime);
-            }
+        if let Ok(mtime) = vfs.modified(path) {
+            c.insert(path.to_string(), program.clone(), mtime);
         }
     }
 
@@ -166,6 +167,8 @@ pub struct CfmlVirtualMachine {
     pub globals: IndexMap<String, CfmlValue>,
     pub builtins: HashMap<String, BuiltinFunction>,
     pub output_buffer: String,
+    /// Virtual filesystem for source file I/O (real disk or embedded archive)
+    pub vfs: Arc<dyn Vfs>,
     /// User-defined functions (name -> function definition)
     pub user_functions: HashMap<String, BytecodeFunction>,
     /// Source file path (for include resolution)
@@ -277,6 +280,7 @@ impl CfmlVirtualMachine {
             globals: IndexMap::new(),
             builtins: HashMap::new(),
             output_buffer: String::new(),
+            vfs: Arc::new(RealFs),
             user_functions: HashMap::new(),
             source_file: None,
             call_stack: Vec::new(),
@@ -1863,7 +1867,7 @@ impl CfmlVirtualMachine {
                     };
 
                     // If relative resolution fails and path starts with "/", try mappings
-                    let resolved = if !std::path::Path::new(&resolved).exists() && path.starts_with('/') {
+                    let resolved = if !self.vfs.exists(&resolved) && path.starts_with('/') {
                         // Convert /taffy/core/foo.cfm → try mapping lookup
                         self.resolve_include_with_mappings(&path).unwrap_or(resolved)
                     } else {
@@ -1872,7 +1876,7 @@ impl CfmlVirtualMachine {
 
                     // Read, parse, compile, and execute the included file
                     let cache = self.server_state.as_ref().map(|s| &s.bytecode_cache);
-                    match compile_file_cached(&resolved, cache) {
+                    match compile_file_cached(&resolved, cache, self.vfs.as_ref()) {
                         Ok(sub_program) => {
                             let mut old_program = std::mem::replace(&mut self.program, sub_program);
                             let old_source = self.source_file.clone();
@@ -1962,14 +1966,14 @@ impl CfmlVirtualMachine {
                         path.clone()
                     };
 
-                    let resolved = if !std::path::Path::new(&resolved).exists() && path.starts_with('/') {
+                    let resolved = if !self.vfs.exists(&resolved) && path.starts_with('/') {
                         self.resolve_include_with_mappings(&path).unwrap_or(resolved)
                     } else {
                         resolved
                     };
 
                     let cache = self.server_state.as_ref().map(|s| &s.bytecode_cache);
-                    match compile_file_cached(&resolved, cache) {
+                    match compile_file_cached(&resolved, cache, self.vfs.as_ref()) {
                         Ok(sub_program) => {
                             let mut old_program = std::mem::replace(&mut self.program, sub_program);
                             let old_source = self.source_file.clone();
@@ -3356,9 +3360,8 @@ impl CfmlVirtualMachine {
                 }
                 "getcurrenttemplatepath" => {
                     if let Some(ref source) = self.source_file {
-                        let path = std::path::Path::new(source);
-                        if let Ok(abs) = std::fs::canonicalize(path) {
-                            return Ok(CfmlValue::String(abs.to_string_lossy().to_string()));
+                        if let Ok(abs) = self.vfs.canonicalize(source) {
+                            return Ok(CfmlValue::String(abs));
                         }
                         return Ok(CfmlValue::String(source.clone()));
                     }
@@ -3370,17 +3373,15 @@ impl CfmlVirtualMachine {
                 }
                 "getbasetemplatepath" => {
                     if let Some(ref base) = self.base_template_path {
-                        let path = std::path::Path::new(base);
-                        if let Ok(abs) = std::fs::canonicalize(path) {
-                            return Ok(CfmlValue::String(abs.to_string_lossy().to_string()));
+                        if let Ok(abs) = self.vfs.canonicalize(base) {
+                            return Ok(CfmlValue::String(abs));
                         }
                         return Ok(CfmlValue::String(base.clone()));
                     }
                     // Fall back to source_file
                     if let Some(ref source) = self.source_file {
-                        let path = std::path::Path::new(source);
-                        if let Ok(abs) = std::fs::canonicalize(path) {
-                            return Ok(CfmlValue::String(abs.to_string_lossy().to_string()));
+                        if let Ok(abs) = self.vfs.canonicalize(source) {
+                            return Ok(CfmlValue::String(abs));
                         }
                         return Ok(CfmlValue::String(source.clone()));
                     }
@@ -3413,9 +3414,10 @@ impl CfmlVirtualMachine {
                     };
 
                     // Canonicalize if it exists, otherwise return the joined path
-                    let result = std::fs::canonicalize(&resolved)
-                        .unwrap_or(resolved);
-                    return Ok(CfmlValue::String(result.to_string_lossy().to_string()));
+                    let path_str = resolved.to_string_lossy().to_string();
+                    let result = self.vfs.canonicalize(&path_str)
+                        .unwrap_or(path_str);
+                    return Ok(CfmlValue::String(result));
                 }
                 "isdefined" => {
                     // Runtime isDefined: argument is a string variable name
@@ -5745,7 +5747,7 @@ impl CfmlVirtualMachine {
                     mapping.path.trim_end_matches('/'),
                     remainder.replace('/', std::path::MAIN_SEPARATOR_STR)
                 );
-                if std::path::Path::new(&cfc_path).exists() {
+                if self.vfs.exists(&cfc_path) {
                     return Some(cfc_path);
                 }
             }
@@ -5773,7 +5775,7 @@ impl CfmlVirtualMachine {
                     mapping.path.trim_end_matches('/'),
                     remainder
                 );
-                if std::path::Path::new(&resolved).exists() {
+                if self.vfs.exists(&resolved) {
                     return Some(resolved);
                 }
             }
@@ -5800,25 +5802,25 @@ impl CfmlVirtualMachine {
             if let Some(ref source) = self.source_file {
                 let source_dir = std::path::Path::new(source).parent()
                     .unwrap_or_else(|| std::path::Path::new("."));
-                let candidate = source_dir.join(&filename);
-                if candidate.exists() {
-                    return Ok(candidate.to_string_lossy().to_string());
+                let candidate = source_dir.join(&filename).to_string_lossy().to_string();
+                if self.vfs.exists(&candidate) {
+                    return Ok(candidate);
                 }
             }
 
             // 2) Look in custom_tag_paths
             for dir in &self.custom_tag_paths {
-                let candidate = std::path::Path::new(dir).join(&filename);
-                if candidate.exists() {
-                    return Ok(candidate.to_string_lossy().to_string());
+                let candidate = std::path::Path::new(dir).join(&filename).to_string_lossy().to_string();
+                if self.vfs.exists(&candidate) {
+                    return Ok(candidate);
                 }
             }
 
             // 3) Look in mappings
             for mapping in &self.mappings {
-                let candidate = std::path::Path::new(&mapping.path).join(&filename);
-                if candidate.exists() {
-                    return Ok(candidate.to_string_lossy().to_string());
+                let candidate = std::path::Path::new(&mapping.path).join(&filename).to_string_lossy().to_string();
+                if self.vfs.exists(&candidate) {
+                    return Ok(candidate);
                 }
             }
 
@@ -5830,16 +5832,16 @@ impl CfmlVirtualMachine {
 
             // Search in custom_tag_paths then mappings
             for dir in &self.custom_tag_paths {
-                let candidate = std::path::Path::new(dir).join(&rel_path);
-                if candidate.exists() {
-                    return Ok(candidate.to_string_lossy().to_string());
+                let candidate = std::path::Path::new(dir).join(&rel_path).to_string_lossy().to_string();
+                if self.vfs.exists(&candidate) {
+                    return Ok(candidate);
                 }
             }
 
             for mapping in &self.mappings {
-                let candidate = std::path::Path::new(&mapping.path).join(&rel_path);
-                if candidate.exists() {
-                    return Ok(candidate.to_string_lossy().to_string());
+                let candidate = std::path::Path::new(&mapping.path).join(&rel_path).to_string_lossy().to_string();
+                if self.vfs.exists(&candidate) {
+                    return Ok(candidate);
                 }
             }
 
@@ -5854,7 +5856,7 @@ impl CfmlVirtualMachine {
                 path_spec.to_string()
             };
 
-            if std::path::Path::new(&resolved).exists() {
+            if self.vfs.exists(&resolved) {
                 Ok(resolved)
             } else {
                 Err(CfmlError::runtime(format!("Custom tag template '{}' not found", path_spec)))
@@ -5870,7 +5872,7 @@ impl CfmlVirtualMachine {
         tag_locals: &IndexMap<String, CfmlValue>,
     ) -> Result<(), CfmlError> {
         let cache = self.server_state.as_ref().map(|s| &s.bytecode_cache);
-        let sub_program = compile_file_cached(template_path, cache)?;
+        let sub_program = compile_file_cached(template_path, cache, self.vfs.as_ref())?;
 
         let old_program = std::mem::replace(&mut self.program, sub_program);
         let old_source = self.source_file.clone();
@@ -6138,7 +6140,7 @@ impl CfmlVirtualMachine {
                 } else {
                     format!("{}.cfc", class_name)
                 };
-                if std::path::Path::new(&p).exists() {
+                if self.vfs.exists(&p) {
                     p
                 } else if let Some(ref source) = self.source_file {
                     // Try relative to source file
@@ -6158,7 +6160,7 @@ impl CfmlVirtualMachine {
                 } else {
                     format!("{}.cfc", class_name.replace('.', std::path::MAIN_SEPARATOR_STR))
                 };
-                if std::path::Path::new(&relative_path).exists() {
+                if self.vfs.exists(&relative_path) {
                     relative_path
                 } else if let Some(mapped) = self.resolve_path_with_mappings(class_name) {
                     mapped
@@ -6168,7 +6170,7 @@ impl CfmlVirtualMachine {
                         .unwrap_or_else(|| std::path::Path::new("."));
                     let file_name = class_name.replace('.', std::path::MAIN_SEPARATOR_STR);
                     let base_path = base_dir.join(format!("{}.cfc", file_name)).to_string_lossy().to_string();
-                    if std::path::Path::new(&base_path).exists() {
+                    if self.vfs.exists(&base_path) {
                         base_path
                     } else {
                         relative_path
@@ -6180,7 +6182,7 @@ impl CfmlVirtualMachine {
         };
 
         let cache = self.server_state.as_ref().map(|s| &s.bytecode_cache);
-        if let Ok(sub_program) = compile_file_cached(&cfc_path, cache) {
+        if let Ok(sub_program) = compile_file_cached(&cfc_path, cache, self.vfs.as_ref()) {
                 let old_program = std::mem::replace(&mut self.program, sub_program);
                 // Set source_file to CFC path so parent resolution works relative to CFC
                 let old_source_file = self.source_file.clone();
@@ -6652,13 +6654,13 @@ impl CfmlVirtualMachine {
 
         let mut dir = start_dir.as_path();
         loop {
-            // Check for Application.cfc (case-insensitive)
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        if name.to_lowercase() == "application.cfc" {
-                            return Some(entry.path().to_string_lossy().to_string());
-                        }
+            // Check for Application.cfc (case-insensitive) via VFS
+            let dir_str = dir.to_string_lossy().to_string();
+            if let Ok(entries) = self.vfs.read_dir(&dir_str) {
+                for entry in &entries {
+                    if entry.name.to_lowercase() == "application.cfc" {
+                        let full_path = dir.join(&entry.name).to_string_lossy().to_string();
+                        return Some(full_path);
                     }
                 }
             }
@@ -6673,7 +6675,7 @@ impl CfmlVirtualMachine {
     /// Load and execute Application.cfc, returning the component struct
     fn load_application_cfc(&mut self, path: &str) -> Option<CfmlValue> {
         let cache = self.server_state.as_ref().map(|s| &s.bytecode_cache);
-        let sub_program = compile_file_cached(path, cache).ok()?;
+        let sub_program = compile_file_cached(path, cache, self.vfs.as_ref()).ok()?;
 
         // Save current program, swap in sub-program
         let old_program = std::mem::replace(&mut self.program, sub_program);
@@ -6758,9 +6760,8 @@ impl CfmlVirtualMachine {
             let expanded = if std::path::Path::new(&mapping.path).is_absolute() {
                 mapping.path.clone()
             } else {
-                app_cfc_dir.join(&mapping.path).canonicalize()
-                    .unwrap_or_else(|_| app_cfc_dir.join(&mapping.path))
-                    .to_string_lossy().to_string()
+                let joined = app_cfc_dir.join(&mapping.path).to_string_lossy().to_string();
+                self.vfs.canonicalize(&joined).unwrap_or(joined)
             };
             mapping.path = expanded;
         }
@@ -6981,9 +6982,8 @@ impl CfmlVirtualMachine {
             let expanded = if std::path::Path::new(&mapping.path).is_absolute() {
                 mapping.path.clone()
             } else {
-                app_cfc_dir.join(&mapping.path).canonicalize()
-                    .unwrap_or_else(|_| app_cfc_dir.join(&mapping.path))
-                    .to_string_lossy().to_string()
+                let joined = app_cfc_dir.join(&mapping.path).to_string_lossy().to_string();
+                self.vfs.canonicalize(&joined).unwrap_or(joined)
             };
             mapping.path = expanded;
         }
@@ -7003,13 +7003,13 @@ impl CfmlVirtualMachine {
         self.mappings = mappings;
 
         // 3c. Expand customTagPaths relative to Application.cfc directory
+        let vfs = &self.vfs;
         self.custom_tag_paths = custom_tag_paths.into_iter().map(|p| {
             if std::path::Path::new(&p).is_absolute() {
                 p
             } else {
-                app_cfc_dir.join(&p).canonicalize()
-                    .unwrap_or_else(|_| app_cfc_dir.join(&p))
-                    .to_string_lossy().to_string()
+                let joined = app_cfc_dir.join(&p).to_string_lossy().to_string();
+                vfs.canonicalize(&joined).unwrap_or(joined)
             }
         }).collect();
 

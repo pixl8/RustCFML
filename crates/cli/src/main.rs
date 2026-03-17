@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use cfml_codegen::compiler::CfmlCompiler;
 use cfml_common::dynamic::CfmlValue;
+use cfml_common::vfs::{self, Vfs};
 use cfml_compiler::lexer;
 use cfml_compiler::parser::Parser as CfmlParser;
 use cfml_compiler::tag_parser;
@@ -55,6 +56,23 @@ struct Args {
     /// Use single-threaded async runtime (lower memory, lower concurrency)
     #[arg(long)]
     single_threaded: bool,
+
+    /// Build a self-contained binary: embed a CFML app into a single executable
+    /// Usage: rustcfml --build <app-dir> [-o output-binary] [--mode serve|cli]
+    #[arg(long, value_name = "APP_DIR")]
+    build: Option<String>,
+
+    /// Output path for the built binary (default: ./app)
+    #[arg(short, long, default_value = "app")]
+    output: String,
+
+    /// Build mode: "serve" for web server (default), "cli" for command-line tool
+    #[arg(long, default_value = "serve")]
+    mode: String,
+
+    /// Entry point for CLI mode (default: main.cfm)
+    #[arg(long, default_value = "main.cfm")]
+    entry: String,
 }
 
 /// Encapsulates the full response from CFML execution, including HTTP metadata.
@@ -81,6 +99,12 @@ fn main() {
 }
 
 fn real_main() {
+    // Check for embedded archive — if present, run as self-contained app
+    if let Some(files) = vfs::extract_embedded_archive() {
+        run_embedded_app(files);
+        return;
+    }
+
     let args = Args::parse();
 
     if args.version {
@@ -92,13 +116,24 @@ fn real_main() {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
     }
 
+    // Handle --build <app-dir>
+    if let Some(ref app_dir) = args.build {
+        let mode = args.mode.to_lowercase();
+        if mode != "serve" && mode != "cli" {
+            eprintln!("Error: --mode must be 'serve' or 'cli'");
+            exit(1);
+        }
+        build_self_contained(app_dir, &args.output, &mode, &args.entry);
+        return;
+    }
+
     if let Some(ref doc_root) = args.serve {
         let doc_root = PathBuf::from(doc_root);
         if !doc_root.is_dir() {
             eprintln!("Error: Document root is not a directory: {}", doc_root.display());
             exit(1);
         }
-        run_server(&doc_root, args.port, args.debug, args.single_threaded);
+        run_server(&doc_root, args.port, args.debug, args.single_threaded, vfs::real_fs());
         return;
     }
 
@@ -118,6 +153,7 @@ fn real_main() {
         println!("       rustcfml -c \"<code>\"");
         println!("       rustcfml -r (REPL mode)");
         println!("       rustcfml --serve [path] [--port 8500]");
+        println!("       rustcfml --build <app-dir> [-o output]");
         println!("       rustcfml --help");
         exit(0);
     }
@@ -141,7 +177,7 @@ fn execute_code(source: &str, debug: bool) {
 }
 
 fn execute_code_with_file(source: &str, debug: bool, source_file: Option<String>) {
-    match compile_and_run(source, debug, source_file, IndexMap::new(), None, None, None) {
+    match compile_and_run(source, debug, source_file, IndexMap::new(), None, None, None, vfs::real_fs()) {
         Ok(response) => {
             if !response.output.is_empty() {
                 print!("{}", response.output);
@@ -164,8 +200,9 @@ fn compile_and_run_with_session(
     server_state: Option<&ServerState>,
     http_request_data: Option<CfmlValue>,
     session_id: Option<String>,
+    vfs: Arc<dyn Vfs>,
 ) -> Result<CfmlResponse, String> {
-    compile_and_run(source, debug, source_file, extra_globals, server_state, http_request_data, session_id)
+    compile_and_run(source, debug, source_file, extra_globals, server_state, http_request_data, session_id, vfs)
 }
 
 fn compile_and_run(
@@ -176,12 +213,13 @@ fn compile_and_run(
     server_state: Option<&ServerState>,
     http_request_data: Option<CfmlValue>,
     session_id: Option<String>,
+    vfs: Arc<dyn Vfs>,
 ) -> Result<CfmlResponse, String> {
     // In serve mode with a source file, use the bytecode cache to skip recompilation
     let program = if !debug && source_file.is_some() && server_state.is_some() {
         let path = source_file.as_ref().unwrap();
         let cache = &server_state.unwrap().bytecode_cache;
-        compile_file_cached(path, Some(cache)).map_err(|e| format!("{}", e))?
+        compile_file_cached(path, Some(cache), vfs.as_ref()).map_err(|e| format!("{}", e))?
     } else {
         // CLI mode / inline code / debug: full pipeline
         // Strip shebang line if present (e.g. #!/usr/bin/env rustcfml)
@@ -261,6 +299,7 @@ fn compile_and_run(
 
     // Execute
     let mut vm = CfmlVirtualMachine::new(program);
+    vm.vfs = vfs;
     vm.base_template_path = source_file.clone();
     vm.source_file = source_file;
 
@@ -341,9 +380,10 @@ struct AppState {
     debug: bool,
     server_state: ServerState,
     rewrite_rules: Vec<rewrite::RewriteRule>,
+    vfs: Arc<dyn Vfs>,
 }
 
-fn run_server(doc_root: &Path, port: u16, debug: bool, single_threaded: bool) {
+fn run_server(doc_root: &Path, port: u16, debug: bool, single_threaded: bool, vfs: Arc<dyn Vfs>) {
     let rt = if single_threaded {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -356,15 +396,16 @@ fn run_server(doc_root: &Path, port: u16, debug: bool, single_threaded: bool) {
             .build()
             .unwrap()
     };
-    rt.block_on(async_run_server(doc_root, port, debug, single_threaded));
+    rt.block_on(async_run_server(doc_root, port, debug, single_threaded, vfs));
 }
 
-async fn async_run_server(doc_root: &Path, port: u16, debug: bool, single_threaded: bool) {
+async fn async_run_server(doc_root: &Path, port: u16, debug: bool, single_threaded: bool, vfs: Arc<dyn Vfs>) {
     let server_state = ServerState::new();
 
     // Load URL rewrite rules if urlrewrite.xml exists
     let rewrite_xml = doc_root.join("urlrewrite.xml");
-    let rewrite_rules = if rewrite_xml.is_file() {
+    let rewrite_xml_str = rewrite_xml.to_string_lossy().to_string();
+    let rewrite_rules = if vfs.is_file(&rewrite_xml_str) {
         let rules = rewrite::parse_urlrewrite_xml(&rewrite_xml);
         println!("Loaded {} URL rewrite rule(s) from urlrewrite.xml", rules.len());
         rules
@@ -383,6 +424,7 @@ async fn async_run_server(doc_root: &Path, port: u16, debug: bool, single_thread
         debug,
         server_state,
         rewrite_rules,
+        vfs,
     });
 
     let app = axum::Router::new()
@@ -474,7 +516,7 @@ async fn handle_request(
     }
 
     // Resolve file path from URL
-    let resolved = resolve_file(&state.doc_root, &path);
+    let resolved = resolve_file(&state.doc_root, &path, state.vfs.as_ref());
 
     match resolved {
         Some(ref rf) if rf.file_path.extension().map_or(false, |e| e == "cfm") => {
@@ -505,6 +547,7 @@ async fn handle_request(
 
             let file_path = rf.file_path.to_string_lossy().to_string();
             let server_state = state.server_state.clone();
+            let vfs = state.vfs.clone();
 
             // Extract or generate session ID from cookies
             let session_id = {
@@ -539,6 +582,7 @@ async fn handle_request(
                     Some(&server_state),
                     Some(http_request_data),
                     Some(session_id_clone),
+                    vfs,
                 )
             }).await.unwrap();
 
@@ -607,8 +651,8 @@ async fn handle_request(
             }
         }
         Some(ref rf) => {
-            // Serve static file
-            match fs::read(&rf.file_path) {
+            // Serve static file (via VFS for embedded support)
+            match state.vfs.read(&rf.file_path.to_string_lossy()) {
                 Ok(data) => {
                     let ct = content_type_for(&rf.file_path);
                     axum::response::Response::builder()
@@ -651,14 +695,15 @@ struct ResolvedFile {
 }
 
 /// Resolve a URL path to a file in the document root.
-fn resolve_file(doc_root: &Path, url_path: &str) -> Option<ResolvedFile> {
+fn resolve_file(doc_root: &Path, url_path: &str, vfs: &dyn Vfs) -> Option<ResolvedFile> {
     // Normalize: strip leading slash, default to index.cfm
     let relative = url_path.trim_start_matches('/');
 
     // Try exact path first
     if !relative.is_empty() {
         let candidate = doc_root.join(relative);
-        if candidate.is_file() {
+        let candidate_str = candidate.to_string_lossy().to_string();
+        if vfs.is_file(&candidate_str) {
             return Some(ResolvedFile {
                 file_path: candidate,
                 script_name: format!("/{}", relative),
@@ -667,7 +712,8 @@ fn resolve_file(doc_root: &Path, url_path: &str) -> Option<ResolvedFile> {
         }
         // Try as directory with index.cfm
         let dir_index = doc_root.join(relative).join("index.cfm");
-        if dir_index.is_file() {
+        let dir_index_str = dir_index.to_string_lossy().to_string();
+        if vfs.is_file(&dir_index_str) {
             let script = if relative.is_empty() {
                 "/index.cfm".to_string()
             } else {
@@ -686,7 +732,8 @@ fn resolve_file(doc_root: &Path, url_path: &str) -> Option<ResolvedFile> {
             parts.pop();
             let partial = parts.join("/");
             let candidate = doc_root.join(&partial);
-            if candidate.is_file() && candidate.extension().map_or(false, |e| e == "cfm" || e == "cfc") {
+            let candidate_str = candidate.to_string_lossy().to_string();
+            if vfs.is_file(&candidate_str) && candidate.extension().map_or(false, |e| e == "cfm" || e == "cfc") {
                 let script_name = format!("/{}", partial);
                 let path_info = url_path[script_name.len()..].to_string();
                 return Some(ResolvedFile {
@@ -699,7 +746,8 @@ fn resolve_file(doc_root: &Path, url_path: &str) -> Option<ResolvedFile> {
     } else {
         // Root path → index.cfm
         let index = doc_root.join("index.cfm");
-        if index.is_file() {
+        let index_str = index.to_string_lossy().to_string();
+        if vfs.is_file(&index_str) {
             return Some(ResolvedFile {
                 file_path: index,
                 script_name: "/index.cfm".to_string(),
@@ -1020,4 +1068,442 @@ fn run_repl(debug: bool) {
 
         execute_code(line, debug);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Self-contained binary: build & run
+// ---------------------------------------------------------------------------
+
+/// Build a self-contained binary by embedding all files from `app_dir` into a
+/// copy of the current rustcfml executable.
+fn build_self_contained(app_dir: &str, output: &str, mode: &str, entry: &str) {
+    use std::collections::HashMap;
+
+    let app_path = PathBuf::from(app_dir);
+    if !app_path.is_dir() {
+        eprintln!("Error: '{}' is not a directory", app_dir);
+        exit(1);
+    }
+
+    let app_path = fs::canonicalize(&app_path).unwrap_or(app_path);
+    println!("Embedding app from: {}", app_path.display());
+    println!("Mode: {}, Entry: {}", mode, entry);
+
+    // Walk directory and collect all files
+    let mut files: HashMap<String, Vec<u8>> = HashMap::new();
+    collect_files(&app_path, &app_path, &mut files);
+
+    if files.is_empty() {
+        eprintln!("Error: No files found in '{}'", app_dir);
+        exit(1);
+    }
+
+    // Validate entry point exists for CLI mode
+    if mode == "cli" {
+        let entry_lower = entry.to_lowercase();
+        if !files.keys().any(|k| k.to_lowercase() == entry_lower) {
+            eprintln!("Error: Entry point '{}' not found in '{}'", entry, app_dir);
+            eprintln!("Available files: {}", files.keys().cloned().collect::<Vec<_>>().join(", "));
+            exit(1);
+        }
+    }
+
+    // Embed metadata: mode and entry point
+    let meta = format!("mode={}\nentry={}", mode, entry);
+    files.insert("__rustcfml_meta__".to_string(), meta.into_bytes());
+
+    let total_size: usize = files.values().map(|v| v.len()).sum();
+    println!("Collected {} files ({:.1} KB)", files.len() - 1, total_size as f64 / 1024.0);
+
+    // Read the current executable as the base binary
+    let exe_path = std::env::current_exe().expect("Cannot determine current executable path");
+    let base_binary = fs::read(&exe_path).expect("Cannot read current executable");
+
+    // If the current exe already has an archive, strip it first
+    let base_binary = strip_existing_archive(&base_binary);
+
+    // Create self-contained binary
+    let output_data = vfs::create_self_contained_binary(&base_binary, &files);
+
+    // Write output
+    let output_path = PathBuf::from(output);
+    fs::write(&output_path, &output_data).expect("Failed to write output binary");
+
+    // Make executable on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&output_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&output_path, perms).unwrap();
+    }
+
+    println!("Built: {} ({:.1} MB)", output_path.display(), output_data.len() as f64 / (1024.0 * 1024.0));
+    println!("Run with: ./{}", output_path.display());
+}
+
+/// Recursively collect files from a directory into a HashMap.
+/// Keys are relative paths with forward slashes.
+fn collect_files(base: &Path, dir: &Path, files: &mut std::collections::HashMap<String, Vec<u8>>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Warning: Cannot read directory {}: {}", dir.display(), e);
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // Skip hidden directories and common non-app dirs
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "node_modules" || name == ".git" {
+                continue;
+            }
+            collect_files(base, &path, files);
+        } else if path.is_file() {
+            let relative = path.strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            match fs::read(&path) {
+                Ok(data) => {
+                    files.insert(relative, data);
+                }
+                Err(e) => {
+                    eprintln!("Warning: Cannot read {}: {}", path.display(), e);
+                }
+            }
+        }
+    }
+}
+
+/// Strip an existing embedded archive from a binary (if present).
+fn strip_existing_archive(data: &[u8]) -> &[u8] {
+    let len = data.len();
+    if len < vfs::ARCHIVE_MAGIC.len() + 8 {
+        return data;
+    }
+    let magic_start = len - vfs::ARCHIVE_MAGIC.len();
+    if &data[magic_start..] != vfs::ARCHIVE_MAGIC.as_slice() {
+        return data;
+    }
+    let len_start = magic_start - 8;
+    let archive_len = u64::from_le_bytes(data[len_start..len_start + 8].try_into().unwrap()) as usize;
+    let archive_start = len_start - archive_len;
+    &data[..archive_start]
+}
+
+/// Parse metadata from the embedded archive.
+fn parse_embedded_meta(files: &std::collections::HashMap<String, Vec<u8>>) -> (String, String) {
+    let meta = files.get("__rustcfml_meta__")
+        .map(|data| String::from_utf8_lossy(data).to_string())
+        .unwrap_or_default();
+    let mut mode = "serve".to_string();
+    let mut entry = "main.cfm".to_string();
+    for line in meta.lines() {
+        if let Some(val) = line.strip_prefix("mode=") {
+            mode = val.to_string();
+        } else if let Some(val) = line.strip_prefix("entry=") {
+            entry = val.to_string();
+        }
+    }
+    (mode, entry)
+}
+
+/// Run the embedded app (self-contained binary mode).
+/// Supports both "serve" (web server) and "cli" (command-line) modes.
+fn run_embedded_app(mut files: std::collections::HashMap<String, Vec<u8>>) {
+    use cfml_common::vfs::EmbeddedFs;
+
+    let (mode, entry) = parse_embedded_meta(&files);
+
+    // Remove metadata file from the archive so it's not visible to CFML code
+    files.remove("__rustcfml_meta__");
+    let file_count = files.len();
+
+    // Determine base dir: use CWD as the virtual base
+    let base_dir = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .to_string_lossy()
+        .to_string();
+
+    let vfs: Arc<dyn Vfs> = Arc::new(EmbeddedFs::new(files, base_dir.clone()));
+
+    if mode == "cli" {
+        run_embedded_cli(vfs, &base_dir, &entry, file_count);
+    } else {
+        run_embedded_serve(vfs, &base_dir, file_count);
+    }
+}
+
+/// Run embedded app in CLI mode: execute entry point with command-line args.
+fn run_embedded_cli(vfs: Arc<dyn Vfs>, base_dir: &str, entry: &str, file_count: usize) {
+    let cli_args: Vec<String> = std::env::args().collect();
+
+    // Check for --help / --version
+    for arg in &cli_args[1..] {
+        match arg.as_str() {
+            "--version" => {
+                println!("Built with RustCFML v{} ({} embedded files)", env!("CARGO_PKG_VERSION"), file_count);
+                exit(0);
+            }
+            _ => {}
+        }
+    }
+
+    // Build the entry point path and read source from VFS
+    let entry_path = format!("{}/{}", base_dir, entry);
+    let source = match vfs.read_to_string(&entry_path) {
+        Ok(s) => s,
+        Err(_) => {
+            // Try just the entry name (relative)
+            match vfs.read_to_string(entry) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Error: Cannot read entry point '{}': {}", entry, e);
+                    exit(1);
+                }
+            }
+        }
+    };
+
+    // Parse CLI args into the "cli" scope (ordered struct).
+    // Works like CFML's arguments scope:
+    //   --name value  → cli.name = "value"   (named)
+    //   --flag        → cli.flag = true       (boolean flag)
+    //   positional    → cli[1], cli[2], ...   (1-based numeric keys)
+    let mut cli_scope = IndexMap::new();
+    let mut positional_idx: usize = 1;
+    let mut i = 1;
+    while i < cli_args.len() {
+        let arg = &cli_args[i];
+        if arg.starts_with("--") {
+            let key = arg.trim_start_matches('-').to_lowercase();
+            if i + 1 < cli_args.len() && !cli_args[i + 1].starts_with("--") {
+                cli_scope.insert(key, CfmlValue::String(cli_args[i + 1].clone()));
+                i += 2;
+            } else {
+                cli_scope.insert(key, CfmlValue::Bool(true));
+                i += 1;
+            }
+        } else if arg.starts_with("-") && arg.len() == 2 {
+            let key = arg[1..].to_lowercase();
+            if i + 1 < cli_args.len() && !cli_args[i + 1].starts_with("-") {
+                cli_scope.insert(key, CfmlValue::String(cli_args[i + 1].clone()));
+                i += 2;
+            } else {
+                cli_scope.insert(key, CfmlValue::Bool(true));
+                i += 1;
+            }
+        } else {
+            // Positional: 1-based numeric key like CFML arguments scope
+            cli_scope.insert(positional_idx.to_string(), CfmlValue::String(arg.clone()));
+            positional_idx += 1;
+            i += 1;
+        }
+    }
+
+    let mut extra_globals = IndexMap::new();
+    extra_globals.insert("cli".to_string(), CfmlValue::Struct(cli_scope));
+
+    // Execute
+    match compile_and_run(&source, false, Some(entry_path), extra_globals, None, None, None, vfs) {
+        Ok(response) => {
+            if !response.output.is_empty() {
+                print!("{}", response.output);
+            }
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            exit(1);
+        }
+    }
+}
+
+/// Run embedded app in serve mode with start/stop/foreground support.
+fn run_embedded_serve(vfs: Arc<dyn Vfs>, base_dir: &str, file_count: usize) {
+    let cli_args: Vec<String> = std::env::args().collect();
+
+    // Parse args
+    let mut port: u16 = 8500;
+    let mut single_threaded = false;
+    let mut command = ""; // "", "start", "stop", "status"
+    let mut i = 1;
+    while i < cli_args.len() {
+        match cli_args[i].as_str() {
+            "--port" if i + 1 < cli_args.len() => {
+                port = cli_args[i + 1].parse().unwrap_or(8500);
+                i += 2;
+            }
+            "--single-threaded" => {
+                single_threaded = true;
+                i += 1;
+            }
+            "--version" => {
+                println!("RustCFML v{} (self-contained, {} files)", env!("CARGO_PKG_VERSION"), file_count);
+                exit(0);
+            }
+            "start" | "stop" | "status" => {
+                command = match cli_args[i].as_str() {
+                    "start" => "start",
+                    "stop" => "stop",
+                    "status" => "status",
+                    _ => "",
+                };
+                i += 1;
+            }
+            _ => { i += 1; }
+        }
+    }
+
+    let exe_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "app".to_string());
+    let pid_file = format!("/tmp/{}.pid", exe_name);
+
+    match command {
+        "stop" => {
+            embedded_stop(&pid_file);
+        }
+        "status" => {
+            embedded_status(&pid_file);
+        }
+        "start" => {
+            embedded_start(&pid_file, port, file_count);
+            // After daemonizing, the child process continues here
+            println!("RustCFML self-contained app ({} embedded files)", file_count);
+            let doc_root = PathBuf::from(base_dir);
+            run_server(&doc_root, port, false, single_threaded, vfs);
+        }
+        _ => {
+            // Foreground mode (default: just run)
+            println!("RustCFML self-contained app ({} embedded files)", file_count);
+            let doc_root = PathBuf::from(base_dir);
+            run_server(&doc_root, port, false, single_threaded, vfs);
+        }
+    }
+}
+
+/// Daemonize: fork to background and write PID file.
+#[cfg(unix)]
+fn embedded_start(pid_file: &str, port: u16, file_count: usize) {
+    use std::io::Write;
+
+    // Check if already running
+    if let Ok(pid_str) = fs::read_to_string(pid_file) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            // Check if process is alive
+            if unsafe { libc::kill(pid, 0) } == 0 {
+                eprintln!("Already running (PID {})", pid);
+                exit(1);
+            }
+        }
+    }
+
+    // Fork
+    let pid = unsafe { libc::fork() };
+    match pid {
+        -1 => {
+            eprintln!("Failed to fork");
+            exit(1);
+        }
+        0 => {
+            // Child process — continue to run the server
+            // Create new session
+            unsafe { libc::setsid() };
+
+            // Write PID file
+            let child_pid = std::process::id();
+            let mut f = std::fs::File::create(pid_file).expect("Cannot create PID file");
+            write!(f, "{}", child_pid).expect("Cannot write PID file");
+
+            // Redirect stdout/stderr to log file
+            let log_path = pid_file.replace(".pid", ".log");
+            if let Ok(log_file) = std::fs::File::create(&log_path) {
+                use std::os::unix::io::AsRawFd;
+                let fd = log_file.as_raw_fd();
+                unsafe {
+                    libc::dup2(fd, 1); // stdout
+                    libc::dup2(fd, 2); // stderr
+                }
+            }
+            // Child continues to the server startup code
+        }
+        _ => {
+            // Parent process — report and exit
+            println!("Started in background (PID {})", pid);
+            println!("Listening on http://127.0.0.1:{} ({} embedded files)", port, file_count);
+            println!("Stop with: {} stop", std::env::args().next().unwrap_or_default());
+            exit(0);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn embedded_start(pid_file: &str, _port: u16, _file_count: usize) {
+    // On non-Unix, just write PID and run in foreground
+    let pid = std::process::id();
+    let _ = fs::write(pid_file, format!("{}", pid));
+}
+
+/// Stop a daemonized instance by reading its PID file.
+#[cfg(unix)]
+fn embedded_stop(pid_file: &str) {
+    match fs::read_to_string(pid_file) {
+        Ok(pid_str) => {
+            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+                    println!("Stopped (PID {})", pid);
+                    let _ = fs::remove_file(pid_file);
+                } else {
+                    eprintln!("Process {} not running", pid);
+                    let _ = fs::remove_file(pid_file);
+                }
+            } else {
+                eprintln!("Invalid PID file");
+            }
+        }
+        Err(_) => {
+            eprintln!("Not running (no PID file)");
+        }
+    }
+    exit(0);
+}
+
+#[cfg(not(unix))]
+fn embedded_stop(pid_file: &str) {
+    eprintln!("Stop command not supported on this platform");
+    eprintln!("PID file: {}", pid_file);
+    exit(1);
+}
+
+/// Check status of a daemonized instance.
+fn embedded_status(pid_file: &str) {
+    match fs::read_to_string(pid_file) {
+        Ok(pid_str) => {
+            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                #[cfg(unix)]
+                {
+                    if unsafe { libc::kill(pid, 0) } == 0 {
+                        println!("Running (PID {})", pid);
+                    } else {
+                        println!("Not running (stale PID file, was PID {})", pid);
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    println!("PID file exists (PID {})", pid);
+                }
+            } else {
+                println!("Invalid PID file");
+            }
+        }
+        Err(_) => {
+            println!("Not running (no PID file)");
+        }
+    }
+    exit(0);
 }
