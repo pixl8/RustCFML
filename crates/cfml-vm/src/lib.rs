@@ -250,6 +250,9 @@ pub struct CfmlVirtualMachine {
     pub enable_cfoutput_only: i32,
     /// Sandbox mode: blocks host filesystem access, routes reads through VFS
     pub sandbox: bool,
+    /// After a function call, holds modified complex-type argument values for
+    /// pass-by-reference writeback. Maps param name → final value.
+    arg_ref_writeback: Option<Vec<(String, CfmlValue)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +324,7 @@ impl CfmlVirtualMachine {
             cache: HashMap::new(),
             enable_cfoutput_only: 0,
             sandbox: false,
+            arg_ref_writeback: None,
         }
     }
 
@@ -1026,6 +1030,11 @@ impl CfmlVirtualMachine {
                 }
 
                 BytecodeOp::Call(arg_count) => {
+                    // Identify which local variables are being passed as args
+                    // (for pass-by-reference writeback of complex types)
+                    // ip was already incremented past this Call op, so use ip-1
+                    let arg_sources = find_arg_sources(&func.instructions, ip - 1, *arg_count);
+
                     let mut args = Vec::with_capacity(*arg_count);
                     for _ in 0..*arg_count {
                         if let Some(v) = stack.pop() { args.push(v); }
@@ -1034,6 +1043,7 @@ impl CfmlVirtualMachine {
 
                     if let Some(func_ref) = stack.pop() {
                         self.closure_parent_writeback = None;
+                        self.arg_ref_writeback = None;
                         // For closures with captured scope, merge defining scope + caller locals.
                         // For CFC method calls (this in locals), caller locals take priority.
                         // For plain UDF calls, pass caller locals by reference (no clone).
@@ -1094,6 +1104,19 @@ impl CfmlVirtualMachine {
                                         locals.insert(k, v);
                                     }
                                 }
+                                // Pass-by-reference writeback: update caller's local variables
+                                // with modified complex-type argument values
+                                if let Some(ref_wb) = self.arg_ref_writeback.take() {
+                                    for (idx_str, modified_val) in ref_wb {
+                                        if let Ok(param_idx) = idx_str.parse::<usize>() {
+                                            if param_idx < arg_sources.len() {
+                                                if let Some(ref source_var) = arg_sources[param_idx] {
+                                                    locals.insert(source_var.clone(), modified_val);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 stack.push(result);
                             }
                             Err(e) => {
@@ -1133,6 +1156,10 @@ impl CfmlVirtualMachine {
                 }
 
                 BytecodeOp::CallNamed(names, arg_count) => {
+                    // Identify arg sources for pass-by-reference writeback
+                    // ip was already incremented past this op, so use ip-1
+                    let named_arg_sources = find_arg_sources(&func.instructions, ip - 1, *arg_count);
+
                     let mut named_values = Vec::with_capacity(*arg_count);
                     for _ in 0..*arg_count {
                         if let Some(v) = stack.pop() { named_values.push(v); }
@@ -1173,6 +1200,7 @@ impl CfmlVirtualMachine {
                         };
 
                         self.closure_parent_writeback = None;
+                        self.arg_ref_writeback = None;
                         let merged_scope;
                         let effective_locals = if let CfmlValue::Function(ref f) = func_ref {
                             if let Some(ref shared_env) = f.captured_scope {
@@ -1218,6 +1246,32 @@ impl CfmlVirtualMachine {
                                 if let Some(writeback) = self.closure_parent_writeback.take() {
                                     for (k, v) in writeback {
                                         locals.insert(k, v);
+                                    }
+                                }
+                                // Pass-by-reference writeback for named calls
+                                if let Some(ref_wb) = self.arg_ref_writeback.take() {
+                                    for (idx_str, modified_val) in ref_wb {
+                                        if let Ok(param_idx) = idx_str.parse::<usize>() {
+                                            // For named args: find which call-site arg was mapped
+                                            // to this param position, and get its source variable
+                                            if let CfmlValue::Function(ref f) = func_ref {
+                                                // Find which call-site index maps to this param
+                                                for (call_idx, name) in names.iter().enumerate() {
+                                                    let matches = if name.is_empty() {
+                                                        call_idx == param_idx
+                                                    } else {
+                                                        f.params.get(param_idx)
+                                                            .map_or(false, |p| p.name.eq_ignore_ascii_case(name))
+                                                    };
+                                                    if matches && call_idx < named_arg_sources.len() {
+                                                        if let Some(ref source_var) = named_arg_sources[call_idx] {
+                                                            locals.insert(source_var.clone(), modified_val.clone());
+                                                        }
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 stack.push(result);
@@ -1302,6 +1356,8 @@ impl CfmlVirtualMachine {
                             self.closure_parent_writeback = Some(writeback);
                         }
                     }
+                    // Pass-by-reference writeback: collect final values of complex-type params
+                    self.collect_arg_ref_writeback(func, &locals);
                     // Pop call frame before early return (matches push at function entry)
                     self.call_stack.pop();
                     return Ok(stack.pop().unwrap_or(CfmlValue::Null));
@@ -2212,6 +2268,9 @@ impl CfmlVirtualMachine {
                 self.closure_parent_writeback = Some(writeback);
             }
         }
+
+        // Pass-by-reference writeback: collect final values of complex-type params
+        self.collect_arg_ref_writeback(func, &locals);
 
         // Capture locals for component variables scope (for __main__ and __cfc_body__)
         if func.name == "__main__" || func.name == "__cfc_body__" {
@@ -5746,6 +5805,29 @@ impl CfmlVirtualMachine {
         }
     }
 
+    /// Collect modified complex-type (Struct, Array, Query) argument values for
+    /// pass-by-reference writeback. Called at function return to store final param values.
+    /// Stores (param_index, value) pairs so the caller can match to arg sources.
+    fn collect_arg_ref_writeback(&mut self, func: &BytecodeFunction, locals: &IndexMap<String, CfmlValue>) {
+        if func.params.is_empty() {
+            self.arg_ref_writeback = None;
+            return;
+        }
+        let mut writeback = Vec::new();
+        for (i, param_name) in func.params.iter().enumerate() {
+            if let Some(val) = locals.get(param_name.as_str()) {
+                match val {
+                    CfmlValue::Struct(_) | CfmlValue::Array(_) | CfmlValue::Query(_)
+                    | CfmlValue::Component(_) => {
+                        writeback.push((i.to_string(), val.clone()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.arg_ref_writeback = if writeback.is_empty() { None } else { Some(writeback) };
+    }
+
     /// Write back mutations into a closure's shared Arc<RwLock> environment.
     /// Only updates variables that already exist in the captured scope (prevents pollution).
     fn write_back_to_captured_scope(func_ref: &CfmlValue, writeback: &IndexMap<String, CfmlValue>) {
@@ -7668,6 +7750,13 @@ fn cfml_equal(a: &CfmlValue, b: &CfmlValue) -> bool {
         (CfmlValue::Null, CfmlValue::Null) => true,
         (CfmlValue::Null, _) | (_, CfmlValue::Null) => false,
         (CfmlValue::Bool(x), CfmlValue::Bool(y)) => x == y,
+        // Bool-number coercion: true==1, false==0
+        (CfmlValue::Bool(b), CfmlValue::Int(i)) | (CfmlValue::Int(i), CfmlValue::Bool(b)) => {
+            *i == if *b { 1 } else { 0 }
+        }
+        (CfmlValue::Bool(b), CfmlValue::Double(d)) | (CfmlValue::Double(d), CfmlValue::Bool(b)) => {
+            *d == if *b { 1.0 } else { 0.0 }
+        }
         (CfmlValue::Int(x), CfmlValue::Int(y)) => x == y,
         (CfmlValue::Double(x), CfmlValue::Double(y)) => x == y,
         (CfmlValue::Int(x), CfmlValue::Double(y)) => (*x as f64) == *y,
@@ -7683,10 +7772,17 @@ fn cfml_equal(a: &CfmlValue, b: &CfmlValue) -> bool {
         }
         (CfmlValue::String(s), CfmlValue::Bool(b))
         | (CfmlValue::Bool(b), CfmlValue::String(s)) => {
-            match s.to_lowercase().as_str() {
+            match s.to_lowercase().trim() {
                 "true" | "yes" => *b,
-                "false" | "no" => !*b,
-                _ => false,
+                "false" | "no" | "" => !*b,
+                _ => {
+                    // Numeric string: non-zero is true, zero is false
+                    if let Ok(n) = s.trim().parse::<f64>() {
+                        (n != 0.0) == *b
+                    } else {
+                        false
+                    }
+                }
             }
         }
         _ => false,
@@ -7719,6 +7815,110 @@ fn cfml_compare(a: &CfmlValue, b: &CfmlValue) -> i32 {
             x.partial_cmp(&y).map_or(0, |o| o as i32)
         }
     }
+}
+
+// ---- Pass-by-reference: backward bytecode scan to identify argument sources ----
+
+/// Returns (pushes, pops) for a given bytecode op — how many values it pushes/pops on the stack.
+fn stack_effect(op: &BytecodeOp) -> (usize, usize) {
+    match op {
+        // Literals: push 1, pop 0
+        BytecodeOp::Null | BytecodeOp::True | BytecodeOp::False
+        | BytecodeOp::Integer(_) | BytecodeOp::Double(_) | BytecodeOp::String(_) => (1, 0),
+        // Variable loads: push 1, pop 0
+        BytecodeOp::LoadLocal(_) | BytecodeOp::LoadGlobal(_) | BytecodeOp::TryLoadLocal(_) => (1, 0),
+        // Variable stores: push 0, pop 1
+        BytecodeOp::StoreLocal(_) | BytecodeOp::StoreGlobal(_) => (0, 1),
+        // Stack ops
+        BytecodeOp::Pop => (0, 1),
+        BytecodeOp::Dup => (1, 0),  // net +1 (peeks and pushes copy)
+        BytecodeOp::Swap => (2, 2), // pops 2, pushes 2
+        // Binary ops: push 1, pop 2
+        BytecodeOp::Add | BytecodeOp::Sub | BytecodeOp::Mul | BytecodeOp::Div
+        | BytecodeOp::Mod | BytecodeOp::Pow | BytecodeOp::IntDiv | BytecodeOp::Concat
+        | BytecodeOp::Eq | BytecodeOp::Neq | BytecodeOp::Lt | BytecodeOp::Lte
+        | BytecodeOp::Gt | BytecodeOp::Gte | BytecodeOp::Contains | BytecodeOp::DoesNotContain
+        | BytecodeOp::And | BytecodeOp::Or | BytecodeOp::Xor | BytecodeOp::Eqv
+        | BytecodeOp::Imp => (1, 2),
+        // Unary ops: push 1, pop 1
+        BytecodeOp::Negate | BytecodeOp::Not => (1, 1),
+        // Control flow
+        BytecodeOp::Jump(_) => (0, 0),
+        BytecodeOp::JumpIfFalse(_) | BytecodeOp::JumpIfTrue(_) => (0, 1),
+        BytecodeOp::Return => (0, 1),
+        // Call: pops func + N args, pushes 1 result
+        BytecodeOp::Call(n) => (1, n + 1),
+        BytecodeOp::CallNamed(_, n) => (1, n + 1),
+        BytecodeOp::CallSpread => (1, 3), // func, array, count — approximate
+        // Collections
+        BytecodeOp::BuildArray(n) => (1, *n),
+        BytecodeOp::BuildStruct(n) => (1, n * 2),
+        BytecodeOp::GetIndex => (1, 2),        // obj + key → value
+        BytecodeOp::SetIndex => (0, 3),         // obj + key + value → (modifies in place)
+        BytecodeOp::GetProperty(_) => (1, 1),   // obj → value
+        BytecodeOp::SetProperty(_) => (0, 2),   // obj + value → (modifies)
+        BytecodeOp::GetKeys => (1, 1),
+        BytecodeOp::ConcatArrays | BytecodeOp::MergeStructs => (1, 2),
+        // Object
+        BytecodeOp::NewObject(n) => (1, n + 1), // class + args → instance
+        // Function definition: push 1
+        BytecodeOp::DefineFunction(_) => (1, 0),
+        // Postfix: push 1 (new value)
+        BytecodeOp::Increment(_) | BytecodeOp::Decrement(_) => (1, 0),
+        // Exception handling
+        BytecodeOp::TryStart(_) | BytecodeOp::TryEnd => (0, 0),
+        BytecodeOp::Throw | BytecodeOp::Rethrow => (0, 1),
+        // Method call: pops obj + args, pushes 1
+        BytecodeOp::CallMethod(_, n, _) => (1, n + 1),
+        // Include
+        BytecodeOp::Include(_) => (0, 0),
+        BytecodeOp::IncludeDynamic => (0, 1),
+        // Null
+        BytecodeOp::IsNull => (1, 1),
+        BytecodeOp::JumpIfNotNull(_) => (1, 1), // pops, pushes back if not null
+        // Output
+        BytecodeOp::Print => (0, 1),
+        BytecodeOp::Halt => (0, 0),
+        // Misc
+        BytecodeOp::IsDefined(_) => (1, 0),
+        BytecodeOp::DeclareLocal(_) => (0, 0),
+        BytecodeOp::LineInfo(_, _) => (0, 0),
+    }
+}
+
+/// Scan backward through bytecode from a Call site to find which local variables
+/// were passed as arguments. Returns a Vec of Option<String> where Some(name) means
+/// the arg at that position came directly from LoadLocal(name).
+fn find_arg_sources(ops: &[BytecodeOp], call_ip: usize, arg_count: usize) -> Vec<Option<String>> {
+    let mut sources: Vec<Option<String>> = vec![None; arg_count];
+    if arg_count == 0 || call_ip == 0 {
+        return sources;
+    }
+
+    let mut pos = call_ip;
+    let mut depth: i32 = 0; // extra values above our args that need accounting
+    let mut arg_idx = arg_count; // next arg slot to fill (going last→first)
+
+    while pos > 0 && arg_idx > 0 {
+        pos -= 1;
+        let op = &ops[pos];
+        let (pushes, pops) = stack_effect(op);
+
+        // This op's pushes: first fill internal dependencies, then fill arg slots
+        for _ in 0..pushes {
+            if depth > 0 {
+                depth -= 1;
+            } else if arg_idx > 0 {
+                arg_idx -= 1;
+                if let BytecodeOp::LoadLocal(name) | BytecodeOp::TryLoadLocal(name) = op {
+                    sources[arg_idx] = Some(name.clone());
+                }
+            }
+        }
+        // This op's pops create internal dependencies
+        depth += pops as i32;
+    }
+    sources
 }
 
 // ---- precisionEvaluate: recursive-descent parser operating on rust_decimal::Decimal ----
