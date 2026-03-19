@@ -296,6 +296,10 @@ impl Lexer {
                     current_str.push('#');
                     self.advance();
                     self.advance();
+                } else if self.current() == '#' && self.peek(1) == quote {
+                    // # immediately before closing quote — treat as literal #
+                    current_str.push('#');
+                    self.advance();
                 } else if self.current() == '#' {
                     // Start of interpolation expression
                     has_interpolation = true;

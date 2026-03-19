@@ -86,6 +86,12 @@ struct CfmlResponse {
     session_id: Option<String>,
 }
 
+/// Error from CFML execution, carrying any output generated before the error.
+struct CfmlRunError {
+    output: String,
+    message: String,
+}
+
 fn main() {
     // Spawn a thread with a large stack (64 MB) so deep recursion in the VM
     // doesn't blow the default ~8 MB main-thread stack (especially in debug builds).
@@ -184,7 +190,10 @@ fn execute_code_with_file(source: &str, debug: bool, source_file: Option<String>
             }
         }
         Err(e) => {
-            eprintln!("{}", e);
+            if !e.output.is_empty() {
+                print!("{}", e.output);
+            }
+            eprintln!("{}", e.message);
             exit(1);
         }
     }
@@ -202,7 +211,7 @@ fn compile_and_run_with_session(
     session_id: Option<String>,
     vfs: Arc<dyn Vfs>,
     sandbox: bool,
-) -> Result<CfmlResponse, String> {
+) -> Result<CfmlResponse, CfmlRunError> {
     compile_and_run(source, debug, source_file, extra_globals, server_state, http_request_data, session_id, vfs, sandbox)
 }
 
@@ -216,12 +225,12 @@ fn compile_and_run(
     session_id: Option<String>,
     vfs: Arc<dyn Vfs>,
     sandbox: bool,
-) -> Result<CfmlResponse, String> {
+) -> Result<CfmlResponse, CfmlRunError> {
     // In serve mode with a source file, use the bytecode cache to skip recompilation
     let program = if !debug && source_file.is_some() && server_state.is_some() {
         let path = source_file.as_ref().unwrap();
         let cache = &server_state.unwrap().bytecode_cache;
-        compile_file_cached(path, Some(cache), vfs.as_ref()).map_err(|e| format!("{}", e))?
+        compile_file_cached(path, Some(cache), vfs.as_ref()).map_err(|e| CfmlRunError { output: String::new(), message: format!("{}", e) })?
     } else {
         // CLI mode / inline code / debug: full pipeline
         // Strip shebang line if present (e.g. #!/usr/bin/env rustcfml)
@@ -261,10 +270,10 @@ fn compile_and_run(
         let ast = match parser.parse() {
             Ok(ast) => ast,
             Err(e) => {
-                return Err(format!(
-                    "Parse Error [line {}, col {}]: {}",
-                    e.line, e.column, e.message
-                ));
+                return Err(CfmlRunError {
+                    output: String::new(),
+                    message: format!("Parse Error [line {}, col {}]: {}", e.line, e.column, e.message),
+                });
             }
         };
 
@@ -369,7 +378,14 @@ fn compile_and_run(
                 session_id: vm.session_id,
             })
         }
-        Err(e) => Err(format!("{}", e)),
+        Err(e) => {
+            // Preserve any output generated before the error
+            let mut output = String::new();
+            if !vm.output_buffer.is_empty() {
+                output.push_str(&vm.output_buffer);
+            }
+            Err(CfmlRunError { output, message: format!("{}", e) })
+        }
     }
 }
 
@@ -646,13 +662,18 @@ async fn handle_request(
                     builder.body(axum::body::Body::from(body)).unwrap()
                 }
                 Err(e) => {
+                    let mut body = String::new();
+                    if !e.output.is_empty() {
+                        body.push_str(&e.output);
+                    }
+                    body.push_str(&format!(
+                        "<html><body><h1>500 Internal Server Error</h1><pre>{}</pre></body></html>",
+                        html_escape(&e.message)
+                    ));
                     axum::response::Response::builder()
                         .status(500)
                         .header("Content-Type", "text/html; charset=utf-8")
-                        .body(axum::body::Body::from(format!(
-                            "<html><body><h1>500 Internal Server Error</h1><pre>{}</pre></body></html>",
-                            html_escape(&e)
-                        )))
+                        .body(axum::body::Body::from(body))
                         .unwrap()
                 }
             }
@@ -1382,7 +1403,10 @@ fn run_embedded_cli(vfs: Arc<dyn Vfs>, base_dir: &str, entry: &str, file_count: 
             }
         }
         Err(e) => {
-            eprintln!("{}", e);
+            if !e.output.is_empty() {
+                print!("{}", e.output);
+            }
+            eprintln!("{}", e.message);
             exit(1);
         }
     }

@@ -749,9 +749,14 @@ impl CfmlVirtualMachine {
                         stack.push(val);
                     // 3. Check builtins/user_functions (exact, then CI)
                     } else if self.builtins.contains_key(name.as_str()) || self.user_functions.contains_key(name.as_str()) {
+                        let params = self.user_functions.get(name.as_str())
+                            .map(|uf| uf.params.iter().map(|p| cfml_common::dynamic::CfmlParam {
+                                name: p.clone(), param_type: None, default: None, required: false,
+                            }).collect())
+                            .unwrap_or_default();
                         stack.push(CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
                             name: name.clone(),
-                            params: Vec::new(),
+                            params,
                             body: cfml_common::dynamic::CfmlClosureBody::Expression(
                                 Box::new(CfmlValue::Null),
                             ),
@@ -767,9 +772,15 @@ impl CfmlVirtualMachine {
                                 .find(|k| k.to_lowercase() == name_lower))
                             .cloned()
                             .unwrap_or(name.clone());
+                        let params = self.user_functions.iter()
+                            .find(|(k, _)| k.to_lowercase() == name_lower)
+                            .map(|(_, uf)| uf.params.iter().map(|p| cfml_common::dynamic::CfmlParam {
+                                name: p.clone(), param_type: None, default: None, required: false,
+                            }).collect())
+                            .unwrap_or_default();
                         stack.push(CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
                             name: canonical,
-                            params: Vec::new(),
+                            params,
                             body: cfml_common::dynamic::CfmlClosureBody::Expression(
                                 Box::new(CfmlValue::Null),
                             ),
@@ -1916,26 +1927,30 @@ impl CfmlVirtualMachine {
                                 .position(|f| f.name == "__main__")
                                 .unwrap_or(0);
                             let inc_func = self.program.functions[main_idx].clone();
+                            // Snapshot caller's keys before include so we can detect new variables
+                            let pre_include_keys: std::collections::HashSet<String> = locals.keys().cloned().collect();
                             // Isolate try-stack so throws inside the include
                             // don't consume outer handlers
                             let saved_try_stack = std::mem::take(&mut self.try_stack);
                             let result = self.execute_function_with_args(&inc_func, Vec::new(), Some(&locals));
                             self.try_stack = saved_try_stack;
-                            // For cfinclude inside a component body (indicated by `this`
-                            // being in locals), merge the include's scope changes back
-                            // so cfparam vars and other variables are available to the
-                            // component's methods. This is essential for frameworks like
-                            // Mach-II that define variables via cfinclude in CFC bodies.
-                            if locals.contains_key("this") {
-                                if let Some(inc_locals) = self.captured_locals.take() {
-                                    for (k, v) in inc_locals {
-                                        if k == "arguments" { continue; }
+                            // Merge newly created variables from the include back
+                            // into the caller's locals. This makes variables set via
+                            // `variables.foo = "bar"` in the include accessible from
+                            // the caller. Only NEW keys are merged — existing keys are
+                            // not overwritten to prevent closure write-back from
+                            // reverting caller state. Function values are NOT merged
+                            // (they're already in user_functions); merging them would
+                            // inject captured_scope that triggers spurious write-backs.
+                            if let Some(inc_locals) = self.captured_locals.take() {
+                                for (k, v) in inc_locals {
+                                    if k == "arguments" { continue; }
+                                    // Only merge NEW variables that are not functions and
+                                    // don't shadow builtin function names (e.g. "val").
+                                    if !pre_include_keys.contains(&k) && !matches!(v, CfmlValue::Function(_)) && !self.builtins.contains_key(&k) {
                                         locals.insert(k, v);
                                     }
                                 }
-                            } else {
-                                // Discard captured_locals for non-component includes
-                                self.captured_locals.take();
                             }
                             // Merge included sub-program's non-main functions into old_program
                             // so that func_idx references (from DefineFunction) remain valid.
@@ -2013,18 +2028,18 @@ impl CfmlVirtualMachine {
                                 .position(|f| f.name == "__main__")
                                 .unwrap_or(0);
                             let inc_func = self.program.functions[main_idx].clone();
+                            let pre_include_keys: std::collections::HashSet<String> = locals.keys().cloned().collect();
                             let saved_try_stack = std::mem::take(&mut self.try_stack);
                             let result = self.execute_function_with_args(&inc_func, Vec::new(), Some(&locals));
                             self.try_stack = saved_try_stack;
-                            if locals.contains_key("this") {
-                                if let Some(inc_locals) = self.captured_locals.take() {
-                                    for (k, v) in inc_locals {
-                                        if k == "arguments" { continue; }
+                            // Merge new non-function variables from the include
+                            if let Some(inc_locals) = self.captured_locals.take() {
+                                for (k, v) in inc_locals {
+                                    if k == "arguments" { continue; }
+                                    if !pre_include_keys.contains(&k) && !matches!(v, CfmlValue::Function(_)) && !self.builtins.contains_key(&k) {
                                         locals.insert(k, v);
                                     }
                                 }
-                            } else {
-                                self.captured_locals.take();
                             }
                             let sub_func_count = self.program.functions.len();
                             let base_idx = old_program.functions.len();
@@ -5717,7 +5732,16 @@ impl CfmlVirtualMachine {
             // Functions with the same name are considered equal for writeback diffing
             // since function definitions don't change at runtime.
             (CfmlValue::Function(a), CfmlValue::Function(b)) => a.name == b.name,
-            // Components/Queries/Binary: treat as always different
+            (CfmlValue::Query(a), CfmlValue::Query(b)) => {
+                a.columns == b.columns && a.rows.len() == b.rows.len()
+                    && a.rows.iter().zip(b.rows.iter()).all(|(ra, rb)| {
+                        ra.len() == rb.len() && ra.iter().all(|(k, v)| {
+                            rb.get(k).map_or(false, |bv| Self::values_equal_shallow(v, bv))
+                        })
+                    })
+            }
+            (CfmlValue::Binary(a), CfmlValue::Binary(b)) => a == b,
+            // Components: treat as always different (complex state)
             _ => false,
         }
     }
