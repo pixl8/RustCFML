@@ -100,5 +100,25 @@ try { include "tags/test_tags_whitespace.cfm"; } catch (any e) { writeOutput("ER
 try { include "includes/test_variables_scope_includes.cfm"; } catch (any e) { writeOutput("ERROR | includes/test_variables_scope_includes.cfm | " & e.message & chr(10)); }
 try { include "includes/test_named_args_includes.cfm"; } catch (any e) { writeOutput("ERROR | includes/test_named_args_includes.cfm | " & e.message & chr(10)); }
 
+// --- Engine Compatibility ---
+try { include "compat_engine/test_math_functions.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_math_functions.cfm | " & e.message & chr(10)); }
+try { include "compat_engine/test_string_functions.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_string_functions.cfm | " & e.message & chr(10)); }
+try { include "compat_engine/test_struct_functions.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_struct_functions.cfm | " & e.message & chr(10)); }
+try { include "compat_engine/test_array_functions.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_array_functions.cfm | " & e.message & chr(10)); }
+try { include "compat_engine/test_list_functions.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_list_functions.cfm | " & e.message & chr(10)); }
+try { include "compat_engine/test_query_functions.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_query_functions.cfm | " & e.message & chr(10)); }
+try { include "compat_engine/test_date_functions.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_date_functions.cfm | " & e.message & chr(10)); }
+try { include "compat_engine/test_type_checking.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_type_checking.cfm | " & e.message & chr(10)); }
+try { include "compat_engine/test_json.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_json.cfm | " & e.message & chr(10)); }
+try { include "compat_engine/test_type_casting.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_type_casting.cfm | " & e.message & chr(10)); }
+try { include "compat_engine/test_language_operators.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_language_operators.cfm | " & e.message & chr(10)); }
+try { include "compat_engine/test_language_controlflow.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_language_controlflow.cfm | " & e.message & chr(10)); }
+try { include "compat_engine/test_language_closures.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_language_closures.cfm | " & e.message & chr(10)); }
+try { include "compat_engine/test_file_functions.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_file_functions.cfm | " & e.message & chr(10)); }
+try { include "compat_engine/test_encoding_functions.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_encoding_functions.cfm | " & e.message & chr(10)); }
+try { include "compat_engine/test_collection_functions.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_collection_functions.cfm | " & e.message & chr(10)); }
+try { include "compat_engine/test_edge_cases.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_edge_cases.cfm | " & e.message & chr(10)); }
+try { include "compat_engine/test_scope_behavior.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_scope_behavior.cfm | " & e.message & chr(10)); }
+
 printSummary();
 </cfscript>
