@@ -20,6 +20,8 @@ pub struct BytecodeProgram {
 pub struct BytecodeFunction {
     pub name: String,
     pub params: Vec<String>,
+    /// Which params are required (parallel to `params`; true = required)
+    pub required_params: Vec<bool>,
     pub instructions: Vec<BytecodeOp>,
     pub source_file: Option<String>,
 }
@@ -159,6 +161,7 @@ impl CfmlCompiler {
                 functions: vec![Arc::new(BytecodeFunction {
                     name: "__main__".to_string(),
                     params: Vec::new(),
+                    required_params: Vec::new(),
                     instructions: Vec::new(),
                     source_file: None,
                 })],
@@ -1022,6 +1025,7 @@ impl CfmlCompiler {
         let bc_func = BytecodeFunction {
             name: func.name.clone(),
             params: func.params.iter().map(|p| p.name.clone()).collect(),
+            required_params: func.params.iter().map(|p| p.required).collect(),
             instructions: func_instructions,
             source_file: None,
         };
@@ -1679,6 +1683,7 @@ impl CfmlCompiler {
                 let bc_func = BytecodeFunction {
                     name: func_name.clone(),
                     params: closure.params.iter().map(|p| p.name.clone()).collect(),
+                    required_params: closure.params.iter().map(|p| p.required).collect(),
                     instructions: func_instructions,
                     source_file: None,
                 };
@@ -1696,6 +1701,7 @@ impl CfmlCompiler {
                 let bc_func = BytecodeFunction {
                     name: func_name.clone(),
                     params: arrow.params.iter().map(|p| p.name.clone()).collect(),
+                    required_params: arrow.params.iter().map(|p| p.required).collect(),
                     instructions: func_instructions,
                     source_file: None,
                 };

@@ -498,6 +498,15 @@ impl CfmlVirtualMachine {
         for i in func.params.len()..args.len() {
             arguments_map.insert((i + 1).to_string(), args[i].clone());
         }
+        // Check required parameters
+        for (i, param_name) in func.params.iter().enumerate() {
+            if func.required_params.get(i).copied().unwrap_or(false) && args.get(i).is_none() {
+                return Err(self.wrap_error(CfmlError::runtime(
+                    format!("The parameter [{}] to function [{}] is required but was not passed in.",
+                        param_name, func.name)
+                )));
+            }
+        }
         locals.insert("arguments".to_string(), CfmlValue::Struct(arguments_map));
 
         // Push call frame for stack trace tracking (skip __main__ — it's the root)
@@ -762,8 +771,9 @@ impl CfmlVirtualMachine {
                     // 3. Check builtins/user_functions (exact, then CI)
                     } else if self.builtins.contains_key(name.as_str()) || self.user_functions.contains_key(name.as_str()) {
                         let params = self.user_functions.get(name.as_str())
-                            .map(|uf| uf.params.iter().map(|p| cfml_common::dynamic::CfmlParam {
-                                name: p.clone(), param_type: None, default: None, required: false,
+                            .map(|uf| uf.params.iter().enumerate().map(|(i, p)| cfml_common::dynamic::CfmlParam {
+                                name: p.clone(), param_type: None, default: None,
+                                required: uf.required_params.get(i).copied().unwrap_or(false),
                             }).collect())
                             .unwrap_or_default();
                         stack.push(CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
@@ -786,8 +796,9 @@ impl CfmlVirtualMachine {
                             .unwrap_or(name.clone());
                         let params = self.user_functions.iter()
                             .find(|(k, _)| k.to_lowercase() == name_lower)
-                            .map(|(_, uf)| uf.params.iter().map(|p| cfml_common::dynamic::CfmlParam {
-                                name: p.clone(), param_type: None, default: None, required: false,
+                            .map(|(_, uf)| uf.params.iter().enumerate().map(|(i, p)| cfml_common::dynamic::CfmlParam {
+                                name: p.clone(), param_type: None, default: None,
+                                required: uf.required_params.get(i).copied().unwrap_or(false),
                             }).collect())
                             .unwrap_or_default();
                         stack.push(CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
@@ -1175,14 +1186,31 @@ impl CfmlVirtualMachine {
                     named_values.reverse();
 
                     if let Some(func_ref) = stack.pop() {
+                        // Expand argumentCollection: unpack struct keys as named args
+                        let mut expanded_names = Vec::new();
+                        let mut expanded_values = Vec::new();
+                        for (i, name) in names.iter().enumerate() {
+                            if name.eq_ignore_ascii_case("argumentcollection") {
+                                if let Some(CfmlValue::Struct(s)) = named_values.get(i) {
+                                    for (k, v) in s {
+                                        expanded_names.push(k.clone());
+                                        expanded_values.push(v.clone());
+                                    }
+                                    continue;
+                                }
+                            }
+                            expanded_names.push(name.clone());
+                            expanded_values.push(named_values.get(i).cloned().unwrap_or(CfmlValue::Null));
+                        }
+
                         // Reorder named args to match function param positions
                         let args = if let CfmlValue::Function(ref f) = func_ref {
-                            let mut positional = vec![CfmlValue::Null; f.params.len().max(names.len())];
-                            for (i, name) in names.iter().enumerate() {
+                            let mut positional = vec![CfmlValue::Null; f.params.len().max(expanded_names.len())];
+                            for (i, name) in expanded_names.iter().enumerate() {
                                 if name.is_empty() {
                                     // Positional arg — keep in place
                                     if i < positional.len() {
-                                        positional[i] = named_values.get(i).cloned().unwrap_or(CfmlValue::Null);
+                                        positional[i] = expanded_values.get(i).cloned().unwrap_or(CfmlValue::Null);
                                     }
                                 } else {
                                     // Named arg — find matching param
@@ -1190,7 +1218,7 @@ impl CfmlVirtualMachine {
                                     for (pi, param) in f.params.iter().enumerate() {
                                         if param.name.eq_ignore_ascii_case(name) {
                                             if pi < positional.len() {
-                                                positional[pi] = named_values.get(i).cloned().unwrap_or(CfmlValue::Null);
+                                                positional[pi] = expanded_values.get(i).cloned().unwrap_or(CfmlValue::Null);
                                             }
                                             placed = true;
                                             break;
@@ -1198,7 +1226,7 @@ impl CfmlVirtualMachine {
                                     }
                                     if !placed {
                                         // No matching param — append at end (will be in arguments scope by position)
-                                        positional.push(named_values.get(i).cloned().unwrap_or(CfmlValue::Null));
+                                        positional.push(expanded_values.get(i).cloned().unwrap_or(CfmlValue::Null));
                                     }
                                 }
                             }
@@ -1642,14 +1670,15 @@ impl CfmlVirtualMachine {
                         }
                     }
                     // Push function reference — encode func_idx in body for super dispatch
+                    let bc_func_ref = &self.program.functions[func_idx];
                     stack.push(CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
                         name: func_name,
-                        params: self.program.functions[func_idx].params.iter().map(|name| {
+                        params: bc_func_ref.params.iter().enumerate().map(|(i, name)| {
                             cfml_common::dynamic::CfmlParam {
                                 name: name.clone(),
                                 param_type: None,
                                 default: None,
-                                required: false,
+                                required: bc_func_ref.required_params.get(i).copied().unwrap_or(false),
                             }
                         }).collect(),
                         body: cfml_common::dynamic::CfmlClosureBody::Expression(
@@ -6493,12 +6522,12 @@ impl CfmlVirtualMachine {
                             {
                                 let cf = CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
                                     name: func_name.clone(),
-                                    params: func_def.params.iter().map(|name| {
+                                    params: func_def.params.iter().enumerate().map(|(i, name)| {
                                         cfml_common::dynamic::CfmlParam {
                                             name: name.clone(),
                                             param_type: None,
                                             default: None,
-                                            required: false,
+                                            required: func_def.required_params.get(i).copied().unwrap_or(false),
                                         }
                                     }).collect(),
                                     body: cfml_common::dynamic::CfmlClosureBody::Expression(
