@@ -721,7 +721,15 @@ impl CfmlVirtualMachine {
                                 vars.insert(name.clone(), val);
                             }
                         } else {
-                            locals.insert(name.clone(), val);
+                            locals.insert(name.clone(), val.clone());
+                            // Sync to shared closure env so closures see updated value
+                            // Only update vars already in the env (don't pollute with new vars)
+                            if let Some(ref env) = closure_env {
+                                let mut m = env.write().unwrap();
+                                if m.contains_key(name.as_str()) {
+                                    m.insert(name.clone(), val);
+                                }
+                            }
                         }
                     }
                 }
@@ -1660,7 +1668,14 @@ impl CfmlVirtualMachine {
                             CfmlValue::Double(d) => CfmlValue::Double(d + 1.0),
                             _ => CfmlValue::Int(1),
                         };
-                        locals.insert(name.clone(), new_val);
+                        locals.insert(name.clone(), new_val.clone());
+                        // Sync to shared closure env so closures see updated value
+                        if let Some(ref env) = closure_env {
+                            let mut m = env.write().unwrap();
+                            if m.contains_key(name.as_str()) {
+                                m.insert(name.clone(), new_val);
+                            }
+                        }
                     }
                 }
                 BytecodeOp::Decrement(name) => {
@@ -1670,7 +1685,14 @@ impl CfmlVirtualMachine {
                             CfmlValue::Double(d) => CfmlValue::Double(d - 1.0),
                             _ => CfmlValue::Int(-1),
                         };
-                        locals.insert(name.clone(), new_val);
+                        locals.insert(name.clone(), new_val.clone());
+                        // Sync to shared closure env so closures see updated value
+                        if let Some(ref env) = closure_env {
+                            let mut m = env.write().unwrap();
+                            if m.contains_key(name.as_str()) {
+                                m.insert(name.clone(), new_val);
+                            }
+                        }
                     }
                 }
 
@@ -2369,6 +2391,7 @@ impl CfmlVirtualMachine {
                 | "each"
                 | "queryeach" | "querymap" | "queryfilter" | "queryreduce"
                 | "querysort" | "querysome" | "queryevery"
+                | "queryaddrow" | "querysetcell"
                 | "createobject"
                 | "getcurrenttemplatepath"
                 | "getcomponentmetadata"
@@ -3322,6 +3345,7 @@ impl CfmlVirtualMachine {
                             }
                         }
                     }
+                    self.arg_ref_writeback = None;
                     return Ok(CfmlValue::Null);
                 }
                 "querymap" => {
@@ -3345,6 +3369,7 @@ impl CfmlVirtualMachine {
                             }
                             let mut result = q.clone();
                             result.rows = new_rows;
+                            self.arg_ref_writeback = None;
                             return Ok(CfmlValue::Query(result));
                         }
                     }
@@ -3369,6 +3394,7 @@ impl CfmlVirtualMachine {
                             }
                             let mut result = q.clone();
                             result.rows = new_rows;
+                            self.arg_ref_writeback = None;
                             return Ok(CfmlValue::Query(result));
                         }
                     }
@@ -3388,6 +3414,7 @@ impl CfmlVirtualMachine {
                                     Self::write_back_to_captured_scope(&callback, wb);
                                 }
                             }
+                            self.arg_ref_writeback = None;
                             return Ok(acc);
                         }
                     }
@@ -3422,6 +3449,7 @@ impl CfmlVirtualMachine {
                             }
                             let mut result = q.clone();
                             result.rows = rows;
+                            self.arg_ref_writeback = None;
                             return Ok(CfmlValue::Query(result));
                         }
                     }
@@ -3440,9 +3468,11 @@ impl CfmlVirtualMachine {
                                     Self::write_back_to_captured_scope(&callback, wb);
                                 }
                                 if result.is_true() {
+                                    self.arg_ref_writeback = None;
                                     return Ok(CfmlValue::Bool(true));
                                 }
                             }
+                            self.arg_ref_writeback = None;
                             return Ok(CfmlValue::Bool(false));
                         }
                     }
@@ -3461,13 +3491,74 @@ impl CfmlVirtualMachine {
                                     Self::write_back_to_captured_scope(&callback, wb);
                                 }
                                 if !result.is_true() {
+                                    self.arg_ref_writeback = None;
                                     return Ok(CfmlValue::Bool(false));
                                 }
                             }
+                            self.arg_ref_writeback = None;
                             return Ok(CfmlValue::Bool(true));
                         }
                     }
                     return Ok(CfmlValue::Bool(true));
+                }
+                "queryaddrow" => {
+                    // Mutate query in place (like Lucee/BoxLang), return new row count
+                    if let Some(CfmlValue::Query(q)) = args.first() {
+                        let mut result = q.clone();
+                        if args.len() >= 2 {
+                            match &args[1] {
+                                CfmlValue::Int(n) => {
+                                    for _ in 0..*n {
+                                        result.rows.push(IndexMap::new());
+                                    }
+                                }
+                                CfmlValue::Struct(data) => {
+                                    result.rows.push(data.clone());
+                                }
+                                CfmlValue::Array(rows) => {
+                                    for item in rows {
+                                        if let CfmlValue::Struct(data) = item {
+                                            result.rows.push(data.clone());
+                                        } else {
+                                            result.rows.push(IndexMap::new());
+                                        }
+                                    }
+                                }
+                                _ => { result.rows.push(IndexMap::new()); }
+                            }
+                        } else {
+                            result.rows.push(IndexMap::new());
+                        }
+                        let row_count = result.rows.len() as i64;
+                        // Write mutated query back to caller via arg_ref_writeback
+                        self.arg_ref_writeback = Some(vec![("0".to_string(), CfmlValue::Query(result))]);
+                        return Ok(CfmlValue::Int(row_count));
+                    }
+                    return Ok(CfmlValue::Int(0));
+                }
+                "querysetcell" => {
+                    // Mutate query in place (like Lucee/BoxLang), return true
+                    if args.len() >= 3 {
+                        if let CfmlValue::Query(q) = &args[0] {
+                            let mut result = q.clone();
+                            let column = args[1].as_string();
+                            let value = args[2].clone();
+                            let row_idx = if args.len() >= 4 {
+                                match &args[3] {
+                                    CfmlValue::Int(n) => (*n as usize).saturating_sub(1),
+                                    _ => result.rows.len().saturating_sub(1),
+                                }
+                            } else {
+                                result.rows.len().saturating_sub(1)
+                            };
+                            if row_idx < result.rows.len() {
+                                result.rows[row_idx].insert(column, value);
+                            }
+                            self.arg_ref_writeback = Some(vec![("0".to_string(), CfmlValue::Query(result))]);
+                            return Ok(CfmlValue::Bool(true));
+                        }
+                    }
+                    return Ok(CfmlValue::Bool(false));
                 }
                 "getcurrenttemplatepath" => {
                     if let Some(ref source) = self.source_file {
@@ -7910,7 +8001,8 @@ fn find_arg_sources(ops: &[BytecodeOp], call_ip: usize, arg_count: usize) -> Vec
                 depth -= 1;
             } else if arg_idx > 0 {
                 arg_idx -= 1;
-                if let BytecodeOp::LoadLocal(name) | BytecodeOp::TryLoadLocal(name) = op {
+                if let BytecodeOp::LoadLocal(name) | BytecodeOp::TryLoadLocal(name)
+                    | BytecodeOp::LoadGlobal(name) = op {
                     sources[arg_idx] = Some(name.clone());
                 }
             }

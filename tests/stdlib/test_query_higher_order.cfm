@@ -2,26 +2,12 @@
 suiteBegin("Query Higher-Order Functions");
 
 // --- Build test query ---
-q = queryNew("id,name,age", "integer,varchar,integer");
-queryAddRow(q);
-querySetCell(q, "id", 1);
-querySetCell(q, "name", "Charlie");
-querySetCell(q, "age", 30);
-
-queryAddRow(q);
-querySetCell(q, "id", 2, 2);
-querySetCell(q, "name", "Alice", 2);
-querySetCell(q, "age", 22, 2);
-
-queryAddRow(q);
-querySetCell(q, "id", 3, 3);
-querySetCell(q, "name", "Bob", 3);
-querySetCell(q, "age", 35, 3);
-
-queryAddRow(q);
-querySetCell(q, "id", 4, 4);
-querySetCell(q, "name", "Diana", 4);
-querySetCell(q, "age", 28, 4);
+q = queryNew("id,name,age", "integer,varchar,integer", [
+    {id: 1, name: "Charlie", age: 30},
+    {id: 2, name: "Alice", age: 22},
+    {id: 3, name: "Bob", age: 35},
+    {id: 4, name: "Diana", age: 28}
+]);
 
 // --- queryEach ---
 count = 0;

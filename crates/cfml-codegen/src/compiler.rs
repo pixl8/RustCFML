@@ -265,7 +265,7 @@ impl CfmlCompiler {
                     "structclear" | "arrayclear" | "arrayappend" | "arrayprepend" |
                     "arrayinsert" | "arrayinsertat" | "arraydeleteat" | "arraysort" |
                     "arrayresize" | "arrayswap" | "arrayreverse" | "arrayset" |
-                    "queryaddrow" | "querysetcell" | "queryaddcolumn" |
+                    "queryaddcolumn" |
                     "querydeleterow" | "querydeletecolumn" | "querysort"
                 ) && !call.arguments.is_empty();
             }
