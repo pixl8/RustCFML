@@ -1589,6 +1589,12 @@ fn fn_array_new(_args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_array_len(args: Vec<CfmlValue>) -> CfmlResult {
     match args.first() {
         Some(CfmlValue::Array(a)) => Ok(CfmlValue::Int(a.len() as i64)),
+        // Arguments scope is a struct but arrayLen should return count of positional entries
+        Some(CfmlValue::Struct(s)) => {
+            // Count entries with numeric keys (1-based positional args)
+            let count = s.keys().filter(|k| k.parse::<usize>().is_ok()).count();
+            Ok(CfmlValue::Int(count as i64))
+        }
         _ => Ok(CfmlValue::Int(0)),
     }
 }
@@ -2517,18 +2523,25 @@ fn fn_to_boolean(args: Vec<CfmlValue>) -> CfmlResult {
 
 fn fn_val(args: Vec<CfmlValue>) -> CfmlResult {
     // val() extracts the leading numeric value from a string
+    // Booleans: true=1, false=0
+    if let Some(CfmlValue::Bool(b)) = args.first() {
+        return Ok(CfmlValue::Int(if *b { 1 } else { 0 }));
+    }
     let s = get_str(&args, 0).trim().to_string();
     let mut num_str = String::new();
     let mut has_dot = false;
+    let mut has_exp = false;
     for (i, c) in s.chars().enumerate() {
         if c.is_ascii_digit() {
             num_str.push(c);
-        } else if c == '.' && !has_dot {
+        } else if c == '.' && !has_dot && !has_exp {
             has_dot = true;
             num_str.push(c);
-        } else if (c == '-' || c == '+') && i == 0 {
-            if c == '-' { num_str.push(c); }
-            // Skip '+' sign (don't push it, but continue parsing)
+        } else if (c == 'e' || c == 'E') && !has_exp && !num_str.is_empty() && num_str != "-" {
+            has_exp = true;
+            num_str.push(c);
+        } else if (c == '-' || c == '+') && (i == 0 || has_exp && num_str.ends_with(|ch: char| ch == 'e' || ch == 'E')) {
+            if c == '-' || has_exp { num_str.push(c); }
         } else {
             break;
         }
@@ -2536,7 +2549,12 @@ fn fn_val(args: Vec<CfmlValue>) -> CfmlResult {
     if num_str.is_empty() || num_str == "-" || num_str == "." {
         return Ok(CfmlValue::Int(0));
     }
-    if has_dot {
+    // Strip trailing 'e' or 'E' if no exponent digits followed
+    if num_str.ends_with('e') || num_str.ends_with('E') {
+        num_str.pop();
+        has_exp = false;
+    }
+    if has_dot || has_exp {
         Ok(CfmlValue::Double(num_str.parse().unwrap_or(0.0)))
     } else {
         Ok(CfmlValue::Int(num_str.parse().unwrap_or(0)))
@@ -3838,17 +3856,43 @@ fn fn_query_new(args: Vec<CfmlValue>) -> CfmlResult {
         return Ok(CfmlValue::Query(CfmlQuery::new(Vec::new())));
     }
     // queryNew("col1,col2") or queryNew(["col1","col2"])
-    match &args[0] {
-        CfmlValue::String(s) => {
-            let columns: Vec<String> = s.split(',').map(|c| c.trim().to_string()).collect();
-            Ok(CfmlValue::Query(CfmlQuery::new(columns)))
+    let columns: Vec<String> = match &args[0] {
+        CfmlValue::String(s) => s.split(',').map(|c| c.trim().to_string()).collect(),
+        CfmlValue::Array(arr) => arr.iter().map(|v| v.as_string()).collect(),
+        _ => Vec::new(),
+    };
+    let mut query = CfmlQuery::new(columns.clone());
+    // 3rd arg: initial data as array of arrays or array of structs
+    if args.len() >= 3 {
+        if let CfmlValue::Array(data_rows) = &args[2] {
+            for row_data in data_rows {
+                match row_data {
+                    CfmlValue::Array(values) => {
+                        // Array of arrays: each inner array maps positionally to columns
+                        let mut row = IndexMap::new();
+                        for (i, val) in values.iter().enumerate() {
+                            if i < columns.len() {
+                                row.insert(columns[i].clone(), val.clone());
+                            }
+                        }
+                        query.rows.push(row);
+                    }
+                    CfmlValue::Struct(s) => {
+                        query.rows.push(s.clone());
+                    }
+                    _ => {
+                        // Single-column shortcut: wrap scalar in a row
+                        let mut row = IndexMap::new();
+                        if !columns.is_empty() {
+                            row.insert(columns[0].clone(), row_data.clone());
+                        }
+                        query.rows.push(row);
+                    }
+                }
+            }
         }
-        CfmlValue::Array(arr) => {
-            let columns: Vec<String> = arr.iter().map(|v| v.as_string()).collect();
-            Ok(CfmlValue::Query(CfmlQuery::new(columns)))
-        }
-        _ => Ok(CfmlValue::Query(CfmlQuery::new(Vec::new()))),
     }
+    Ok(CfmlValue::Query(query))
 }
 
 fn fn_query_add_row(args: Vec<CfmlValue>) -> CfmlResult {
