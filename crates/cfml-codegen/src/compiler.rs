@@ -1214,11 +1214,31 @@ impl CfmlCompiler {
             }
         }
 
-        // Emit __properties array listing property names
+        // Emit __properties array listing property metadata structs
         if !component.properties.is_empty() {
             let prop_count = component.properties.len();
             for prop in &component.properties {
+                // Each property is a struct with name, type, required, and any custom attributes
+                let mut attr_count = 1; // always have "name"
+                instructions.push(BytecodeOp::String("name".to_string()));
                 instructions.push(BytecodeOp::String(prop.name.clone()));
+                if let Some(ref pt) = prop.prop_type {
+                    instructions.push(BytecodeOp::String("type".to_string()));
+                    instructions.push(BytecodeOp::String(pt.clone()));
+                    attr_count += 1;
+                }
+                if prop.required {
+                    instructions.push(BytecodeOp::String("required".to_string()));
+                    instructions.push(BytecodeOp::True);
+                    attr_count += 1;
+                }
+                // Custom attributes (inject, hint, etc.)
+                for (key, val) in &prop.attributes {
+                    instructions.push(BytecodeOp::String(key.clone()));
+                    instructions.push(BytecodeOp::String(val.clone()));
+                    attr_count += 1;
+                }
+                instructions.push(BytecodeOp::BuildStruct(attr_count));
             }
             instructions.push(BytecodeOp::BuildArray(prop_count));
             instructions.push(BytecodeOp::LoadLocal(component.name.clone()));

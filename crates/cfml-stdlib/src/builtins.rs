@@ -421,6 +421,7 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("getCanonicalPath".into(), fn_get_canonical_path);
     f.insert("systemOutput".into(), fn_system_output);
     f.insert("getEnvironmentVariable".into(), fn_get_environment_variable);
+    f.insert("readLine".into(), fn_read_line);
     f.insert("getTemplatePath".into(), fn_get_current_template_path);  // alias
     f.insert("writeLog".into(), fn_write_log);
     f.insert("setLocale".into(), fn_set_locale);
@@ -4784,14 +4785,18 @@ fn fn_directory_list(args: Vec<CfmlValue>) -> CfmlResult {
             let full_path = entry_path.to_string_lossy().to_string();
             let file_name = entry.file_name().to_string_lossy().to_string();
 
-            if entry_path.is_file() && matches_filter(&file_name, filter) {
+            let is_dir = entry_path.is_dir();
+            let is_file = entry_path.is_file();
+
+            // Include both files and directories (matching CFML behavior)
+            if (is_file && matches_filter(&file_name, filter)) || (is_dir && (filter.is_empty() || !filter.starts_with("*."))) {
                 let value = match list_info {
                     "name" => file_name.clone(),
                     _ => full_path.clone(), // "path" is default
                 };
                 results.push(CfmlValue::String(value));
             }
-            if recurse && entry_path.is_dir() {
+            if recurse && is_dir {
                 results.extend(list_dir(&full_path, true, filter, list_info)?);
             }
         }
@@ -8715,6 +8720,25 @@ fn fn_get_environment_variable(args: Vec<CfmlValue>) -> CfmlResult {
         Ok(val) => Ok(CfmlValue::String(val)),
         Err(_) => Ok(CfmlValue::String(String::new())),
     }
+}
+
+fn fn_read_line(args: Vec<CfmlValue>) -> CfmlResult {
+    // Optional prompt argument
+    if !args.is_empty() {
+        let prompt = args[0].as_string();
+        eprint!("{}", prompt);
+    }
+    use std::io::{self, BufRead};
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line).unwrap_or(0);
+    // Strip trailing newline
+    if line.ends_with('\n') {
+        line.pop();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+    }
+    Ok(CfmlValue::String(line))
 }
 
 fn fn_write_log(args: Vec<CfmlValue>) -> CfmlResult {

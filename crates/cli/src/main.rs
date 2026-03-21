@@ -1300,7 +1300,7 @@ fn parse_embedded_meta(files: &std::collections::HashMap<String, Vec<u8>>) -> (S
 /// Run the embedded app (self-contained binary mode).
 /// Supports both "serve" (web server) and "cli" (command-line) modes.
 fn run_embedded_app(mut files: std::collections::HashMap<String, Vec<u8>>) {
-    use cfml_common::vfs::EmbeddedFs;
+    use cfml_common::vfs::{EmbeddedFs, FallbackFs, RealFs};
 
     let (mode, entry) = parse_embedded_meta(&files);
 
@@ -1314,7 +1314,15 @@ fn run_embedded_app(mut files: std::collections::HashMap<String, Vec<u8>>) {
         .to_string_lossy()
         .to_string();
 
-    let vfs: Arc<dyn Vfs> = Arc::new(EmbeddedFs::new(files, base_dir.clone()));
+    // FallbackFs: try embedded files first, then real filesystem.
+    // This allows embedded apps to load external files (e.g. modules on disk).
+    // Sandbox mode is determined later per-invocation; default to non-sandboxed
+    // here — run_embedded_cli/serve will set it based on --sandbox flag.
+    let vfs: Arc<dyn Vfs> = Arc::new(FallbackFs {
+        embedded: EmbeddedFs::new(files, base_dir.clone()),
+        real: RealFs,
+        sandbox: false,
+    });
 
     if mode == "cli" {
         run_embedded_cli(vfs, &base_dir, &entry, file_count);

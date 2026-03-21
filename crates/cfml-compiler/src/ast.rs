@@ -52,6 +52,7 @@ pub struct Property {
     pub prop_type: Option<String>,
     pub default: Option<Expression>,
     pub required: bool,
+    pub attributes: Vec<(String, String)>,
     pub location: SourceLocation,
 }
 

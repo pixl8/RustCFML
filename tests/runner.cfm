@@ -11,6 +11,7 @@ try { include "core/test_operators.cfm"; } catch (any e) { writeOutput("ERROR | 
 try { include "core/test_control_flow.cfm"; } catch (any e) { writeOutput("ERROR | core/test_control_flow.cfm | " & e.message & chr(10)); }
 try { include "core/test_error_handling.cfm"; } catch (any e) { writeOutput("ERROR | core/test_error_handling.cfm | " & e.message & chr(10)); }
 try { include "core/test_functions.cfm"; } catch (any e) { writeOutput("ERROR | core/test_functions.cfm | " & e.message & chr(10)); }
+try { include "core/test_arguments_writeback.cfm"; } catch (any e) { writeOutput("ERROR | core/test_arguments_writeback.cfm | " & e.message & chr(10)); }
 try { include "core/test_language_features.cfm"; } catch (any e) { writeOutput("ERROR | core/test_language_features.cfm | " & e.message & chr(10)); }
 try { include "core/test_scopes.cfm"; } catch (any e) { writeOutput("ERROR | core/test_scopes.cfm | " & e.message & chr(10)); }
 try { include "core/test_error_context.cfm"; } catch (any e) { writeOutput("ERROR | core/test_error_context.cfm | " & e.message & chr(10)); }
@@ -65,6 +66,10 @@ try { include "stdlib/test_callstack.cfm"; } catch (any e) { writeOutput("ERROR 
 try { include "stdlib/test_precisionevaluate.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_precisionevaluate.cfm | " & e.message & chr(10)); }
 try { include "stdlib/test_htmlparse.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_htmlparse.cfm | " & e.message & chr(10)); }
 try { include "stdlib/test_ini_functions.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_ini_functions.cfm | " & e.message & chr(10)); }
+try { include "stdlib/test_directorylist.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_directorylist.cfm | " & e.message & chr(10)); }
+
+// --- Function References ---
+try { include "functions/test_function_references.cfm"; } catch (any e) { writeOutput("ERROR | functions/test_function_references.cfm | " & e.message & chr(10)); }
 
 // --- Member Functions ---
 try { include "members/test_string_members.cfm"; } catch (any e) { writeOutput("ERROR | members/test_string_members.cfm | " & e.message & chr(10)); }
@@ -77,6 +82,8 @@ try { include "oop/test_components.cfm"; } catch (any e) { writeOutput("ERROR | 
 try { include "oop/test_inheritance.cfm"; } catch (any e) { writeOutput("ERROR | oop/test_inheritance.cfm | " & e.message & chr(10)); }
 try { include "oop/test_interfaces.cfm"; } catch (any e) { writeOutput("ERROR | oop/test_interfaces.cfm | " & e.message & chr(10)); }
 try { include "oop/test_metadata.cfm"; } catch (any e) { writeOutput("ERROR | oop/test_metadata.cfm | " & e.message & chr(10)); }
+try { include "oop/test_property_attributes.cfm"; } catch (any e) { writeOutput("ERROR | oop/test_property_attributes.cfm | " & e.message & chr(10)); }
+try { include "oop/test_struct_method_dispatch.cfm"; } catch (any e) { writeOutput("ERROR | oop/test_struct_method_dispatch.cfm | " & e.message & chr(10)); }
 
 // --- Tags ---
 try { include "tags/test_tags_basic.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_basic.cfm | " & e.message & chr(10)); }

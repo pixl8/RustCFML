@@ -118,9 +118,10 @@ impl EmbeddedFs {
     /// Paths should use forward slashes and be relative to the app root.
     pub fn new(files: HashMap<String, Vec<u8>>, base_dir: String) -> Self {
         let mut dirs = std::collections::HashSet::new();
-        // Build directory index from file paths
-        for path in files.keys() {
-            let normalized = Self::normalize_path_static(path);
+        // Normalize all file keys to lowercase for case-insensitive lookup
+        let mut normalized_files = HashMap::new();
+        for (path, data) in files {
+            let normalized = Self::normalize_path_static(&path);
             let mut current = String::new();
             for segment in normalized.split('/') {
                 if !current.is_empty() {
@@ -134,9 +135,10 @@ impl EmbeddedFs {
             }
             // Also add the root dir
             dirs.insert(String::new());
+            normalized_files.insert(normalized, data);
         }
         Self {
-            files,
+            files: normalized_files,
             dirs,
             base_dir,
             mtime: SystemTime::now(),
@@ -280,6 +282,66 @@ impl Vfs for EmbeddedFs {
             Err(io::Error::new(io::ErrorKind::NotFound,
                 format!("cannot canonicalize: {}", path)))
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FallbackFs — tries embedded FS first, falls back to real filesystem.
+// Used in embedded binaries so they can load external files (e.g. modules).
+// ---------------------------------------------------------------------------
+
+pub struct FallbackFs {
+    pub embedded: EmbeddedFs,
+    pub real: RealFs,
+    /// When true, only the embedded FS is used (no disk fallback).
+    /// Set this in sandbox mode to prevent filesystem access.
+    pub sandbox: bool,
+}
+
+impl std::fmt::Debug for FallbackFs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FallbackFs")
+            .field("embedded", &self.embedded)
+            .finish()
+    }
+}
+
+impl Vfs for FallbackFs {
+    fn read_to_string(&self, path: &str) -> io::Result<String> {
+        let result = self.embedded.read_to_string(path);
+        if result.is_ok() || self.sandbox { return result; }
+        self.real.read_to_string(path)
+    }
+    fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+        let result = self.embedded.read(path);
+        if result.is_ok() || self.sandbox { return result; }
+        self.real.read(path)
+    }
+    fn exists(&self, path: &str) -> bool {
+        self.embedded.exists(path) || (!self.sandbox && self.real.exists(path))
+    }
+    fn is_file(&self, path: &str) -> bool {
+        self.embedded.is_file(path) || (!self.sandbox && self.real.is_file(path))
+    }
+    fn is_dir(&self, path: &str) -> bool {
+        self.embedded.is_dir(path) || (!self.sandbox && self.real.is_dir(path))
+    }
+    fn read_dir(&self, path: &str) -> io::Result<Vec<VfsDirEntry>> {
+        if self.sandbox { return self.embedded.read_dir(path); }
+        // Prefer real FS for directories (modules live on disk),
+        // fall back to embedded
+        self.real.read_dir(path)
+            .or_else(|_| self.embedded.read_dir(path))
+    }
+    fn modified(&self, path: &str) -> io::Result<SystemTime> {
+        let result = self.embedded.modified(path);
+        if result.is_ok() || self.sandbox { return result; }
+        self.real.modified(path)
+    }
+    fn canonicalize(&self, path: &str) -> io::Result<String> {
+        let result = self.embedded.canonicalize(path);
+        if result.is_ok() || self.sandbox { return result; }
+        self.real.canonicalize(path)
     }
 }
 

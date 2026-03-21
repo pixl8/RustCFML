@@ -614,6 +614,32 @@ impl CfmlVirtualMachine {
                             .find(|(k, _)| k.to_lowercase() == name_lower)
                             .map(|(_, v)| v.clone()) {
                             val
+                        } else if let Some(bc_func) = self.user_functions.get(name.as_str())
+                            .or_else(|| self.user_functions.iter()
+                                .find(|(k, _)| k.to_lowercase() == name_lower)
+                                .map(|(_, v)| v))
+                            .cloned() {
+                            // User-defined function referenced as a value (first-class function)
+                            // Like Lucee/BoxLang: functions are in variables scope
+                            let func_idx = self.program.functions.iter().position(|f| f.name == bc_func.name)
+                                .unwrap_or(0);
+                            CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
+                                name: bc_func.name.clone(),
+                                params: bc_func.params.iter().enumerate().map(|(i, pname)| {
+                                    cfml_common::dynamic::CfmlParam {
+                                        name: pname.clone(),
+                                        param_type: None,
+                                        default: None,
+                                        required: bc_func.required_params.get(i).copied().unwrap_or(false),
+                                    }
+                                }).collect(),
+                                body: cfml_common::dynamic::CfmlClosureBody::Expression(
+                                    Box::new(CfmlValue::Int(func_idx as i64)),
+                                ),
+                                return_type: None,
+                                access: cfml_common::dynamic::CfmlAccess::Public,
+                                captured_scope: None,
+                            })
                         } else {
                             // Variable not found — check try_stack for error handler
                             if let Some(handler) = self.try_stack.pop() {
@@ -719,6 +745,19 @@ impl CfmlVirtualMachine {
                             }
                         } else if name_lower == "thread" && self.globals.contains_key("thread") {
                             self.globals.insert("thread".to_string(), val);
+                        } else if name_lower == "arguments" && is_inside_function {
+                            // When the arguments scope is stored, sync complex-type
+                            // params back to their named locals so that modifications
+                            // via `arguments.param.prop = val` are visible to the
+                            // pass-by-reference writeback mechanism.
+                            if let CfmlValue::Struct(ref args) = val {
+                                for (k, v) in args {
+                                    if matches!(v, CfmlValue::Struct(_) | CfmlValue::Array(_) | CfmlValue::Query(_) | CfmlValue::Component(_)) {
+                                        locals.insert(k.clone(), v.clone());
+                                    }
+                                }
+                            }
+                            locals.insert(name.clone(), val);
                         } else if locals.contains_key("__variables")
                             && !declared_locals.contains(name)
                             && !declared_locals.contains(&name_lower)
@@ -731,6 +770,17 @@ impl CfmlVirtualMachine {
                             }
                         } else {
                             locals.insert(name.clone(), val.clone());
+                            // Bidirectional sync: when a function param is stored,
+                            // also update arguments[param] so `arguments.x` sees
+                            // the latest value (and vice versa, handled above for arguments)
+                            if is_inside_function
+                                && func.params.iter().any(|p| p.eq_ignore_ascii_case(name))
+                                && matches!(val, CfmlValue::Struct(_) | CfmlValue::Array(_) | CfmlValue::Query(_) | CfmlValue::Component(_))
+                            {
+                                if let Some(CfmlValue::Struct(ref mut args)) = locals.get_mut("arguments") {
+                                    args.insert(name.clone(), val.clone());
+                                }
+                            }
                             // Sync to shared closure env so closures see updated value
                             // Only update vars already in the env (don't pollute with new vars)
                             if let Some(ref env) = closure_env {
@@ -1783,8 +1833,7 @@ impl CfmlVirtualMachine {
                     // don't consume the caller's handlers
                     let saved_try_stack_method = std::mem::take(&mut self.try_stack);
                     let method_result: Result<CfmlValue, CfmlError> = if let CfmlValue::Struct(ref s) = object {
-                        if !s.contains_key("__name") && !s.is_empty()
-                            && s.values().any(|v| matches!(v, CfmlValue::Function(_)))
+                        if s.contains_key("__is_super")
                         {
                             // Super dispatch — find the parent's function by stored index
                             let prop = object.get(&method_name).unwrap_or(CfmlValue::Null);
@@ -3680,49 +3729,54 @@ impl CfmlVirtualMachine {
                     return Ok(CfmlValue::String("UTC".to_string()));
                 }
                 "getcomponentmetadata" => {
-                    if let Some(dot_path) = args.get(0) {
-                        let comp_name = dot_path.as_string();
+                    // Helper: extract metadata from a component struct
+                    fn extract_component_meta(s: &IndexMap<String, CfmlValue>, fallback_name: &str) -> CfmlValue {
+                        let mut meta = IndexMap::new();
+                        meta.insert("name".to_string(), s.get("__name").cloned().unwrap_or(CfmlValue::String(fallback_name.to_string())));
+                        if let Some(chain) = s.get("__extends_chain") {
+                            if let CfmlValue::Array(arr) = chain {
+                                if let Some(first) = arr.first() {
+                                    meta.insert("extends".to_string(), first.clone());
+                                }
+                            }
+                        }
+                        let mut functions = Vec::new();
+                        for (k, v) in s {
+                            if let CfmlValue::Function(f) = v {
+                                if !k.starts_with("__") {
+                                    let mut func_meta = IndexMap::new();
+                                    func_meta.insert("name".to_string(), CfmlValue::String(k.clone()));
+                                    func_meta.insert("access".to_string(), CfmlValue::String(format!("{:?}", f.access).to_lowercase()));
+                                    if let Some(ref rt) = f.return_type {
+                                        func_meta.insert("returntype".to_string(), CfmlValue::String(rt.clone()));
+                                    }
+                                    let params: Vec<CfmlValue> = f.params.iter().map(|p| CfmlValue::String(p.name.clone())).collect();
+                                    func_meta.insert("parameters".to_string(), CfmlValue::Array(params));
+                                    functions.push(CfmlValue::Struct(func_meta));
+                                }
+                            }
+                        }
+                        meta.insert("functions".to_string(), CfmlValue::Array(functions));
+                        if let Some(md) = s.get("__metadata") {
+                            meta.insert("metadata".to_string(), md.clone());
+                        }
+                        if let Some(props) = s.get("__properties") {
+                            meta.insert("properties".to_string(), props.clone());
+                        }
+                        CfmlValue::Struct(meta)
+                    }
+
+                    if let Some(arg) = args.get(0) {
+                        // If the argument is already a struct (component instance), extract metadata directly
+                        if let CfmlValue::Struct(ref s) = arg {
+                            return Ok(extract_component_meta(s, ""));
+                        }
+                        // Otherwise treat as a component name/path to look up
+                        let comp_name = arg.as_string();
                         if let Some(template) = self.resolve_component_template(&comp_name, parent_locals) {
                             let resolved = self.resolve_inheritance(template, parent_locals);
                             if let CfmlValue::Struct(ref s) = resolved {
-                                let mut meta = IndexMap::new();
-                                // Name
-                                meta.insert("name".to_string(), s.get("__name").cloned().unwrap_or(CfmlValue::String(comp_name.clone())));
-                                // Extends
-                                if let Some(chain) = s.get("__extends_chain") {
-                                    if let CfmlValue::Array(arr) = chain {
-                                        if let Some(first) = arr.first() {
-                                            meta.insert("extends".to_string(), first.clone());
-                                        }
-                                    }
-                                }
-                                // Functions array
-                                let mut functions = Vec::new();
-                                for (k, v) in s {
-                                    if let CfmlValue::Function(f) = v {
-                                        if !k.starts_with("__") {
-                                            let mut func_meta = IndexMap::new();
-                                            func_meta.insert("name".to_string(), CfmlValue::String(k.clone()));
-                                            func_meta.insert("access".to_string(), CfmlValue::String(format!("{:?}", f.access).to_lowercase()));
-                                            if let Some(ref rt) = f.return_type {
-                                                func_meta.insert("returntype".to_string(), CfmlValue::String(rt.clone()));
-                                            }
-                                            let params: Vec<CfmlValue> = f.params.iter().map(|p| CfmlValue::String(p.name.clone())).collect();
-                                            func_meta.insert("parameters".to_string(), CfmlValue::Array(params));
-                                            functions.push(CfmlValue::Struct(func_meta));
-                                        }
-                                    }
-                                }
-                                meta.insert("functions".to_string(), CfmlValue::Array(functions));
-                                // Component metadata
-                                if let Some(md) = s.get("__metadata") {
-                                    meta.insert("metadata".to_string(), md.clone());
-                                }
-                                // Properties
-                                if let Some(props) = s.get("__properties") {
-                                    meta.insert("properties".to_string(), props.clone());
-                                }
-                                return Ok(CfmlValue::Struct(meta));
+                                return Ok(extract_component_meta(s, &comp_name));
                             }
                             return Ok(resolved);
                         }
@@ -6861,8 +6915,9 @@ impl CfmlVirtualMachine {
             }
         }
 
-        // Add __super struct
+        // Add __super struct with marker for dispatch detection
         if !super_methods.is_empty() {
+            super_methods.insert("__is_super".to_string(), CfmlValue::Bool(true));
             parent_map.insert("__super".to_string(), CfmlValue::Struct(super_methods));
         }
 

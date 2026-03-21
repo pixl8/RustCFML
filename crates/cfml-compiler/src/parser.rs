@@ -1494,11 +1494,23 @@ impl Parser {
 
     fn parse_property(&mut self) -> Result<Property, ParseError> {
         let loc = self.current_location();
+
+        // Detect key-value syntax: property name="x" [type="y"] [inject="z"] ...;
+        // Key-value syntax is detected when an identifier is followed by = and a string literal
+        let is_kv = {
+            let has_ident = matches!(self.peek(0), Token::Identifier(_))
+                || self.token_as_string(&self.peek(0).clone()).is_some();
+            has_ident && matches!(self.peek(1), Token::Equal) && matches!(self.peek(2), Token::String(_))
+        };
+
+        if is_kv {
+            return self.parse_property_kv(loc);
+        }
+
+        // Positional syntax: property [required] [type] name [= default];
         let mut prop_type = None;
         let mut required = false;
 
-        // Handle attributes: property type name; or property name;
-        // or property required type name;
         if self.match_token(&Token::Required) {
             required = true;
         }
@@ -1528,6 +1540,73 @@ impl Parser {
             prop_type,
             default,
             required,
+            attributes: Vec::new(),
+            location: loc,
+        })
+    }
+
+    /// Parse key-value property syntax: property name="x" type="string" inject="Service" default="val";
+    fn parse_property_kv(&mut self, loc: SourceLocation) -> Result<Property, ParseError> {
+        let mut name = String::new();
+        let mut prop_type = None;
+        let mut default = None;
+        let mut required = false;
+        let mut attributes = Vec::new();
+
+        loop {
+            // Check for key="value" pattern — key can be an identifier or a keyword token
+            let key_str = if let Token::Identifier(ref s) = self.peek(0) {
+                if matches!(self.peek(1), Token::Equal) && matches!(self.peek(2), Token::String(_)) {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            } else if let Some(s) = self.token_as_string(&self.peek(0).clone()) {
+                if matches!(self.peek(1), Token::Equal) && matches!(self.peek(2), Token::String(_)) {
+                    Some(s)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let key = match key_str {
+                Some(k) => k,
+                None => break,
+            };
+
+            self.advance(); // consume key
+            self.advance(); // consume =
+            let val = if let Token::String(v) = self.peek(0).clone() {
+                self.advance();
+                v
+            } else {
+                break;
+            };
+
+            match key.to_lowercase().as_str() {
+                "name" => name = val,
+                "type" => prop_type = Some(val),
+                "default" => {
+                    default = Some(Expression::Literal(Literal {
+                        value: LiteralValue::String(val),
+                        location: loc.clone(),
+                    }));
+                }
+                "required" => required = val.eq_ignore_ascii_case("true"),
+                _ => attributes.push((key.to_lowercase(), val)),
+            }
+        }
+
+        self.match_token(&Token::Semicolon);
+
+        Ok(Property {
+            name,
+            prop_type,
+            default,
+            required,
+            attributes,
             location: loc,
         })
     }

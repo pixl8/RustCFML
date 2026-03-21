@@ -536,13 +536,20 @@ fn parse_cf_tag(chars: &[char], start: usize, len: usize, imports: &mut std::col
             (decl, tag_end - start)
         }
         "cfproperty" => {
-            let name = attrs.get("name").cloned().unwrap_or_default();
-            let default = attrs.get("default").cloned();
-            if let Some(def) = default {
-                (format!("this.{} = {};\n", name, strip_hashes(&def)), tag_end - start)
-            } else {
-                (format!("this.{} = \"\";\n", name), tag_end - start)
+            // Convert <cfproperty name="x" type="y" inject="z" default="v">
+            // to CFScript: property name="x" type="y" inject="z" default="v";
+            let mut prop_str = String::from("property ");
+            // Output name first, then all other attributes
+            if let Some(name) = attrs.get("name") {
+                prop_str.push_str(&format!("name=\"{}\" ", name));
             }
+            for (k, v) in &attrs {
+                if k != "name" {
+                    prop_str.push_str(&format!("{}=\"{}\" ", k, v));
+                }
+            }
+            prop_str.push_str(";\n");
+            (prop_str, tag_end - start)
         }
         "cfhttp" => {
             let url = attrs.get("url").cloned().unwrap_or_default();
