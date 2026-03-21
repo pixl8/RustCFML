@@ -1375,22 +1375,39 @@ fn run_embedded_cli(vfs: Arc<dyn Vfs>, base_dir: &str, entry: &str, file_count: 
     while i < cli_args.len() {
         let arg = &cli_args[i];
         if arg.starts_with("--") {
-            let key = arg.trim_start_matches('-').to_lowercase();
-            if i + 1 < cli_args.len() && !cli_args[i + 1].starts_with("--") {
-                cli_scope.insert(key, CfmlValue::String(cli_args[i + 1].clone()));
-                i += 2;
-            } else {
-                cli_scope.insert(key, CfmlValue::Bool(true));
+            let raw = arg.trim_start_matches('-');
+            // Handle --key=value syntax
+            if let Some(eq_pos) = raw.find('=') {
+                let key = raw[..eq_pos].to_lowercase();
+                let value = raw[eq_pos + 1..].to_string();
+                cli_scope.insert(key, CfmlValue::String(value));
                 i += 1;
+            } else {
+                let key = raw.to_lowercase();
+                if i + 1 < cli_args.len() && !cli_args[i + 1].starts_with("--") {
+                    cli_scope.insert(key, CfmlValue::String(cli_args[i + 1].clone()));
+                    i += 2;
+                } else {
+                    cli_scope.insert(key, CfmlValue::Bool(true));
+                    i += 1;
+                }
             }
-        } else if arg.starts_with("-") && arg.len() == 2 {
-            let key = arg[1..].to_lowercase();
-            if i + 1 < cli_args.len() && !cli_args[i + 1].starts_with("-") {
-                cli_scope.insert(key, CfmlValue::String(cli_args[i + 1].clone()));
-                i += 2;
-            } else {
-                cli_scope.insert(key, CfmlValue::Bool(true));
+        } else if arg.starts_with("-") && !arg.starts_with("--") {
+            let raw = arg.trim_start_matches('-');
+            if let Some(eq_pos) = raw.find('=') {
+                let key = raw[..eq_pos].to_lowercase();
+                let value = raw[eq_pos + 1..].to_string();
+                cli_scope.insert(key, CfmlValue::String(value));
                 i += 1;
+            } else {
+                let key = raw.to_lowercase();
+                if i + 1 < cli_args.len() && !cli_args[i + 1].starts_with("-") {
+                    cli_scope.insert(key, CfmlValue::String(cli_args[i + 1].clone()));
+                    i += 2;
+                } else {
+                    cli_scope.insert(key, CfmlValue::Bool(true));
+                    i += 1;
+                }
             }
         } else {
             // Positional: 1-based numeric key like CFML arguments scope

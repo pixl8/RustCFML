@@ -2122,11 +2122,24 @@ impl CfmlVirtualMachine {
                             // Sub-program index i → old_program index (base_idx + i - 1)
                             // (subtract 1 because __main__ at index 0 was skipped)
                             if base_idx > 0 && sub_func_count > 1 {
+                                let offset = base_idx - 1; // -1 because __main__ was skipped
                                 for (_, v) in locals.iter_mut() {
                                     Self::fixup_included_func_indices(v, base_idx, sub_func_count);
                                 }
                                 for (_, v) in self.globals.iter_mut() {
                                     Self::fixup_included_func_indices(v, base_idx, sub_func_count);
+                                }
+                                // Also fix DefineFunction bytecode instructions inside the
+                                // merged functions — they still reference sub-program indices.
+                                for fi in base_idx..old_program.functions.len() {
+                                    let func = Arc::make_mut(&mut old_program.functions[fi]);
+                                    for op in func.instructions.iter_mut() {
+                                        if let BytecodeOp::DefineFunction(ref mut idx) = op {
+                                            if *idx > 0 && *idx < sub_func_count {
+                                                *idx += offset;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             self.program = old_program;
@@ -2205,11 +2218,23 @@ impl CfmlVirtualMachine {
                                 }
                             }
                             if base_idx > 0 && sub_func_count > 1 {
+                                let offset = base_idx - 1;
                                 for (_, v) in locals.iter_mut() {
                                     Self::fixup_included_func_indices(v, base_idx, sub_func_count);
                                 }
                                 for (_, v) in self.globals.iter_mut() {
                                     Self::fixup_included_func_indices(v, base_idx, sub_func_count);
+                                }
+                                // Fix DefineFunction bytecode indices in merged functions
+                                for fi in base_idx..old_program.functions.len() {
+                                    let func = Arc::make_mut(&mut old_program.functions[fi]);
+                                    for op in func.instructions.iter_mut() {
+                                        if let BytecodeOp::DefineFunction(ref mut idx) = op {
+                                            if *idx > 0 && *idx < sub_func_count {
+                                                *idx += offset;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             self.program = old_program;
@@ -3976,8 +4001,14 @@ impl CfmlVirtualMachine {
                                 vec![invoke_args]
                             };
 
-                            let mut method_locals = parent_locals.clone();
+                            let mut method_locals = IndexMap::new();
                             method_locals.insert("this".to_string(), component.clone());
+                            // Inject __variables from component so unscoped references resolve
+                            if let CfmlValue::Struct(ref cs) = component {
+                                if let Some(vars) = cs.get("__variables") {
+                                    method_locals.insert("__variables".to_string(), vars.clone());
+                                }
+                            }
                             return self.call_function(&func, call_args, &method_locals);
                         } else {
                             return Err(CfmlError::runtime(
@@ -4070,8 +4101,14 @@ impl CfmlVirtualMachine {
                                 vec![invoke_args]
                             };
 
-                            let mut method_locals = parent_locals.clone();
+                            let mut method_locals = IndexMap::new();
                             method_locals.insert("this".to_string(), component.clone());
+                            // Inject __variables from component so unscoped references resolve
+                            if let CfmlValue::Struct(ref cs) = component {
+                                if let Some(vars) = cs.get("__variables") {
+                                    method_locals.insert("__variables".to_string(), vars.clone());
+                                }
+                            }
                             return self.call_function(&func, call_args, &method_locals);
                         } else {
                             return Err(CfmlError::runtime(
@@ -6555,6 +6592,18 @@ impl CfmlVirtualMachine {
                         Self::fixup_func_indices(val, base_idx - 1);
                     }
                 }
+                // Strip captured_scope from all CFC methods on the component struct.
+                // CFC methods are NOT closures — they were compiled in the CFC body
+                // context where DefineFunction attaches a captured scope, but that scope
+                // carries stale/unfixed data.  CFC method scope resolution should use
+                // __variables (injected at call time), not captured scopes.
+                if let Some(CfmlValue::Struct(ref mut s)) = result {
+                    for (_, v) in s.iter_mut() {
+                        if let CfmlValue::Function(ref mut f) = v {
+                            f.captured_scope = None;
+                        }
+                    }
+                }
                 // Store the CFC source path for parent resolution during inheritance
                 if let Some(CfmlValue::Struct(ref mut s)) = result {
                     s.insert("__source_file".to_string(), CfmlValue::String(cfc_path.clone()));
@@ -6602,18 +6651,37 @@ impl CfmlVirtualMachine {
                 if let Some(CfmlValue::Struct(ref mut s)) = result {
                     let mut vars_scope: IndexMap<String, CfmlValue> = IndexMap::new();
                     // Add component body variables (non-function values from pseudo-constructor)
+                    // Functions from component_variables have sub-program indices that need
+                    // fixup (offset = base_idx - 1), and captured_scopes must be stripped.
+                    let cv_offset = if base_idx > 0 { base_idx - 1 } else { 0 };
                     for (k, v) in &component_variables {
                         let k_lower = k.to_lowercase();
                         if k_lower == "this" || k_lower == "arguments" || k.starts_with("__") {
                             continue;
                         }
-                        vars_scope.insert(k.clone(), v.clone());
+                        if let CfmlValue::Function(ref f) = v {
+                            // Fix body index and strip captured scope
+                            let mut clean = f.clone();
+                            clean.captured_scope = None;
+                            if let cfml_common::dynamic::CfmlClosureBody::Expression(ref mut body) = clean.body {
+                                if let CfmlValue::Int(ref mut idx) = body.as_mut() {
+                                    *idx += cv_offset as i64;
+                                }
+                            }
+                            vars_scope.insert(k.clone(), CfmlValue::Function(clean));
+                        } else {
+                            vars_scope.insert(k.clone(), v.clone());
+                        }
                     }
                     // Add all component methods (public + private) to variables scope
+                    // These override component_variables entries for public methods.
+                    // Strip captured_scope — CFC methods use __variables, not closures.
                     for (k, v) in s.iter() {
                         if k.starts_with("__") { continue; }
-                        if matches!(v, CfmlValue::Function(_)) {
-                            vars_scope.insert(k.clone(), v.clone());
+                        if let CfmlValue::Function(ref f) = v {
+                            let mut clean = f.clone();
+                            clean.captured_scope = None;
+                            vars_scope.insert(k.clone(), CfmlValue::Function(clean));
                         }
                     }
                     if !vars_scope.is_empty() {

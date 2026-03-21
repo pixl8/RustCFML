@@ -65,8 +65,9 @@ impl Vfs for RealFs {
         let mut result = Vec::new();
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
-                let (is_file, is_dir) = entry.file_type()
-                    .map(|ft| (ft.is_file(), ft.is_dir()))
+                // Use metadata() (not file_type()) to follow symlinks
+                let (is_file, is_dir) = entry.metadata()
+                    .map(|md| (md.is_file(), md.is_dir()))
                     .unwrap_or((false, false));
                 result.push(VfsDirEntry {
                     name: name.to_string(),
