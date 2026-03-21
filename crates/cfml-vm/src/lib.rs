@@ -2141,6 +2141,15 @@ impl CfmlVirtualMachine {
                                         }
                                     }
                                 }
+                                // Update user_functions entries — they were cloned before
+                                // the fixup and still have sub-program-relative indices.
+                                // user_functions uses original casing, so match by name directly.
+                                for fi in base_idx..old_program.functions.len() {
+                                    let name = &old_program.functions[fi].name;
+                                    if self.user_functions.contains_key(name) {
+                                        self.user_functions.insert(name.clone(), (*old_program.functions[fi]).clone());
+                                    }
+                                }
                             }
                             self.program = old_program;
                             self.source_file = old_source;
@@ -2234,6 +2243,13 @@ impl CfmlVirtualMachine {
                                                 *idx += offset;
                                             }
                                         }
+                                    }
+                                }
+                                // Update user_functions entries with fixed bytecode
+                                for fi in base_idx..old_program.functions.len() {
+                                    let name = &old_program.functions[fi].name;
+                                    if self.user_functions.contains_key(name) {
+                                        self.user_functions.insert(name.clone(), (*old_program.functions[fi]).clone());
                                     }
                                 }
                             }
