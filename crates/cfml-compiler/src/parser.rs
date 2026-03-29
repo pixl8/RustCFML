@@ -108,11 +108,14 @@ impl Parser {
     fn parse_statement(&mut self) -> Result<CfmlNode, ParseError> {
         let stmt_loc = self.current_location();
 
-        // Check for access modifiers before function
+        // Check for access modifiers before function — but only if followed by
+        // function, static, or a return type + function.  Otherwise "private" etc.
+        // are valid as variable names in CFML.
         if matches!(
             self.peek(0),
             Token::Public | Token::Private | Token::Remote | Token::Package
-        ) {
+        ) && self.is_access_modifier_for_function()
+        {
             let access = self.parse_access_modifier();
             // Skip optional return type annotation (e.g. "private array function ..."
             // or "public MachII.framework.AppManager function ...")
@@ -326,6 +329,144 @@ impl Parser {
             return Ok(CfmlNode::Statement(Statement::Import(Import {
                 path,
                 alias,
+                location: stmt_loc,
+            })));
+        }
+
+        // Handle 'http url="..." method="..." result="..." { httpparam...; }' in CFScript
+        if matches!(self.peek(0), Token::Identifier(ref s) if s.to_lowercase() == "http")
+            && self.is_identifier_like_at(1)
+            && matches!(self.peek(2), Token::Equal)
+        {
+            self.advance(); // consume 'http'
+
+            // Parse attributes: key=value pairs
+            let mut attrs: Vec<(String, Expression)> = Vec::new();
+            while !self.check(&Token::LBrace) && !self.check(&Token::Semicolon) && !self.is_at_end() {
+                if self.is_identifier_like() && matches!(self.peek(1), Token::Equal) {
+                    let attr_name = self.extract_identifier()?;
+                    self.advance(); // consume =
+                    let attr_value = self.parse_expression()?;
+                    attrs.push((attr_name.to_lowercase(), attr_value));
+                } else {
+                    break;
+                }
+            }
+
+            // Parse httpparam statements if block body present
+            let mut params: Vec<Expression> = Vec::new();
+            if self.check(&Token::LBrace) {
+                self.advance(); // consume {
+                while !self.check(&Token::RBrace) && !self.is_at_end() {
+                    // Expect httpparam statements
+                    if matches!(self.peek(0), Token::Identifier(ref s) if s.to_lowercase() == "httpparam") {
+                        self.advance(); // consume 'httpparam'
+                        let mut param_pairs: Vec<(Expression, Expression)> = Vec::new();
+                        while !self.check(&Token::Semicolon) && !self.check(&Token::RBrace) && !self.is_at_end() {
+                            if self.is_identifier_like() && matches!(self.peek(1), Token::Equal) {
+                                let pname = self.extract_identifier()?;
+                                self.advance(); // consume =
+                                let pvalue = self.parse_expression()?;
+                                param_pairs.push((
+                                    Expression::Literal(Literal {
+                                        value: LiteralValue::String(pname.to_lowercase()),
+                                        location: stmt_loc.clone(),
+                                    }),
+                                    pvalue,
+                                ));
+                            } else {
+                                break;
+                            }
+                        }
+                        self.match_token(&Token::Semicolon);
+                        params.push(Expression::Struct(Struct {
+                            pairs: param_pairs,
+                            ordered: false,
+                            location: stmt_loc.clone(),
+                        }));
+                    } else {
+                        // Skip unknown tokens inside http block
+                        self.advance();
+                    }
+                }
+                self.consume(&Token::RBrace)?; // consume }
+            } else {
+                self.match_token(&Token::Semicolon);
+            }
+
+            // Build the struct argument for cfhttp({ url: ..., method: ..., params: [...] })
+            let mut struct_pairs: Vec<(Expression, Expression)> = Vec::new();
+
+            // Extract result var (default "cfhttp") and add remaining attrs
+            let mut result_var = "cfhttp".to_string();
+            for (name, value) in &attrs {
+                if name == "result" {
+                    // Extract the string value for the result variable name
+                    if let Expression::Literal(ref lit) = value {
+                        if let LiteralValue::String(ref s) = lit.value {
+                            result_var = s.clone();
+                        }
+                    } else if let Expression::Identifier(ref id) = value {
+                        result_var = id.name.clone();
+                    }
+                } else {
+                    struct_pairs.push((
+                        Expression::Literal(Literal {
+                            value: LiteralValue::String(name.clone()),
+                            location: stmt_loc.clone(),
+                        }),
+                        value.clone(),
+                    ));
+                }
+            }
+
+            // Add default method if not specified
+            let has_method = attrs.iter().any(|(n, _)| n == "method");
+            if !has_method {
+                struct_pairs.push((
+                    Expression::Literal(Literal {
+                        value: LiteralValue::String("method".to_string()),
+                        location: stmt_loc.clone(),
+                    }),
+                    Expression::Literal(Literal {
+                        value: LiteralValue::String("GET".to_string()),
+                        location: stmt_loc.clone(),
+                    }),
+                ));
+            }
+
+            // Add params array if any httpparam statements were found
+            if !params.is_empty() {
+                struct_pairs.push((
+                    Expression::Literal(Literal {
+                        value: LiteralValue::String("params".to_string()),
+                        location: stmt_loc.clone(),
+                    }),
+                    Expression::Array(Array {
+                        elements: params,
+                        location: stmt_loc.clone(),
+                    }),
+                ));
+            }
+
+            // Build: result_var = cfhttp({ ... });
+            let cfhttp_call = Expression::FunctionCall(Box::new(FunctionCall {
+                name: Box::new(Expression::Identifier(Identifier {
+                    name: "cfhttp".to_string(),
+                    location: stmt_loc.clone(),
+                })),
+                arguments: vec![Expression::Struct(Struct {
+                    pairs: struct_pairs,
+                    ordered: false,
+                    location: stmt_loc.clone(),
+                })],
+                location: stmt_loc.clone(),
+            }));
+
+            return Ok(CfmlNode::Statement(Statement::Assignment(Assignment {
+                target: AssignTarget::Variable(result_var),
+                value: cfhttp_call,
+                operator: AssignOp::Equal,
                 location: stmt_loc,
             })));
         }
@@ -1345,11 +1486,12 @@ impl Parser {
         let mut body = Vec::new();
 
         while !self.check(&Token::RBrace) && !self.is_at_end() {
-            // Check for access modifiers
+            // Check for access modifiers — only consume if followed by function/property/static
             let access = if matches!(
                 self.peek(0),
                 Token::Public | Token::Private | Token::Remote | Token::Package
-            ) {
+            ) && self.is_access_modifier_for_member()
+            {
                 self.parse_access_modifier()
             } else {
                 AccessModifier::Public
@@ -1456,11 +1598,12 @@ impl Parser {
                 continue;
             }
 
-            // Parse access modifier
+            // Parse access modifier — only if followed by function declaration
             let access = if matches!(
                 self.peek(0),
                 Token::Public | Token::Private | Token::Remote | Token::Package
-            ) {
+            ) && self.is_access_modifier_for_function()
+            {
                 self.parse_access_modifier()
             } else {
                 AccessModifier::Public
@@ -1686,6 +1829,58 @@ impl Parser {
         }
     }
 
+    /// Check whether an access modifier (public/private/remote/package) at peek(0)
+    /// is used as a function declaration prefix vs. a plain identifier.
+    /// Returns true if the modifier is followed by: function, static, or a return-type + function.
+    fn is_access_modifier_for_function(&self) -> bool {
+        // peek(0) is the access modifier token itself; check what follows at peek(1)+
+        let mut la = 1;
+        // Skip optional "static"
+        if matches!(self.peek(la), Token::Static) {
+            la += 1;
+        }
+        // Direct "function" after modifier (or static)
+        if matches!(self.peek(la), Token::Function) {
+            return true;
+        }
+        // Return-type annotation: Identifier(.Identifier)* followed by "function"
+        if matches!(self.peek(la), Token::Identifier(_)) {
+            la += 1;
+            while matches!(self.peek(la), Token::Dot) && matches!(self.peek(la + 1), Token::Identifier(_)) {
+                la += 2;
+            }
+            if matches!(self.peek(la), Token::Function) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check whether an access modifier at peek(0) precedes a component member
+    /// (function, property, static) vs. being used as a plain identifier.
+    fn is_access_modifier_for_member(&self) -> bool {
+        let mut la = 1;
+        // Skip optional "static"
+        if matches!(self.peek(la), Token::Static) {
+            la += 1;
+        }
+        // Direct function/property after modifier
+        if matches!(self.peek(la), Token::Function | Token::Property) {
+            return true;
+        }
+        // Return-type annotation: Identifier(.Identifier)* followed by "function"
+        if matches!(self.peek(la), Token::Identifier(_)) {
+            la += 1;
+            while matches!(self.peek(la), Token::Dot) && matches!(self.peek(la + 1), Token::Identifier(_)) {
+                la += 2;
+            }
+            if matches!(self.peek(la), Token::Function) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Check if the next token can be used as an identifier (true Identifier or soft keyword).
     fn is_identifier_like(&self) -> bool {
         self.is_identifier_like_at(0)
@@ -1699,6 +1894,7 @@ impl Parser {
             | Token::Property | Token::Abstract | Token::Final | Token::Static | Token::Lock
             | Token::Function | Token::Var | Token::Throw | Token::Component
             | Token::Interface | Token::Package | Token::Remote
+            | Token::Public | Token::Private
         )
     }
 
@@ -1731,6 +1927,8 @@ impl Parser {
             Token::Interface => { self.advance(); Ok("interface".to_string()) }
             Token::Package => { self.advance(); Ok("package".to_string()) }
             Token::Remote => { self.advance(); Ok("remote".to_string()) }
+            Token::Public => { self.advance(); Ok("public".to_string()) }
+            Token::Private => { self.advance(); Ok("private".to_string()) }
             _ => Err(self.parse_error("Expected identifier")),
         }
     }
@@ -2429,6 +2627,18 @@ impl Parser {
             })),
             Token::Lock => Ok(Expression::Identifier(Identifier {
                 name: "lock".to_string(),
+                location: self.current_location(),
+            })),
+            Token::Private => Ok(Expression::Identifier(Identifier {
+                name: "private".to_string(),
+                location: self.current_location(),
+            })),
+            Token::Public => Ok(Expression::Identifier(Identifier {
+                name: "public".to_string(),
+                location: self.current_location(),
+            })),
+            Token::Remote => Ok(Expression::Identifier(Identifier {
+                name: "remote".to_string(),
                 location: self.current_location(),
             })),
             Token::This => Ok(Expression::This(This {

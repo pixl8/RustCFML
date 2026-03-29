@@ -5224,8 +5224,8 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
     let arg = args.into_iter().next().unwrap_or(CfmlValue::Null);
 
     // Parse arguments: either a URL string or an options struct
-    let (url, method, headers, body, timeout_secs) = match &arg {
-        CfmlValue::String(url) => (url.clone(), "GET".to_string(), HashMap::new(), None, 30u64),
+    let (mut url, method, headers, body, timeout_secs, throw_on_error, follow_redirects, encode_url, port, proxy_server, proxy_port) = match &arg {
+        CfmlValue::String(url) => (url.clone(), "GET".to_string(), HashMap::<String, String>::new(), None::<String>, 30u64, false, true, true, None::<u16>, None::<String>, None::<u16>),
         CfmlValue::Struct(opts) => {
             let mut url = opts.iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("url"))
@@ -5305,7 +5305,84 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
                 .find(|(k, _)| k.eq_ignore_ascii_case("timeout"))
                 .map(|(_, v)| match v { CfmlValue::Int(i) => *i as u64, CfmlValue::Double(d) => *d as u64, CfmlValue::String(s) => s.parse().unwrap_or(30), _ => 30 })
                 .unwrap_or(30);
-            (url, method, hdrs, body, timeout)
+
+            // username/password -> Basic Auth
+            let username = opts.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("username"))
+                .map(|(_, v)| v.as_string());
+            let password = opts.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("password"))
+                .map(|(_, v)| v.as_string());
+            if let (Some(ref user), Some(ref pass)) = (&username, &password) {
+                if !user.is_empty() {
+                    let credentials = format!("{}:{}", user, pass);
+                    let encoded = base64_encode_bytes(credentials.as_bytes());
+                    hdrs.entry("Authorization".to_string()).or_insert(format!("Basic {}", encoded));
+                }
+            }
+
+            // useragent -> User-Agent header
+            if let Some((_, v)) = opts.iter().find(|(k, _)| k.eq_ignore_ascii_case("useragent")) {
+                let ua = v.as_string();
+                if !ua.is_empty() {
+                    hdrs.entry("User-Agent".to_string()).or_insert(ua);
+                }
+            }
+
+            // throwonerror
+            let throw_on_error = opts.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("throwonerror"))
+                .map(|(_, v)| match v {
+                    CfmlValue::Bool(b) => *b,
+                    CfmlValue::String(s) => s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes"),
+                    _ => false,
+                })
+                .unwrap_or(false);
+
+            // redirect
+            let follow_redirects = opts.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("redirect"))
+                .map(|(_, v)| match v {
+                    CfmlValue::Bool(b) => *b,
+                    CfmlValue::String(s) => !s.eq_ignore_ascii_case("false") && !s.eq_ignore_ascii_case("no"),
+                    _ => true,
+                })
+                .unwrap_or(true);
+
+            // encodeurl (default true)
+            let encode_url = opts.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("encodeurl"))
+                .map(|(_, v)| match v {
+                    CfmlValue::Bool(b) => *b,
+                    CfmlValue::String(s) => !s.eq_ignore_ascii_case("false") && !s.eq_ignore_ascii_case("no"),
+                    _ => true,
+                })
+                .unwrap_or(true);
+
+            // port
+            let port = opts.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("port"))
+                .and_then(|(_, v)| match v {
+                    CfmlValue::Int(i) => Some(*i as u16),
+                    CfmlValue::Double(d) => Some(*d as u16),
+                    CfmlValue::String(s) => s.parse::<u16>().ok(),
+                    _ => None,
+                });
+
+            // proxyserver / proxyport
+            let proxy_server = opts.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("proxyserver"))
+                .map(|(_, v)| v.as_string());
+            let proxy_port = opts.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("proxyport"))
+                .and_then(|(_, v)| match v {
+                    CfmlValue::Int(i) => Some(*i as u16),
+                    CfmlValue::Double(d) => Some(*d as u16),
+                    CfmlValue::String(s) => s.parse::<u16>().ok(),
+                    _ => None,
+                });
+
+            (url, method, hdrs, body, timeout, throw_on_error, follow_redirects, encode_url, port, proxy_server, proxy_port)
         }
         _ => return Err(CfmlError::runtime("cfhttp requires a URL string or options struct".to_string())),
     };
@@ -5314,9 +5391,65 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
         return Err(CfmlError::runtime("cfhttp: url is required".to_string()));
     }
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .build();
+    // Apply port to URL if specified and not already present
+    if let Some(port_num) = port {
+        if let Some(scheme_end) = url.find("://") {
+            let after_scheme = &url[scheme_end + 3..];
+            let host_end = after_scheme.find('/').unwrap_or(after_scheme.len());
+            let host_part = &after_scheme[..host_end];
+            if !host_part.contains(':') {
+                let insert_pos = scheme_end + 3 + host_end;
+                url.insert_str(insert_pos, &format!(":{}", port_num));
+            }
+        }
+    }
+
+    // URL-encode unsafe chars in path/query when encodeurl is true
+    if encode_url {
+        if let Some(scheme_end) = url.find("://") {
+            let after_scheme = &url[scheme_end + 3..];
+            if let Some(path_start) = after_scheme.find('/') {
+                let host = url[..scheme_end + 3 + path_start].to_string();
+                let path_and_query = &url[scheme_end + 3 + path_start..];
+                let encoded: String = path_and_query.chars().map(|c| {
+                    match c {
+                        ' ' => "%20".to_string(),
+                        '{' => "%7B".to_string(),
+                        '}' => "%7D".to_string(),
+                        '|' => "%7C".to_string(),
+                        '^' => "%5E".to_string(),
+                        '[' => "%5B".to_string(),
+                        ']' => "%5D".to_string(),
+                        '`' => "%60".to_string(),
+                        _ => c.to_string(),
+                    }
+                }).collect();
+                url = format!("{}{}", host, encoded);
+            }
+        }
+    }
+
+    let mut agent_builder = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(timeout_secs));
+
+    if !follow_redirects {
+        agent_builder = agent_builder.redirects(0);
+    }
+
+    if let Some(ref proxy_host) = proxy_server {
+        if !proxy_host.is_empty() {
+            let proxy_url = if let Some(pp) = proxy_port {
+                format!("http://{}:{}", proxy_host, pp)
+            } else {
+                format!("http://{}", proxy_host)
+            };
+            if let Ok(proxy) = ureq::Proxy::new(&proxy_url) {
+                agent_builder = agent_builder.proxy(proxy);
+            }
+        }
+    }
+
+    let agent = agent_builder.build();
 
     let mut request = match method.as_str() {
         "GET" => agent.get(&url),
@@ -5359,6 +5492,10 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
 
             let (mime, charset) = parse_content_type(&content_type);
 
+            if throw_on_error && status >= 400 {
+                return Err(CfmlError::runtime(format!("cfhttp request failed: {} {}", status, status_text)));
+            }
+
             result_struct.insert("statusCode".to_string(), CfmlValue::String(format!("{} {}", status, status_text)));
             result_struct.insert("status_code".to_string(), CfmlValue::Int(status as i64));
             result_struct.insert("statusText".to_string(), CfmlValue::String(status_text.clone()));
@@ -5372,6 +5509,11 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
         }
         Err(ureq::Error::Status(code, resp)) => {
             let status_text = resp.status_text().to_string();
+
+            if throw_on_error {
+                return Err(CfmlError::runtime(format!("cfhttp request failed: {} {}", code, status_text)));
+            }
+
             let http_version = resp.http_version().to_string();
             let content_type = resp.content_type().to_string();
 
@@ -5407,6 +5549,10 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
             result_struct.insert("responseHeader".to_string(), CfmlValue::Struct(IndexMap::new()));
             result_struct.insert("errorDetail".to_string(), CfmlValue::String(e.to_string()));
             result_struct.insert("HTTP_Version".to_string(), CfmlValue::String(String::new()));
+
+            if throw_on_error {
+                return Err(CfmlError::runtime(format!("cfhttp connection failed: {}", e)));
+            }
         }
     }
 

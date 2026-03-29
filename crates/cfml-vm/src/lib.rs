@@ -620,9 +620,17 @@ impl CfmlVirtualMachine {
                                 .map(|(_, v)| v))
                             .cloned() {
                             // User-defined function referenced as a value (first-class function)
-                            // Like Lucee/BoxLang: functions are in variables scope
+                            // Like Lucee/BoxLang: functions are in variables scope.
+                            // Capture the current scope so the function retains access to its
+                            // defining scope's variables when stored in a struct and called later.
+                            // Filter out Function values to avoid recursive reference chains.
                             let func_idx = self.program.functions.iter().position(|f| f.name == bc_func.name)
                                 .unwrap_or(0);
+                            let filtered: IndexMap<String, CfmlValue> = locals.iter()
+                                .filter(|(_, v)| !matches!(v, CfmlValue::Function(_)))
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                            let scope = Arc::new(RwLock::new(filtered));
                             CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
                                 name: bc_func.name.clone(),
                                 params: bc_func.params.iter().enumerate().map(|(i, pname)| {
@@ -638,7 +646,7 @@ impl CfmlVirtualMachine {
                                 ),
                                 return_type: None,
                                 access: cfml_common::dynamic::CfmlAccess::Public,
-                                captured_scope: None,
+                                captured_scope: Some(scope),
                             })
                         } else {
                             // Variable not found — check try_stack for error handler
@@ -826,15 +834,27 @@ impl CfmlVirtualMachine {
                                 required: uf.required_params.get(i).copied().unwrap_or(false),
                             }).collect())
                             .unwrap_or_default();
+                        // For user functions, find the bytecode index and capture the
+                        // current scope so the function retains access to its defining
+                        // scope's variables when stored in a struct and called later.
+                        let (body_val, scope) = if self.user_functions.contains_key(name.as_str()) {
+                            let func_idx = self.program.functions.iter().position(|f| f.name == *name);
+                            match func_idx {
+                                Some(idx) => (CfmlValue::Int(idx as i64), None),
+                                None => (CfmlValue::Null, None),
+                            }
+                        } else {
+                            (CfmlValue::Null, None)
+                        };
                         stack.push(CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
                             name: name.clone(),
                             params,
                             body: cfml_common::dynamic::CfmlClosureBody::Expression(
-                                Box::new(CfmlValue::Null),
+                                Box::new(body_val),
                             ),
                             return_type: None,
                             access: cfml_common::dynamic::CfmlAccess::Public,
-                            captured_scope: None,
+                            captured_scope: scope,
                         }));
                     } else if self.builtins.keys().any(|k| k.to_lowercase() == name_lower)
                            || self.user_functions.keys().any(|k| k.to_lowercase() == name_lower) {
@@ -851,15 +871,26 @@ impl CfmlVirtualMachine {
                                 required: uf.required_params.get(i).copied().unwrap_or(false),
                             }).collect())
                             .unwrap_or_default();
+                        // For user functions (CI match), find bytecode index and capture scope
+                        let (body_val, scope, resolved_name) = if let Some(uf_name) = self.user_functions.keys()
+                            .find(|k| k.to_lowercase() == name_lower).cloned() {
+                            let func_idx = self.program.functions.iter().position(|f| f.name.to_lowercase() == name_lower);
+                            match func_idx {
+                                Some(idx) => (CfmlValue::Int(idx as i64), None, uf_name),
+                                None => (CfmlValue::Null, None, uf_name),
+                            }
+                        } else {
+                            (CfmlValue::Null, None, canonical)
+                        };
                         stack.push(CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
-                            name: canonical,
+                            name: resolved_name,
                             params,
                             body: cfml_common::dynamic::CfmlClosureBody::Expression(
-                                Box::new(CfmlValue::Null),
+                                Box::new(body_val),
                             ),
                             return_type: None,
                             access: cfml_common::dynamic::CfmlAccess::Public,
-                            captured_scope: None,
+                            captured_scope: scope,
                         }));
                     // 4. Check VM-intercepted function names (custom tags, etc.)
                     } else if matches!(name_lower.as_str(),
@@ -1519,7 +1550,30 @@ impl CfmlVirtualMachine {
                             }
                         }
                         CfmlValue::Struct(s) => {
-                            s.insert(index.as_string(), value);
+                            let key = index.as_string();
+                            // Propagate to __variables for declared CFC properties
+                            if s.contains_key("__variables") && s.contains_key("__properties") {
+                                let key_lower = key.to_lowercase();
+                                let is_declared = if let Some(CfmlValue::Array(props)) = s.get("__properties") {
+                                    props.iter().any(|p| {
+                                        if let CfmlValue::Struct(ps) = p {
+                                            ps.iter().any(|(k, v)| {
+                                                k.to_lowercase() == "name" && v.as_string().to_lowercase() == key_lower
+                                            })
+                                        } else {
+                                            false
+                                        }
+                                    })
+                                } else {
+                                    false
+                                };
+                                if is_declared {
+                                    if let Some(CfmlValue::Struct(ref mut vars)) = s.get_mut("__variables") {
+                                        vars.insert(key.clone(), value.clone());
+                                    }
+                                }
+                            }
+                            s.insert(key, value);
                         }
                         _ => {}
                     }
@@ -1600,6 +1654,32 @@ impl CfmlVirtualMachine {
                 BytecodeOp::SetProperty(name) => {
                     if let Some(value) = stack.pop() {
                         if let Some(mut obj) = stack.pop() {
+                            // If setting on a CFC struct with declared properties,
+                            // also update __variables for properties declared via
+                            // `property name="x"` so they're accessible unscoped in methods.
+                            if let CfmlValue::Struct(ref mut s) = obj {
+                                if s.contains_key("__variables") && s.contains_key("__properties") {
+                                    let name_lower = name.to_lowercase();
+                                    let is_declared = if let Some(CfmlValue::Array(props)) = s.get("__properties") {
+                                        props.iter().any(|p| {
+                                            if let CfmlValue::Struct(ps) = p {
+                                                ps.iter().any(|(k, v)| {
+                                                    k.to_lowercase() == "name" && v.as_string().to_lowercase() == name_lower
+                                                })
+                                            } else {
+                                                false
+                                            }
+                                        })
+                                    } else {
+                                        false
+                                    };
+                                    if is_declared {
+                                        if let Some(CfmlValue::Struct(ref mut vars)) = s.get_mut("__variables") {
+                                            vars.insert(name.clone(), value.clone());
+                                        }
+                                    }
+                                }
+                            }
                             obj.set(name.clone(), value);
                             stack.push(obj);
                         }
@@ -2563,8 +2643,26 @@ impl CfmlVirtualMachine {
             }
 
             // Check user-defined functions by name
+            // If the function reference carries a captured scope (from LoadGlobal),
+            // merge it with parent_locals so the function retains access to its
+            // defining scope's variables when called from a different context.
             if let Some(user_func) = self.user_functions.get(&func.name).cloned() {
-                return self.execute_function_with_args(&user_func, args, Some(parent_locals));
+                let effective_parent;
+                let parent = if let Some(ref shared_env) = func.captured_scope {
+                    effective_parent = {
+                        let mut merged = shared_env.read().unwrap().clone();
+                        for (k, v) in parent_locals {
+                            if matches!(v, CfmlValue::Function(_)) || !merged.contains_key(k) {
+                                merged.insert(k.clone(), v.clone());
+                            }
+                        }
+                        merged
+                    };
+                    &effective_parent
+                } else {
+                    parent_locals
+                };
+                return self.execute_function_with_args(&user_func, args, Some(parent));
             }
 
             // Case-insensitive user function lookup
@@ -2575,7 +2673,22 @@ impl CfmlVirtualMachine {
                 .map(|(_, v)| v.clone());
 
             if let Some(user_func) = user_match {
-                return self.execute_function_with_args(&user_func, args, Some(parent_locals));
+                let effective_parent;
+                let parent = if let Some(ref shared_env) = func.captured_scope {
+                    effective_parent = {
+                        let mut merged = shared_env.read().unwrap().clone();
+                        for (k, v) in parent_locals {
+                            if matches!(v, CfmlValue::Function(_)) || !merged.contains_key(k) {
+                                merged.insert(k.clone(), v.clone());
+                            }
+                        }
+                        merged
+                    };
+                    &effective_parent
+                } else {
+                    parent_locals
+                };
+                return self.execute_function_with_args(&user_func, args, Some(parent));
             }
 
             // Higher-order standalone functions (arrayMap, arrayFilter, arrayReduce, etc.)
@@ -5836,7 +5949,7 @@ impl CfmlVirtualMachine {
         } else {
             object.get(method).unwrap_or(CfmlValue::Null)
         };
-        if let CfmlValue::Function(_) = &prop {
+        if let CfmlValue::Function(ref fdata) = &prop {
             let func_ref = prop.clone();
             let args: Vec<CfmlValue> = extra_args.drain(..).collect();
             // Bind 'this' to the object + inject component variables scope
