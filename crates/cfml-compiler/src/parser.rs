@@ -471,6 +471,167 @@ impl Parser {
             })));
         }
 
+        // Handle CFScript tag-as-statement syntax: keyword attr=value attr=value;
+        // content type="..."; → __cfcontent({...})
+        // header name="..." value="..."; → __cfheader({...})
+        // location url="..."; → __cflocation({...})
+        // setting requesttimeout="..."; → __cfsetting({...})
+        // cookie name="..." value="..."; → __cfcookie({...})
+        // log text="..." type="..."; → __cflog({...})
+        {
+            let tag_fn = if let Token::Identifier(ref s) = self.peek(0) {
+                match s.to_lowercase().as_str() {
+                    "content" => Some("__cfcontent"),
+                    "header" => Some("__cfheader"),
+                    "location" => Some("__cflocation"),
+                    "setting" => Some("__cfsetting"),
+                    "cookie" => Some("__cfcookie"),
+                    "log" => Some("__cflog"),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(func_name) = tag_fn {
+                if self.is_identifier_like_at(1) && matches!(self.peek(2), Token::Equal) {
+                    self.advance(); // consume keyword
+                    let mut struct_pairs: Vec<(Expression, Expression)> = Vec::new();
+                    while !self.check(&Token::Semicolon) && !self.is_at_end() {
+                        if self.is_identifier_like() && matches!(self.peek(1), Token::Equal) {
+                            let attr_name = self.extract_identifier()?;
+                            self.advance(); // consume =
+                            let attr_value = self.parse_expression()?;
+                            struct_pairs.push((
+                                Expression::Literal(Literal {
+                                    value: LiteralValue::String(attr_name.to_lowercase()),
+                                    location: stmt_loc.clone(),
+                                }),
+                                attr_value,
+                            ));
+                        } else {
+                            break;
+                        }
+                    }
+                    self.match_token(&Token::Semicolon);
+                    let call = Expression::FunctionCall(Box::new(FunctionCall {
+                        name: Box::new(Expression::Identifier(Identifier {
+                            name: func_name.to_string(),
+                            location: stmt_loc.clone(),
+                        })),
+                        arguments: vec![Expression::Struct(Struct {
+                            pairs: struct_pairs,
+                            ordered: false,
+                            location: stmt_loc.clone(),
+                        })],
+                        location: stmt_loc.clone(),
+                    }));
+                    return Ok(CfmlNode::Statement(Statement::Expression(ExpressionStatement {
+                        expr: call,
+                        location: stmt_loc,
+                    })));
+                }
+            }
+        }
+
+        // Handle 'thread name="..." action="run" { body }' in CFScript
+        if matches!(self.peek(0), Token::Identifier(ref s) if s.to_lowercase() == "thread")
+            && self.is_identifier_like_at(1)
+            && matches!(self.peek(2), Token::Equal)
+        {
+            self.advance(); // consume 'thread'
+            let mut attrs: Vec<(String, Expression)> = Vec::new();
+            while !self.check(&Token::LBrace) && !self.check(&Token::Semicolon) && !self.is_at_end() {
+                if self.is_identifier_like() && matches!(self.peek(1), Token::Equal) {
+                    let attr_name = self.extract_identifier()?;
+                    self.advance(); // consume =
+                    let attr_value = self.parse_expression()?;
+                    attrs.push((attr_name.to_lowercase(), attr_value));
+                } else {
+                    break;
+                }
+            }
+
+            // Extract name and action
+            let thread_name = attrs.iter()
+                .find(|(k, _)| k == "name")
+                .map(|(_, v)| v.clone())
+                .unwrap_or(Expression::Literal(Literal {
+                    value: LiteralValue::String("thread1".to_string()),
+                    location: stmt_loc.clone(),
+                }));
+            let action = attrs.iter()
+                .find(|(k, _)| k == "action")
+                .and_then(|(_, v)| if let Expression::Literal(ref lit) = v {
+                    if let LiteralValue::String(ref s) = lit.value { Some(s.to_lowercase()) } else { None }
+                } else { None })
+                .unwrap_or_else(|| "run".to_string());
+
+            match action.as_str() {
+                "run" => {
+                    // Parse body block
+                    let body = self.parse_block()?;
+                    // → __cfthread_run(name, function() { body })
+                    let closure = Expression::Closure(Box::new(Closure {
+                        params: vec![],
+                        body,
+                        location: stmt_loc.clone(),
+                    }));
+                    let call = Expression::FunctionCall(Box::new(FunctionCall {
+                        name: Box::new(Expression::Identifier(Identifier {
+                            name: "__cfthread_run".to_string(),
+                            location: stmt_loc.clone(),
+                        })),
+                        arguments: vec![thread_name, closure],
+                        location: stmt_loc.clone(),
+                    }));
+                    return Ok(CfmlNode::Statement(Statement::Expression(ExpressionStatement {
+                        expr: call,
+                        location: stmt_loc,
+                    })));
+                }
+                "join" => {
+                    self.match_token(&Token::Semicolon);
+                    let timeout = attrs.iter()
+                        .find(|(k, _)| k == "timeout")
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or(Expression::Literal(Literal {
+                            value: LiteralValue::Int(0),
+                            location: stmt_loc.clone(),
+                        }));
+                    let call = Expression::FunctionCall(Box::new(FunctionCall {
+                        name: Box::new(Expression::Identifier(Identifier {
+                            name: "__cfthread_join".to_string(),
+                            location: stmt_loc.clone(),
+                        })),
+                        arguments: vec![thread_name, timeout],
+                        location: stmt_loc.clone(),
+                    }));
+                    return Ok(CfmlNode::Statement(Statement::Expression(ExpressionStatement {
+                        expr: call,
+                        location: stmt_loc,
+                    })));
+                }
+                "terminate" => {
+                    self.match_token(&Token::Semicolon);
+                    let call = Expression::FunctionCall(Box::new(FunctionCall {
+                        name: Box::new(Expression::Identifier(Identifier {
+                            name: "__cfthread_terminate".to_string(),
+                            location: stmt_loc.clone(),
+                        })),
+                        arguments: vec![thread_name],
+                        location: stmt_loc.clone(),
+                    }));
+                    return Ok(CfmlNode::Statement(Statement::Expression(ExpressionStatement {
+                        expr: call,
+                        location: stmt_loc,
+                    })));
+                }
+                _ => {
+                    self.match_token(&Token::Semicolon);
+                }
+            }
+        }
+
         // Handle 'savecontent variable="varname" { body }' in CFScript
         if matches!(self.peek(0), Token::Identifier(ref s) if s.to_lowercase() == "savecontent") {
             self.advance(); // consume 'savecontent'
