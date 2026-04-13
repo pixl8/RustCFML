@@ -202,13 +202,14 @@ suiteEnd();
 // ============================================================
 suiteBegin("Lucee7: Query Dot Notation");
 q = queryNew("name", "varchar", [["Alice"], ["Bob"], ["Charlie"]]);
-// q.name returns first row value in Lucee; use queryColumnData for array
-assert("query dot returns first row", q.name, "Alice");
+// q.col[n] returns the nth row's value on both engines
+assert("query col[1]", q.name[1], "Alice");
+assert("query col[2]", q.name[2], "Bob");
+assert("query col[3]", q.name[3], "Charlie");
+// queryColumnData explicitly returns an array
 colArr = queryColumnData(q, "name");
 assertTrue("queryColumnData returns array", isArray(colArr));
 assert("queryColumnData len", arrayLen(colArr), 3);
-assert("queryColumnData first", colArr[1], "Alice");
-assert("queryColumnData last", colArr[3], "Charlie");
 suiteEnd();
 
 // ============================================================

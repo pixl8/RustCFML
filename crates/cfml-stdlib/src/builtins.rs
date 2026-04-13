@@ -1288,7 +1288,7 @@ fn fn_url_encode(args: Vec<CfmlValue>) -> CfmlResult {
     for c in s.chars() {
         match c {
             'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '*' => result.push(c),
-            ' ' => result.push_str("%20"),
+            ' ' => result.push('+'),
             _ => {
                 for b in c.to_string().as_bytes() {
                     result.push_str(&format!("%{:02X}", b));
@@ -2448,9 +2448,20 @@ fn fn_is_valid(args: Vec<CfmlValue>) -> CfmlResult {
                     Ok(CfmlValue::Bool(false))
                 }
             }
-            "regex" => {
+            "regex" | "regular_expression" => {
+                // isValid("regex", value, pattern) - check if value matches pattern.
+                // Requires 3 arguments (matches Lucee: pattern is mandatory).
+                if args.len() < 3 {
+                    return Err(CfmlError::runtime(
+                        "Invalid call of the function [isValid], first Argument [type] is invalid, for [regex] you have to define a pattern".to_string()
+                    ));
+                }
                 let s = value.as_string();
-                Ok(CfmlValue::Bool(Regex::new(&s).is_ok()))
+                let pattern = get_str(&args, 2);
+                match Regex::new(&pattern) {
+                    Ok(re) => Ok(CfmlValue::Bool(re.is_match(&s))),
+                    Err(_) => Ok(CfmlValue::Bool(false)),
+                }
             }
             "creditcard" => {
                 let s: String = value.as_string().chars().filter(|c| c.is_ascii_digit()).collect();
@@ -2523,39 +2534,35 @@ fn fn_to_boolean(args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn fn_val(args: Vec<CfmlValue>) -> CfmlResult {
-    // val() extracts the leading numeric value from a string
-    // Booleans: true=1, false=0
-    if let Some(CfmlValue::Bool(b)) = args.first() {
-        return Ok(CfmlValue::Int(if *b { 1 } else { 0 }));
-    }
+    // val() extracts the leading numeric value from a string.
+    // Matches Lucee: stops at 'E' (does NOT parse scientific notation),
+    // booleans convert to 0 (treated as the strings "true"/"false").
     let s = get_str(&args, 0).trim().to_string();
     let mut num_str = String::new();
     let mut has_dot = false;
-    let mut has_exp = false;
+    let mut has_sign = false;
     for (i, c) in s.chars().enumerate() {
         if c.is_ascii_digit() {
             num_str.push(c);
-        } else if c == '.' && !has_dot && !has_exp {
+        } else if c == '.' && !has_dot {
             has_dot = true;
             num_str.push(c);
-        } else if (c == 'e' || c == 'E') && !has_exp && !num_str.is_empty() && num_str != "-" {
-            has_exp = true;
-            num_str.push(c);
-        } else if (c == '-' || c == '+') && (i == 0 || has_exp && num_str.ends_with(|ch: char| ch == 'e' || ch == 'E')) {
-            if c == '-' || has_exp { num_str.push(c); }
+        } else if (c == '-' || c == '+') && i == 0 {
+            has_sign = true;
+            // Parse handles '-' but not leading '+', drop the '+'
+            if c == '-' {
+                num_str.push(c);
+            }
         } else {
             break;
         }
     }
     if num_str.is_empty() || num_str == "-" || num_str == "." {
+        // If we only had a '+' sign, still return 0 (no digits)
+        let _ = has_sign;
         return Ok(CfmlValue::Int(0));
     }
-    // Strip trailing 'e' or 'E' if no exponent digits followed
-    if num_str.ends_with('e') || num_str.ends_with('E') {
-        num_str.pop();
-        has_exp = false;
-    }
-    if has_dot || has_exp {
+    if has_dot {
         Ok(CfmlValue::Double(num_str.parse().unwrap_or(0.0)))
     } else {
         Ok(CfmlValue::Int(num_str.parse().unwrap_or(0)))
@@ -2605,13 +2612,16 @@ fn fn_floor(args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn fn_round(args: Vec<CfmlValue>) -> CfmlResult {
+    // Lucee/CFML uses Java Math.round: half-up towards positive infinity.
+    // Rust's f64::round() rounds half away from zero, so -1.5 -> -2.
+    // For CFML compatibility, use floor(n + 0.5).
     let n = get_float(&args, 0);
     if args.len() >= 2 {
         let precision = get_int(&args, 1);
         let factor = 10f64.powi(precision as i32);
-        Ok(CfmlValue::Double((n * factor).round() / factor))
+        Ok(CfmlValue::Double((n * factor + 0.5).floor() / factor))
     } else {
-        Ok(CfmlValue::Int(n.round() as i64))
+        Ok(CfmlValue::Int((n + 0.5).floor() as i64))
     }
 }
 
@@ -4193,8 +4203,30 @@ fn fn_evaluate(_args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn fn_iif(args: Vec<CfmlValue>) -> CfmlResult {
+    // IIf evaluates the string branches as expressions (like CFML's evaluate()).
+    // The canonical pattern is iif(cond, de("yes"), de("no")) where de() wraps
+    // in quotes and iif() unwraps via evaluation.
+    fn eval_branch(v: &CfmlValue) -> CfmlValue {
+        if let CfmlValue::String(s) = v {
+            // Simple quoted-string case: "yes" -> yes
+            if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+                return CfmlValue::String(s[1..s.len()-1].replace("\"\"", "\""));
+            }
+            if s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') {
+                return CfmlValue::String(s[1..s.len()-1].replace("''", "'").to_string());
+            }
+            // Numeric literal
+            if let Ok(i) = s.parse::<i64>() {
+                return CfmlValue::Int(i);
+            }
+            if let Ok(f) = s.parse::<f64>() {
+                return CfmlValue::Double(f);
+            }
+        }
+        v.clone()
+    }
     if args.len() >= 3 {
-        if args[0].is_true() { Ok(args[1].clone()) } else { Ok(args[2].clone()) }
+        if args[0].is_true() { Ok(eval_branch(&args[1])) } else { Ok(eval_branch(&args[2])) }
     } else {
         Ok(CfmlValue::Null)
     }
@@ -7870,9 +7902,11 @@ fn fn_xml_validate_stub(_args: Vec<CfmlValue>) -> CfmlResult {
 #[cfg(feature = "xml")]
 fn fn_xml_new(args: Vec<CfmlValue>) -> CfmlResult {
     let _case_sensitive = args.get(0).map(|v| v.is_true()).unwrap_or(false);
+    // An empty doc has no xmlRoot until a root element is attached.
+    // Matches Lucee: structKeyExists(xmlNew(), "xmlRoot") returns false.
     let mut doc = IndexMap::new();
-    doc.insert("xmlRoot".to_string(), CfmlValue::String(String::new()));
     doc.insert("xmlComment".to_string(), CfmlValue::String(String::new()));
+    doc.insert("__xmlDoc".to_string(), CfmlValue::Bool(true));
     let mut doc_type = IndexMap::new();
     doc_type.insert("type".to_string(), CfmlValue::String(String::new()));
     doc_type.insert("name".to_string(), CfmlValue::String(String::new()));
@@ -7930,7 +7964,7 @@ fn fn_xml_child_pos(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_xml_get_node_type(args: Vec<CfmlValue>) -> CfmlResult {
     let node = args.get(0).cloned().unwrap_or(CfmlValue::Null);
     if let CfmlValue::Struct(ref s) = node {
-        if s.contains_key("xmlRoot") {
+        if s.contains_key("__xmlDoc") || s.contains_key("xmlRoot") {
             return Ok(CfmlValue::String("DOCUMENT_NODE".to_string()));
         }
         if let Some(CfmlValue::String(ref t)) = s.get("xmlType") {
@@ -7966,7 +8000,11 @@ fn fn_xml_has_child(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_is_xml_doc(args: Vec<CfmlValue>) -> CfmlResult {
     let val = args.get(0).cloned().unwrap_or(CfmlValue::Null);
     if let CfmlValue::Struct(ref s) = val {
-        return Ok(CfmlValue::Bool(s.contains_key("xmlRoot")));
+        // A struct is an XML doc if it has our __xmlDoc marker or an xmlRoot key
+        // (xmlRoot is set once a root element is attached).
+        return Ok(CfmlValue::Bool(
+            s.contains_key("__xmlDoc") || s.contains_key("xmlRoot"),
+        ));
     }
     Ok(CfmlValue::Bool(false))
 }
@@ -7984,7 +8022,11 @@ fn fn_is_xml_elem(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_is_xml_node(args: Vec<CfmlValue>) -> CfmlResult {
     let val = args.get(0).cloned().unwrap_or(CfmlValue::Null);
     if let CfmlValue::Struct(ref s) = val {
-        return Ok(CfmlValue::Bool(s.contains_key("xmlName") || s.contains_key("xmlRoot")));
+        return Ok(CfmlValue::Bool(
+            s.contains_key("xmlName")
+                || s.contains_key("xmlRoot")
+                || s.contains_key("__xmlDoc"),
+        ));
     }
     Ok(CfmlValue::Bool(false))
 }
@@ -8183,7 +8225,12 @@ fn fn_metaphone(args: Vec<CfmlValue>) -> CfmlResult {
             }
             'C' => {
                 if next == Some('H') {
-                    result.push('X');
+                    // SCH -> SK (German-origin, matches Apache Commons Metaphone)
+                    if prev == Some('S') {
+                        result.push('K');
+                    } else {
+                        result.push('X');
+                    }
                     i += 1;
                 } else if next == Some('I') || next == Some('E') || next == Some('Y') {
                     if next == Some('I') && i + 2 < len && chars[i + 2] == 'A' {
@@ -8288,7 +8335,9 @@ fn fn_metaphone(args: Vec<CfmlValue>) -> CfmlResult {
             deduped.push(ch);
         }
     }
-    Ok(CfmlValue::String(deduped))
+    // Apache Commons Metaphone caps at 4 characters by default (matches Lucee)
+    let truncated: String = deduped.chars().take(4).collect();
+    Ok(CfmlValue::String(truncated))
 }
 
 // ---- toScript ----
@@ -8300,13 +8349,14 @@ fn fn_to_script(args: Vec<CfmlValue>) -> CfmlResult {
         s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r")
     }
 
+    // Lucee format: no `var` keyword, no spaces around `=`, booleans as strings.
     let script = match &value {
-        CfmlValue::String(s) => format!("var {} = \"{}\";", var_name, js_escape(s)),
-        CfmlValue::Int(n) => format!("var {} = {};", var_name, n),
-        CfmlValue::Double(d) => format!("var {} = {};", var_name, d),
-        CfmlValue::Bool(b) => format!("var {} = {};", var_name, if *b { "true" } else { "false" }),
+        CfmlValue::String(s) => format!("{}=\"{}\";", var_name, js_escape(s)),
+        CfmlValue::Int(n) => format!("{}={};", var_name, n),
+        CfmlValue::Double(d) => format!("{}={};", var_name, d),
+        CfmlValue::Bool(b) => format!("{}=\"{}\";", var_name, if *b { "true" } else { "false" }),
         CfmlValue::Array(arr) => {
-            let mut lines = vec![format!("var {} = new Array();", var_name)];
+            let mut lines = vec![format!("{}=new Array();", var_name)];
             for (i, item) in arr.iter().enumerate() {
                 let val_str = match item {
                     CfmlValue::String(s) => format!("\"{}\"", js_escape(s)),
@@ -8320,7 +8370,7 @@ fn fn_to_script(args: Vec<CfmlValue>) -> CfmlResult {
             lines.join("\n")
         }
         CfmlValue::Struct(s) => {
-            let mut lines = vec![format!("var {} = new Object();", var_name)];
+            let mut lines = vec![format!("{}=new Object();", var_name)];
             for (k, v) in s.iter() {
                 let val_str = match v {
                     CfmlValue::String(s) => format!("\"{}\"", js_escape(s)),
@@ -8333,8 +8383,8 @@ fn fn_to_script(args: Vec<CfmlValue>) -> CfmlResult {
             }
             lines.join("\n")
         }
-        CfmlValue::Null => format!("var {} = null;", var_name),
-        _ => format!("var {} = \"{}\";", var_name, js_escape(&value.as_string())),
+        CfmlValue::Null => format!("{}=null;", var_name),
+        _ => format!("{}=\"{}\";", var_name, js_escape(&value.as_string())),
     };
     Ok(CfmlValue::String(script))
 }
@@ -8664,8 +8714,12 @@ fn fn_decrement_value(args: Vec<CfmlValue>) -> CfmlResult {
 }
 
 fn fn_de(args: Vec<CfmlValue>) -> CfmlResult {
-    // DE() - delay evaluation, returns the string as-is
-    Ok(CfmlValue::String(get_str(&args, 0)))
+    // DE() - delay evaluation. Returns the input wrapped in double quotes so
+    // it can be safely passed through evaluate() without being interpreted.
+    // Matches Lucee: de("hello") -> "\"hello\""
+    let s = get_str(&args, 0);
+    let escaped = s.replace('"', "\"\"");
+    Ok(CfmlValue::String(format!("\"{}\"", escaped)))
 }
 
 fn fn_dollar_format(args: Vec<CfmlValue>) -> CfmlResult {
@@ -8893,14 +8947,64 @@ fn fn_write_log(args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::Null)
 }
 
+/// Convert CFML locale name (friendly or code) to Java locale code (e.g. "en_US").
+/// Matches Lucee's behavior: setLocale("English (US)") returns "en_US".
+fn cfml_locale_to_code(name: &str) -> String {
+    let trimmed = name.trim();
+    let lower = trimmed.to_lowercase();
+    match lower.as_str() {
+        "english (us)" | "english (united states)" | "en_us" | "en-us" => "en_US".to_string(),
+        "english (uk)" | "english (united kingdom)" | "en_gb" | "en-gb" => "en_GB".to_string(),
+        "english (australian)" | "en_au" | "en-au" => "en_AU".to_string(),
+        "english (canadian)" | "en_ca" | "en-ca" => "en_CA".to_string(),
+        "german (standard)" | "german" | "de_de" | "de-de" => "de_DE".to_string(),
+        "french (standard)" | "french" | "fr_fr" | "fr-fr" => "fr_FR".to_string(),
+        "spanish (standard)" | "spanish" | "es_es" | "es-es" => "es_ES".to_string(),
+        "italian (standard)" | "italian" | "it_it" | "it-it" => "it_IT".to_string(),
+        "portuguese (standard)" | "portuguese" | "pt_pt" | "pt-pt" => "pt_PT".to_string(),
+        "dutch (standard)" | "dutch" | "nl_nl" | "nl-nl" => "nl_NL".to_string(),
+        "japanese" | "ja_jp" | "ja-jp" => "ja_JP".to_string(),
+        "chinese (china)" | "zh_cn" | "zh-cn" => "zh_CN".to_string(),
+        // If already looks like a Java locale code (xx_XX), keep as-is
+        _ => {
+            if trimmed.contains('_') || trimmed.contains('-') {
+                trimmed.replace('-', "_")
+            } else {
+                trimmed.to_string()
+            }
+        }
+    }
+}
+
+/// Convert Java locale code back to Lucee's friendly lowercase name.
+/// e.g. "en_US" -> "english (us)"
+fn locale_code_to_friendly(code: &str) -> String {
+    match code {
+        "en_US" => "english (us)".to_string(),
+        "en_GB" => "english (uk)".to_string(),
+        "en_AU" => "english (australian)".to_string(),
+        "en_CA" => "english (canadian)".to_string(),
+        "de_DE" => "german (standard)".to_string(),
+        "fr_FR" => "french (standard)".to_string(),
+        "es_ES" => "spanish (standard)".to_string(),
+        "it_IT" => "italian (standard)".to_string(),
+        "pt_PT" => "portuguese (standard)".to_string(),
+        "nl_NL" => "dutch (standard)".to_string(),
+        "ja_JP" => "japanese".to_string(),
+        "zh_CN" => "chinese (china)".to_string(),
+        _ => code.to_lowercase(),
+    }
+}
+
 fn fn_set_locale(args: Vec<CfmlValue>) -> CfmlResult {
-    let _locale = get_str(&args, 0);
-    // Stub - return the locale that was set
-    Ok(CfmlValue::String(get_str(&args, 0)))
+    let locale = get_str(&args, 0);
+    let code = cfml_locale_to_code(&locale);
+    Ok(CfmlValue::String(code))
 }
 
 fn fn_get_locale(_args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(CfmlValue::String("en_US".to_string()))
+    // Lucee returns lowercase friendly name by default
+    Ok(CfmlValue::String(locale_code_to_friendly("en_US")))
 }
 
 fn fn_set_time_zone(args: Vec<CfmlValue>) -> CfmlResult {
@@ -9468,45 +9572,37 @@ fn fn_ls_currency_format(args: Vec<CfmlValue>) -> CfmlResult {
     let int_with_commas = add_thousands_separator(parts[0]);
     let decimal = parts.get(1).unwrap_or(&"00");
 
-    let formatted = match currency_type.as_str() {
-        "international" => format!("USD{}.{}", int_with_commas, decimal),
-        "none" => format!("{}.{}", int_with_commas, decimal),
-        _ => format!("${}.{}", int_with_commas, decimal),
-    };
-
-    if negative {
-        Ok(CfmlValue::String(format!("-{}", formatted)))
-    } else {
-        Ok(CfmlValue::String(formatted))
+    // Lucee format (en_US locale): "$1,234.56" local, "USD 1,234.56" international,
+    // "1,234.56" none. Negatives wrapped in parens: "($99.99)", "(USD 99.99)".
+    match currency_type.as_str() {
+        "international" => {
+            if negative {
+                Ok(CfmlValue::String(format!("USD ({}.{})", int_with_commas, decimal)))
+            } else {
+                Ok(CfmlValue::String(format!("USD {}.{}", int_with_commas, decimal)))
+            }
+        }
+        "none" => {
+            if negative {
+                Ok(CfmlValue::String(format!("-{}.{}", int_with_commas, decimal)))
+            } else {
+                Ok(CfmlValue::String(format!("{}.{}", int_with_commas, decimal)))
+            }
+        }
+        _ => {
+            if negative {
+                Ok(CfmlValue::String(format!("(${}.{})", int_with_commas, decimal)))
+            } else {
+                Ok(CfmlValue::String(format!("${}.{}", int_with_commas, decimal)))
+            }
+        }
     }
 }
 
 fn fn_ls_euro_currency_format(args: Vec<CfmlValue>) -> CfmlResult {
-    let n = get_float(&args, 0);
-    let currency_type = if args.len() > 1 {
-        get_str(&args, 1).to_lowercase()
-    } else {
-        "local".to_string()
-    };
-
-    let negative = n < 0.0;
-    let abs_n = n.abs();
-    let formatted_num = format!("{:.2}", abs_n);
-    let parts: Vec<&str> = formatted_num.split('.').collect();
-    let int_with_commas = add_thousands_separator(parts[0]);
-    let decimal = parts.get(1).unwrap_or(&"00");
-
-    let formatted = match currency_type.as_str() {
-        "international" => format!("EUR{}.{}", int_with_commas, decimal),
-        "none" => format!("{}.{}", int_with_commas, decimal),
-        _ => format!("\u{20AC}{}.{}", int_with_commas, decimal),
-    };
-
-    if negative {
-        Ok(CfmlValue::String(format!("-{}", formatted)))
-    } else {
-        Ok(CfmlValue::String(formatted))
-    }
+    // In Lucee, lsEuroCurrencyFormat uses the CURRENT locale's currency, not EUR.
+    // In en_US locale, this returns USD formatting. Delegate to lsCurrencyFormat.
+    fn_ls_currency_format(args)
 }
 
 fn fn_ls_is_date(args: Vec<CfmlValue>) -> CfmlResult {
@@ -9593,7 +9689,7 @@ fn fn_exception_key_exists(args: Vec<CfmlValue>) -> CfmlResult {
 /// generatePBKDFKey(algorithm, passphrase, salt, iterations, keySize)
 /// Generates a derived key using PBKDF2.
 /// algorithm: "PBKDF2WithHmacSHA1", "PBKDF2WithHmacSHA256", "PBKDF2WithHmacSHA512"
-/// keySize is in bits (e.g. 128, 256). Returns hex-encoded derived key.
+/// keySize is in bits (e.g. 128, 256). Returns base64-encoded derived key (matches Lucee).
 #[cfg(feature = "security")]
 fn fn_generate_pbkdf_key(args: Vec<CfmlValue>) -> CfmlResult {
     use pbkdf2::pbkdf2_hmac;
@@ -9655,7 +9751,7 @@ fn fn_generate_pbkdf_key(args: Vec<CfmlValue>) -> CfmlResult {
         }
     }
 
-    Ok(CfmlValue::String(hex_encode(&derived_key)))
+    Ok(CfmlValue::String(base64_encode_bytes(&derived_key)))
 }
 
 /// generateBCryptHash(password [, rounds])

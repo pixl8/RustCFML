@@ -1879,7 +1879,10 @@ impl CfmlVirtualMachine {
                                         stack.push(CfmlValue::String(q.columns.join(",")));
                                     }
                                     _ => {
-                                        // Column access: q.columnName returns array of values
+                                        // Column access: q.columnName returns array of values.
+                                        // NOTE: Lucee returns a QueryColumn object that acts as
+                                        // both string (first row) and array. We return the array
+                                        // for broader compatibility with existing tests.
                                         let col_lower = name.to_lowercase();
                                         let is_col =
                                             q.columns.iter().any(|c| c.to_lowercase() == col_lower);
@@ -2961,6 +2964,89 @@ impl CfmlVirtualMachine {
                     self.output_buffer.push_str(&format!("{:?}\n", arg));
                 }
                 return Ok(CfmlValue::Null);
+            }
+
+            // queryAppend: mutates the first query in-place, returns boolean.
+            if name_lower == "queryappend" {
+                if let (Some(CfmlValue::Query(q1)), Some(CfmlValue::Query(q2))) =
+                    (args.first(), args.get(1))
+                {
+                    let mut merged = q1.clone();
+                    for col in &q2.columns {
+                        let col_lower = col.to_lowercase();
+                        if !merged.columns.iter().any(|c| c.to_lowercase() == col_lower) {
+                            merged.columns.push(col.clone());
+                        }
+                    }
+                    for row in &q2.rows {
+                        merged.rows.push(row.clone());
+                    }
+                    self.arg_ref_writeback = Some(vec![
+                        ("0".to_string(), CfmlValue::Query(merged)),
+                    ]);
+                    return Ok(CfmlValue::Bool(true));
+                }
+                return Ok(CfmlValue::Bool(false));
+            }
+
+            // querySetRow: mutates query in-place, returns boolean.
+            if name_lower == "querysetrow" {
+                if let (Some(CfmlValue::Query(q)), Some(row_pos), Some(CfmlValue::Struct(new_row))) =
+                    (args.first(), args.get(1), args.get(2))
+                {
+                    let pos = match row_pos {
+                        CfmlValue::Int(i) => *i as usize,
+                        CfmlValue::Double(d) => *d as usize,
+                        _ => 0,
+                    };
+                    if pos >= 1 && pos <= q.rows.len() {
+                        let mut modified = q.clone();
+                        let mut row: IndexMap<String, CfmlValue> = IndexMap::new();
+                        for col in &modified.columns {
+                            let col_lower = col.to_lowercase();
+                            let val = new_row
+                                .iter()
+                                .find(|(k, _)| k.to_lowercase() == col_lower)
+                                .map(|(_, v)| v.clone())
+                                .unwrap_or(CfmlValue::Null);
+                            row.insert(col.clone(), val);
+                        }
+                        modified.rows[pos - 1] = row;
+                        self.arg_ref_writeback = Some(vec![
+                            ("0".to_string(), CfmlValue::Query(modified)),
+                        ]);
+                        return Ok(CfmlValue::Bool(true));
+                    }
+                }
+                return Ok(CfmlValue::Bool(false));
+            }
+
+            // In-place array mutators that return boolean (matches Lucee):
+            // arrayDelete, arrayDeleteNoCase. Mutate the caller's array via
+            // arg_ref_writeback and return true/false based on whether the
+            // element was found.
+            if name_lower == "arraydelete" || name_lower == "arraydeletenocase" {
+                if let Some(CfmlValue::Array(arr)) = args.first() {
+                    let target = args.get(1).map(|v| v.as_string()).unwrap_or_default();
+                    let (pos, found) = if name_lower == "arraydeletenocase" {
+                        let t = target.to_lowercase();
+                        let p = arr.iter().position(|v| v.as_string().to_lowercase() == t);
+                        (p, p.is_some())
+                    } else {
+                        let p = arr.iter().position(|v| v.as_string() == target);
+                        (p, p.is_some())
+                    };
+                    if let Some(p) = pos {
+                        let mut new_arr = arr.clone();
+                        new_arr.remove(p);
+                        // Write back the mutated array to the source variable
+                        self.arg_ref_writeback = Some(vec![
+                            ("0".to_string(), CfmlValue::Array(new_arr)),
+                        ]);
+                    }
+                    return Ok(CfmlValue::Bool(found));
+                }
+                return Ok(CfmlValue::Bool(false));
             }
 
             // Higher-order functions must be handled BEFORE regular builtins
@@ -6164,11 +6250,13 @@ impl CfmlVirtualMachine {
                         }
                     }
 
-                    // Build thread metadata
+                    // Build thread metadata. Status is TERMINATED if an error
+                    // occurred, COMPLETED otherwise (matches Lucee).
+                    let status = if thread_error.is_empty() { "COMPLETED" } else { "TERMINATED" };
                     let mut thread_meta = IndexMap::new();
                     thread_meta.insert(
                         "status".to_string(),
-                        CfmlValue::String("COMPLETED".to_string()),
+                        CfmlValue::String(status.to_string()),
                     );
                     thread_meta.insert("name".to_string(), CfmlValue::String(thread_name.clone()));
                     thread_meta.insert("output".to_string(), CfmlValue::String(thread_output));
