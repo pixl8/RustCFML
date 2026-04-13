@@ -9277,10 +9277,28 @@ fn fn_cfmail(args: Vec<CfmlValue>) -> CfmlResult {
     #[cfg(feature = "smtp")]
     let password = get_opt("password");
 
-    // Always log to stderr
+    // Log to stderr for debugging visibility
     eprintln!("[CFMAIL] To: {} | From: {} | Subject: {} | Type: {}", to, from, subject, mail_type);
     if !body_text.is_empty() {
         eprintln!("[CFMAIL] Body: {}", body_text);
+    }
+
+    // Lucee/ACF require a server to be configured. Fail loudly rather than
+    // silently dropping mail — silent success would mislead developers into
+    // thinking mail was sent.
+    #[cfg(feature = "smtp")]
+    {
+        if server.is_none() {
+            return Err(CfmlError::runtime(
+                "no SMTP Server defined. Set 'server' attribute on cfmail or configure a default mail server.".to_string()
+            ));
+        }
+    }
+    #[cfg(not(feature = "smtp"))]
+    {
+        return Err(CfmlError::runtime(
+            "cfmail requires the 'smtp' feature to be enabled in this build".to_string()
+        ));
     }
 
     // Collect file attachments from params array

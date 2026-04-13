@@ -1,33 +1,41 @@
-<cfscript>suiteBegin("Tags: cfmail");</cfscript>
+<cfscript>suiteBegin("Tags: cfmail");
 
-<!--- Self-closing cfmail (no server = log only) --->
-<cfmail to="test@example.com" from="sender@example.com" subject="Test" type="text">
-This is a test email body.
-</cfmail>
-<cfscript>assertTrue("cfmail basic no error", true);</cfscript>
+// cfmail without a server should error (matches Lucee behavior).
+threwWithoutServer = false;
+try {
+    var sysObj = createObject("java", "java.lang.System");
+} catch(any e) {}
+</cfscript>
 
-<!--- cfmail with cfmailparam --->
-<cfmail to="test@example.com" from="sender@example.com" subject="With Params">
-Body text here.
-<cfmailparam name="X-Custom-Header" value="custom-value">
-<cfmailparam file="/tmp/attachment.txt">
-</cfmail>
-<cfscript>assertTrue("cfmail with params no error", true);</cfscript>
+<cftry>
+    <cfmail to="test@example.com" from="sender@example.com" subject="Test" type="text">
+    This is a test body.
+    </cfmail>
+    <cfcatch type="any">
+        <cfset threwWithoutServer = true>
+    </cfcatch>
+</cftry>
 
-<!--- cfmail with type=html --->
-<cfmail to="test@example.com" from="sender@example.com" subject="HTML Mail" type="html">
-<html><body><h1>Hello</h1></body></html>
-</cfmail>
-<cfscript>assertTrue("cfmail html type no error", true);</cfscript>
-
-<!--- Real SMTP tests if credentials provided via env vars --->
 <cfscript>
-smtpServer = getEnvironmentVariable("RUSTCFML_TEST_SMTP_SERVER");
-smtpPort = getEnvironmentVariable("RUSTCFML_TEST_SMTP_PORT");
-smtpUser = getEnvironmentVariable("RUSTCFML_TEST_SMTP_USERNAME");
-smtpPass = getEnvironmentVariable("RUSTCFML_TEST_SMTP_PASSWORD");
-smtpTo = getEnvironmentVariable("RUSTCFML_TEST_SMTP_TO");
-smtpFrom = getEnvironmentVariable("RUSTCFML_TEST_SMTP_FROM");
+assertTrue("cfmail without server throws", threwWithoutServer);
+</cfscript>
+
+<!--- Real SMTP tests only if credentials provided via env vars --->
+<cfscript>
+smtpServer = "";
+try { smtpServer = createObject("java", "java.lang.System").getenv("RUSTCFML_TEST_SMTP_SERVER"); } catch(any e) {}
+if (isNull(smtpServer)) smtpServer = "";
+function getEnv(name) {
+    var result = "";
+    try { result = createObject("java", "java.lang.System").getenv(arguments.name); } catch(any e) {}
+    if (isNull(result)) result = "";
+    return result;
+}
+smtpPort = getEnv("RUSTCFML_TEST_SMTP_PORT");
+smtpUser = getEnv("RUSTCFML_TEST_SMTP_USERNAME");
+smtpPass = getEnv("RUSTCFML_TEST_SMTP_PASSWORD");
+smtpTo = getEnv("RUSTCFML_TEST_SMTP_TO");
+smtpFrom = getEnv("RUSTCFML_TEST_SMTP_FROM");
 </cfscript>
 
 <cfif len(smtpServer) GT 0 AND len(smtpTo) GT 0 AND len(smtpFrom) GT 0>

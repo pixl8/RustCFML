@@ -1,3 +1,4 @@
+<cfscript>
 suiteBegin("External Property Access on CFC");
 
 obj = createObject("component", "oop.ExternalPropCFC");
@@ -19,3 +20,4 @@ obj.anotherProp = 42;
 assert("multiple external props", obj.anotherProp, 42);
 
 suiteEnd();
+</cfscript>
