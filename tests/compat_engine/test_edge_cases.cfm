@@ -235,8 +235,9 @@ assertFalse("string neq", "abc" == "def");
 assertTrue("bool string eq", true == "true");
 assertTrue("bool num eq", true == 1);
 assertTrue("bool zero eq false", false == 0);
-// May fail: loose comparison edge cases
-assertTrue("empty string eq false", "" == false);
+// Empty string is NOT equal to false in CFML — it's not a boolean
+// (isBoolean("") is false, so comparison fails)
+assertFalse("empty string not eq false", "" == false);
 assertTrue("zero eq false", 0 == false);
 suiteEnd();
 

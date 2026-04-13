@@ -9842,9 +9842,11 @@ fn cfml_equal(a: &CfmlValue, b: &CfmlValue) -> bool {
             s.trim().parse::<f64>().map_or(false, |n| n == *d)
         }
         (CfmlValue::String(s), CfmlValue::Bool(b)) | (CfmlValue::Bool(b), CfmlValue::String(s)) => {
+            // Empty string is NOT a boolean (isBoolean("") is false), so comparison fails.
+            // Matches Lucee/ACF: "" == false returns false.
             match s.to_lowercase().trim() {
                 "true" | "yes" => *b,
-                "false" | "no" | "" => !*b,
+                "false" | "no" => !*b,
                 _ => {
                     // Numeric string: non-zero is true, zero is false
                     if let Ok(n) = s.trim().parse::<f64>() {
