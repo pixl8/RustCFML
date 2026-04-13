@@ -11,10 +11,10 @@ use std::time::SystemTime;
 
 mod java_shims;
 use java_shims::{
-    handle_java_concurrentlinkedqueue, handle_java_file, handle_java_inetaddress,
-    handle_java_linkedhashmap, handle_java_messagedigest, handle_java_paths,
-    handle_java_stringbuilder, handle_java_system, handle_java_thread, handle_java_treemap,
-    handle_java_uuid,
+    handle_java_collections, handle_java_concurrenthashmap, handle_java_concurrentlinkedqueue,
+    handle_java_file, handle_java_inetaddress, handle_java_linkedhashmap,
+    handle_java_messagedigest, handle_java_paths, handle_java_stringbuilder, handle_java_system,
+    handle_java_thread, handle_java_treemap, handle_java_uuid,
 };
 
 pub type BuiltinFunction = fn(Vec<CfmlValue>) -> CfmlResult;
@@ -4838,6 +4838,20 @@ impl CfmlVirtualMachine {
                                         &CfmlValue::Null,
                                     )
                                 }
+                                "java.util.concurrent.concurrenthashmap" => {
+                                    handle_java_concurrenthashmap(
+                                        "init",
+                                        empty_args,
+                                        &CfmlValue::Null,
+                                    )
+                                }
+                                "java.util.collections" => {
+                                    handle_java_collections(
+                                        "init",
+                                        empty_args,
+                                        &CfmlValue::Null,
+                                    )
+                                }
                                 "java.nio.file.paths" | "java.nio.file.path" => {
                                     handle_java_paths("init", empty_args, &CfmlValue::Null)
                                 }
@@ -6544,8 +6558,8 @@ impl CfmlVirtualMachine {
             "delete" | "insert" | "update" |
             // Query mutators
             "addrow" | "setcell" | "addcolumn" | "deleterow" | "deletecolumn" |
-            // Java shim mutators (Map.put, Queue.offer)
-            "put" | "offer"
+            // Java shim mutators (Map.put, Map.putIfAbsent, Queue.offer)
+            "put" | "putifabsent" | "offer"
         )
     }
 
@@ -6688,6 +6702,27 @@ impl CfmlVirtualMachine {
                     return Ok(CfmlValue::Null);
                 }
 
+                // Special: Map.remove(key) returns the removed value and
+                // mutates in place — identical pattern to Queue.poll.
+                if method_lower == "remove"
+                    && matches!(
+                        java_class.as_str(),
+                        "java.util.concurrent.concurrenthashmap"
+                            | "java.util.linkedhashmap"
+                            | "java.util.treemap"
+                    )
+                {
+                    let key = extra_args
+                        .first()
+                        .map(|a| a.as_string())
+                        .unwrap_or_default();
+                    let old = s.get(&key).cloned().unwrap_or(CfmlValue::Null);
+                    let mut ns = s.clone();
+                    ns.shift_remove(&key);
+                    self.method_this_writeback = Some(CfmlValue::Struct(ns));
+                    return Ok(old);
+                }
+
                 let all_args: Vec<CfmlValue> = std::mem::take(extra_args);
                 let m = method_lower.clone();
                 let result = match java_class.as_str() {
@@ -6711,6 +6746,12 @@ impl CfmlVirtualMachine {
                     "java.util.concurrent.linkedqueue"
                     | "java.util.concurrent.concurrentlinkedqueue" => {
                         handle_java_concurrentlinkedqueue(&m, all_args, object)
+                    }
+                    "java.util.concurrent.concurrenthashmap" => {
+                        handle_java_concurrenthashmap(&m, all_args, object)
+                    }
+                    "java.util.collections" => {
+                        handle_java_collections(&m, all_args, object)
                     }
                     "java.nio.file.paths" | "java.nio.file.path" => {
                         handle_java_paths(&m, all_args, object)

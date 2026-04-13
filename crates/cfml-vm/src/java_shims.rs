@@ -762,6 +762,175 @@ pub fn handle_java_concurrentlinkedqueue(
     }
 }
 
+// ---- ConcurrentHashMap ----
+// Preside/ColdBox Cachebox uses ConcurrentHashMap as a thread-safe cache
+// pool: init, put, get, remove (returns old value), containsKey, size,
+// keys() (fed into Collections.list), clear, isEmpty.
+pub fn handle_java_concurrenthashmap(
+    method: &str,
+    args: Vec<CfmlValue>,
+    object: &CfmlValue,
+) -> CfmlResult {
+    match method {
+        "init" => {
+            let mut shim = IndexMap::new();
+            shim.insert(
+                "__java_class".to_string(),
+                CfmlValue::String("java.util.concurrent.concurrenthashmap".to_string()),
+            );
+            shim.insert("__java_shim".to_string(), CfmlValue::Bool(true));
+            Ok(CfmlValue::Struct(shim))
+        }
+        "put" | "putifabsent" => {
+            if let CfmlValue::Struct(ref shim) = object {
+                if let Some((k, v)) = args.get(0).zip(args.get(1)) {
+                    let key = k.as_string();
+                    // putIfAbsent is a no-op if key present
+                    if method == "putifabsent" && shim.contains_key(&key) {
+                        return Ok(object.clone());
+                    }
+                    let mut ns = shim.clone();
+                    ns.insert(key, v.clone());
+                    return Ok(CfmlValue::Struct(ns));
+                }
+                return Ok(object.clone());
+            }
+            Ok(CfmlValue::Null)
+        }
+        "get" => {
+            if let CfmlValue::Struct(ref shim) = object {
+                if let Some(k) = args.first() {
+                    return Ok(shim.get(&k.as_string()).cloned().unwrap_or(CfmlValue::Null));
+                }
+            }
+            Ok(CfmlValue::Null)
+        }
+        "containskey" => {
+            if let CfmlValue::Struct(ref shim) = object {
+                if let Some(k) = args.first() {
+                    return Ok(CfmlValue::Bool(shim.contains_key(&k.as_string())));
+                }
+            }
+            Ok(CfmlValue::Bool(false))
+        }
+        "size" | "len" => {
+            if let CfmlValue::Struct(ref shim) = object {
+                return Ok(CfmlValue::Int(
+                    shim.iter().filter(|(k, _)| !k.starts_with("__")).count() as i64,
+                ));
+            }
+            Ok(CfmlValue::Int(0))
+        }
+        "isempty" => {
+            if let CfmlValue::Struct(ref shim) = object {
+                return Ok(CfmlValue::Bool(
+                    shim.iter().all(|(k, _)| k.starts_with("__")),
+                ));
+            }
+            Ok(CfmlValue::Bool(true))
+        }
+        "keys" | "keyset" | "values" => {
+            // keys() returns an Enumeration in real Java; keySet() returns a
+            // Set. Callers typically either iterate or feed into
+            // Collections.list(). Returning a CFML Array satisfies both —
+            // arrayLen, indexing, and Collections.list() all work on it.
+            if let CfmlValue::Struct(ref shim) = object {
+                let values = method == "values";
+                let items: Vec<CfmlValue> = shim
+                    .iter()
+                    .filter(|(k, _)| !k.starts_with("__"))
+                    .map(|(k, v)| {
+                        if values {
+                            v.clone()
+                        } else {
+                            CfmlValue::String(k.clone())
+                        }
+                    })
+                    .collect();
+                return Ok(CfmlValue::Array(items));
+            }
+            Ok(CfmlValue::Array(Vec::new()))
+        }
+        "clear" => {
+            if let CfmlValue::Struct(ref shim) = object {
+                let mut ns = IndexMap::new();
+                for (k, v) in shim.iter() {
+                    if k.starts_with("__") {
+                        ns.insert(k.clone(), v.clone());
+                    }
+                }
+                return Ok(CfmlValue::Struct(ns));
+            }
+            Ok(CfmlValue::Null)
+        }
+        // remove is handled in the VM dispatch (needs return-and-mutate
+        // semantics identical to Queue.poll); this arm is a no-op safety net.
+        _ => Ok(CfmlValue::Null),
+    }
+}
+
+// ---- Collections (static utility class) ----
+// Preside/ColdBox use-case: Collections.list(map.keys()) converts a legacy
+// Enumeration into an ArrayList. Since our ConcurrentHashMap.keys() already
+// returns a CFML Array, Collections.list(array) is identity. We also handle
+// a handful of other common static helpers so real code runs unchanged.
+pub fn handle_java_collections(
+    method: &str,
+    args: Vec<CfmlValue>,
+    _object: &CfmlValue,
+) -> CfmlResult {
+    match method {
+        "init" => {
+            // Collections is static-only; return a stub shim so static calls
+            // dispatch through to this handler.
+            let mut shim = IndexMap::new();
+            shim.insert(
+                "__java_class".to_string(),
+                CfmlValue::String("java.util.collections".to_string()),
+            );
+            shim.insert("__java_shim".to_string(), CfmlValue::Bool(true));
+            Ok(CfmlValue::Struct(shim))
+        }
+        "list" => {
+            // Collections.list(Enumeration) → ArrayList. Our callers hand in
+            // a CFML Array already, so this is an identity operation.
+            match args.into_iter().next() {
+                Some(CfmlValue::Array(a)) => Ok(CfmlValue::Array(a)),
+                Some(other) => Ok(other),
+                None => Ok(CfmlValue::Array(Vec::new())),
+            }
+        }
+        "emptylist" | "emptyset" => Ok(CfmlValue::Array(Vec::new())),
+        "emptymap" => Ok(CfmlValue::Struct(IndexMap::new())),
+        "unmodifiablelist" | "unmodifiableset" | "synchronizedlist" | "synchronizedset" => {
+            // No true immutability in CFML; behave as identity like Lucee.
+            match args.into_iter().next() {
+                Some(v) => Ok(v),
+                None => Ok(CfmlValue::Array(Vec::new())),
+            }
+        }
+        "unmodifiablemap" | "synchronizedmap" => match args.into_iter().next() {
+            Some(v) => Ok(v),
+            None => Ok(CfmlValue::Struct(IndexMap::new())),
+        },
+        "sort" => {
+            if let Some(CfmlValue::Array(mut a)) = args.into_iter().next() {
+                a.sort_by(|x, y| x.as_string().cmp(&y.as_string()));
+                return Ok(CfmlValue::Array(a));
+            }
+            Ok(CfmlValue::Null)
+        }
+        "reverse" => {
+            if let Some(CfmlValue::Array(mut a)) = args.into_iter().next() {
+                a.reverse();
+                return Ok(CfmlValue::Array(a));
+            }
+            Ok(CfmlValue::Null)
+        }
+        _ => Ok(CfmlValue::Null),
+    }
+}
+
 pub fn handle_java_paths(method: &str, args: Vec<CfmlValue>, object: &CfmlValue) -> CfmlResult {
     match method {
         "init" => {

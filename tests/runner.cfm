@@ -119,6 +119,7 @@ try { include "java_shims/test_more.cfm"; } catch (any e) { writeOutput("ERROR |
 try { include "java_shims/test_security.cfm"; } catch (any e) { writeOutput("ERROR | java_shims/test_security.cfm | " & e.message & chr(10)); }
 try { include "java_shims/test_stringbuilder.cfm"; } catch (any e) { writeOutput("ERROR | java_shims/test_stringbuilder.cfm | " & e.message & chr(10)); }
 try { include "java_shims/test_system.cfm"; } catch (any e) { writeOutput("ERROR | java_shims/test_system.cfm | " & e.message & chr(10)); }
+try { include "java_shims/test_concurrent_map.cfm"; } catch (any e) { writeOutput("ERROR | java_shims/test_concurrent_map.cfm | " & e.message & chr(10)); }
 
 // --- Engine Compatibility ---
 try { include "compat_engine/test_math_functions.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_math_functions.cfm | " & e.message & chr(10)); }
