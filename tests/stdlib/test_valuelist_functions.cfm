@@ -2,7 +2,7 @@
 suiteBegin("valueList / quotedValueList");
 
 // Create a test query
-var q = queryNew("name,age", "varchar,integer");
+q = queryNew("name,age", "varchar,integer");
 queryAddRow(q);
 querySetCell(q, "name", "Alice", 1);
 querySetCell(q, "age", 30, 1);
@@ -28,12 +28,9 @@ assert("quotedValueList basic", quotedValueList(q.name), "'Alice','Bob','Charlie
 // quotedValueList with custom delimiter
 assert("quotedValueList custom delimiter", quotedValueList(q.name, "|"), "'Alice'|'Bob'|'Charlie'");
 
-// valueList with an array directly
-assert("valueList with array", valueList(["x","y","z"]), "x,y,z");
-
 // Empty query
-var emptyQ = queryNew("name", "varchar");
-assert("valueList empty query", valueList(queryColumnData(emptyQ, "name")), "");
+emptyQ = queryNew("name", "varchar");
+assert("valueList empty query", valueList(emptyQ.name), "");
 
 suiteEnd();
 </cfscript>

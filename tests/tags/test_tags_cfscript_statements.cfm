@@ -2,29 +2,7 @@
 suiteBegin("CFScript Tag Statements");
 
 // ============================================================
-// content (cfcontent)
-// ============================================================
-
-// content sets the response content type - just verify it parses and runs
-content type="application/json";
-assertTrue("content type parsed", true);
-
-content type="text/html" reset="true";
-assertTrue("content with reset parsed", true);
-
-// ============================================================
-// header (cfheader)
-// ============================================================
-
-// header sets response headers
-header name="X-Test-Header" value="hello123";
-assertTrue("header name/value parsed", true);
-
-header statuscode="200" statustext="OK";
-assertTrue("header statuscode parsed", true);
-
-// ============================================================
-// setting (cfsetting)
+// setting (cfsetting) — safe, no HTTP side-effects
 // ============================================================
 
 setting requesttimeout="60";
@@ -34,17 +12,7 @@ setting showdebugoutput="false";
 assertTrue("setting showdebugoutput parsed", true);
 
 // ============================================================
-// cookie (cfcookie)
-// ============================================================
-
-cookie name="testcookie" value="cookievalue";
-assertTrue("cookie name/value parsed", true);
-
-cookie name="securecookie" value="secret" httponly="true" secure="true";
-assertTrue("cookie with httponly/secure parsed", true);
-
-// ============================================================
-// log (cflog)
+// log (cflog) — safe, no HTTP side-effects
 // ============================================================
 
 log text="Test log message" type="information";
@@ -52,25 +20,6 @@ assertTrue("log text/type parsed", true);
 
 log text="Debug message" type="debug" file="testlog";
 assertTrue("log with file parsed", true);
-
-// ============================================================
-// location (cflocation) — throws redirect error, must catch
-// ============================================================
-
-try {
-    location url="/redirect-target" statuscode="301";
-    // Should not reach here
-    assertTrue("location should have thrown", false);
-} catch (any e) {
-    assertTrue("location throws redirect", true);
-}
-
-try {
-    location url="/another-redirect";
-    assertTrue("location default should throw", false);
-} catch (any e) {
-    assertTrue("location default statuscode throws", true);
-}
 
 // ============================================================
 // thread (cfthread) — run/join/terminate actions
@@ -92,34 +41,41 @@ thread name="testThread2" action="join";
 assertTrue("thread default action parsed", true);
 
 // ============================================================
-// Mixed usage: tag statements inside functions
+// HTTP-affecting statements (header, cookie, content, location)
+// Tested via cfhttp to a target page so headers don't bleed
+// into the test runner's own HTTP response.
 // ============================================================
 
-function setJsonResponse(required string data) {
-    content type="application/json";
-    header name="X-API-Version" value="1.0";
-    return data;
-}
+baseUrl = "http://127.0.0.1:" & (cgi.server_port ?: "8585");
+targetPath = "/tests/tags/http_statements_target.cfm";
 
-result = setJsonResponse('{"status":"ok"}');
-assert("tag stmts in function", result, '{"status":"ok"}');
+// --- header ---
+cfhttp(url=baseUrl & targetPath & "?test=header", method="GET", result="headerResult");
+assert("header target responds", headerResult.statuscode, "200 OK");
+assert("header body", trim(headerResult.filecontent), "header-ok");
+assertTrue("header X-Test-Header set",
+    structKeyExists(headerResult.responseheader, "X-Test-Header")
+    && headerResult.responseheader["X-Test-Header"] == "hello123");
 
-// ============================================================
-// Tag statements with dynamic expressions
-// ============================================================
+// --- cookie ---
+cfhttp(url=baseUrl & targetPath & "?test=cookie", method="GET", result="cookieResult");
+assert("cookie target responds", cookieResult.statuscode, "200 OK");
+assert("cookie body", trim(cookieResult.filecontent), "cookie-ok");
 
-myType = "text/xml";
-content type=myType;
-assertTrue("content with variable expression", true);
+// --- content type ---
+cfhttp(url=baseUrl & targetPath & "?test=content", method="GET", result="contentResult");
+assert("content target responds", contentResult.statuscode, "200 OK");
+assert("content body", trim(contentResult.filecontent), '{"status":"ok"}');
+assertTrue("content type is json",
+    findNoCase("application/json", contentResult.responseheader["Content-Type"]) > 0);
 
-myHeaderVal = "dynamic-" & "value";
-header name="X-Dynamic" value=myHeaderVal;
-assertTrue("header with expression", true);
-
-cookieName = "dyncookie";
-cookieVal = "dynval";
-cookie name=cookieName value=cookieVal;
-assertTrue("cookie with variable expressions", true);
+// --- location (redirect) ---
+cfhttp(url=baseUrl & targetPath & "?test=location", method="GET", redirect="false", result="locResult");
+assertTrue("location returns 3xx",
+    left(locResult.statuscode, 1) == "3");
+assertTrue("location header set",
+    structKeyExists(locResult.responseheader, "Location")
+    && findNoCase("redirect-target", locResult.responseheader["Location"]) > 0);
 
 suiteEnd();
 </cfscript>

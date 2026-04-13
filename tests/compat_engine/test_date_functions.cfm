@@ -1,3 +1,4 @@
+<cfscript>
 // Lucee 7 Compatibility Tests: Date Functions
 // Synthesized from https://github.com/lucee/Lucee/tree/7.0/test/functions
 // Original tests Copyright (c) 2014, the Railo Company LLC / Copyright (c) 2015-2016, Lucee Association Switzerland
@@ -194,3 +195,4 @@ t1 = getTickCount();
 t2 = getTickCount();
 assertTrue("getTickCount monotonic", t2 >= t1);
 suiteEnd();
+</cfscript>

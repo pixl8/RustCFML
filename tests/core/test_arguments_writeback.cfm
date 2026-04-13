@@ -5,7 +5,7 @@ suiteBegin("Arguments Scope Pass-by-Reference Writeback");
 function addViaArguments(required any obj) {
     arguments.obj.foo = "bar";
 }
-var s1 = { name: "test" };
+s1 = { name: "test" };
 addViaArguments(s1);
 assertTrue("arguments.obj.prop writeback", structKeyExists(s1, "foo"));
 assert("arguments.obj.prop value", s1.foo, "bar");
@@ -14,7 +14,7 @@ assert("arguments.obj.prop value", s1.foo, "bar");
 function addDirect(required any obj) {
     obj.color = "blue";
 }
-var s2 = { name: "test" };
+s2 = { name: "test" };
 addDirect(s2);
 assertTrue("direct param.prop writeback", structKeyExists(s2, "color"));
 assert("direct param.prop value", s2.color, "blue");
@@ -24,7 +24,7 @@ function addBoth(required any obj) {
     obj.directProp = "direct";
     arguments.obj.argsProp = "args";
 }
-var s3 = {};
+s3 = {};
 addBoth(s3);
 assertTrue("both: direct prop exists", structKeyExists(s3, "directProp"));
 assertTrue("both: args prop exists", structKeyExists(s3, "argsProp"));
@@ -33,7 +33,7 @@ assertTrue("both: args prop exists", structKeyExists(s3, "argsProp"));
 function injectMethod(required any target) {
     arguments.target.greet = function(name) { return "Hello " & arguments.name; };
 }
-var svc = {};
+svc = {};
 injectMethod(svc);
 assertTrue("mixin: function injected", structKeyExists(svc, "greet"));
 assert("mixin: function callable", svc.greet("World"), "Hello World");
@@ -42,7 +42,7 @@ assert("mixin: function callable", svc.greet("World"), "Hello World");
 function addViaStructInsert(required any obj) {
     structInsert(arguments.obj, "inserted", "yes");
 }
-var s5 = {};
+s5 = {};
 addViaStructInsert(s5);
 assertTrue("structInsert via arguments", structKeyExists(s5, "inserted"));
 
@@ -50,7 +50,7 @@ assertTrue("structInsert via arguments", structKeyExists(s5, "inserted"));
 function modifyNested(required any obj) {
     arguments.obj.child = { nested: true };
 }
-var s6 = {};
+s6 = {};
 modifyNested(s6);
 assertTrue("nested struct added", structKeyExists(s6, "child"));
 assertTrue("nested value preserved", s6.child.nested);

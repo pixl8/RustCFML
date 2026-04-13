@@ -1,3 +1,4 @@
+<cfscript>
 // Lucee 7 Compatibility Tests: Control Flow
 // Synthesized from https://github.com/lucee/Lucee/tree/7.0/test
 // Original tests Copyright (c) 2014, the Railo Company LLC / Copyright (c) 2015-2016, Lucee Association Switzerland
@@ -315,3 +316,4 @@ assertThrows("throw with detail", function(){
     throw(message="err", detail="some detail");
 });
 suiteEnd();
+</cfscript>

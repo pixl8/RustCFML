@@ -265,7 +265,7 @@ assertFalse("structEvery not all even", structEvery(sev2, function(k, v) {
 // StructGet (from Lucee StructGet.cfc)
 // ============================================================
 // structGet returns the deepest struct in the path
-sg = structGet("a.b.c");
+sg = structGet("_sgTest.nested.deep");
 assertTrue("structGet returns struct", isStruct(sg));
 assertTrue("structGet returns empty struct", structIsEmpty(sg));
 
@@ -288,13 +288,12 @@ assert("structValueArray empty", arrayLen(structValueArray({})), 0);
 // ============================================================
 // StructKeyTranslate (from Lucee StructKeyTranslate.cfc)
 // ============================================================
-// In RustCFML, structKeyTranslate lowercases keys and returns a new struct
+// structKeyTranslate lowercases keys in-place
 skt = {MyKey:1, AnotherKey:2};
-sktResult = structKeyTranslate(skt);
-assertTrue("structKeyTranslate returns struct", isStruct(sktResult));
-assertTrue("structKeyTranslate has lowercased key", structKeyExists(sktResult, "mykey"));
-assertTrue("structKeyTranslate has second key", structKeyExists(sktResult, "anotherkey"));
-assert("structKeyTranslate preserves value", sktResult.mykey, 1);
+structKeyTranslate(skt);
+assertTrue("structKeyTranslate has lowercased key", structKeyExists(skt, "mykey"));
+assertTrue("structKeyTranslate has second key", structKeyExists(skt, "anotherkey"));
+assert("structKeyTranslate preserves value", skt.mykey, 1);
 
 // ============================================================
 // Duplicate - deep copy (from Lucee Duplicate.cfc)

@@ -35,6 +35,7 @@ pub struct Component {
     pub body: Vec<Statement>,
     pub location: SourceLocation,
     pub metadata: Vec<(String, String)>,
+    pub accessors: bool,
 }
 
 #[derive(Debug, Clone)]

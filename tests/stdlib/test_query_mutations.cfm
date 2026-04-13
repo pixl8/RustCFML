@@ -33,25 +33,25 @@ querySetCell(q2, "id", 5, 2);
 querySetCell(q2, "name", "Eve", 2);
 querySetCell(q2, "age", 28, 2);
 
-result = queryAppend(q1, q2);
-assert("queryAppend total rows", result.recordCount, 5);
-row4 = queryGetRow(result, 4);
+queryAppend(q1, q2);
+assert("queryAppend total rows", q1.recordCount, 5);
+row4 = queryGetRow(q1, 4);
 assert("queryAppend row 4 name", row4.name, "Dave");
-row5 = queryGetRow(result, 5);
+row5 = queryGetRow(q1, 5);
 assert("queryAppend row 5 name", row5.name, "Eve");
 
-// queryAppend merges columns
+// queryAppend with matching columns
 q3 = queryNew("id,name", "integer,varchar");
 queryAddRow(q3);
 querySetCell(q3, "id", 1);
 querySetCell(q3, "name", "Alice");
-q4 = queryNew("id,email", "integer,varchar");
+q4 = queryNew("id,name", "integer,varchar");
 queryAddRow(q4);
 querySetCell(q4, "id", 2);
-querySetCell(q4, "email", "bob@test.com");
-merged = queryAppend(q3, q4);
-assert("queryAppend merged rows", merged.recordCount, 2);
-assertTrue("queryAppend merges columns", listFindNoCase(merged.columnList, "email") > 0);
+querySetCell(q4, "name", "Bob");
+queryAppend(q3, q4);
+assert("queryAppend merged rows", q3.recordCount, 2);
+assert("queryAppend second row", queryGetRow(q3, 2).name, "Bob");
 
 // =========================================
 // queryInsertAt
@@ -117,12 +117,12 @@ assert("queryRowSwap row 2 unchanged", middle.name, "Bob");
 // =========================================
 q = makeQuery();
 newData = { "id": 999, "name": "Replaced", "age": 77 };
-result = querySetRow(q, 2, newData);
-assert("querySetRow same count", result.recordCount, 3);
-row2 = queryGetRow(result, 2);
+querySetRow(q, 2, newData);
+assert("querySetRow same count", q.recordCount, 3);
+row2 = queryGetRow(q, 2);
 assert("querySetRow replaced name", row2.name, "Replaced");
 assert("querySetRow replaced age", row2.age, 77);
-row1 = queryGetRow(result, 1);
+row1 = queryGetRow(q, 1);
 assert("querySetRow row 1 unchanged", row1.name, "Alice");
 
 suiteEnd();

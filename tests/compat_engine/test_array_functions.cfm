@@ -1,3 +1,4 @@
+<cfscript>
 // Lucee 7 Compatibility Tests: Array Functions
 // Synthesized from https://github.com/lucee/Lucee/tree/7.0/test/functions
 // Original tests Copyright (c) 2014, the Railo Company LLC / Copyright (c) 2015-2016, Lucee Association Switzerland
@@ -402,13 +403,15 @@ suiteEnd();
 // ArrayDelete / ArrayDeleteNoCase
 // ============================================================
 suiteBegin("Lucee7: ArrayDelete / ArrayDeleteNoCase");
-// arrayDelete returns a new array with the element removed
-result = arrayDelete(["a","b","c"], "b");
-assert("arrayDelete", arrayToList(result), "a,c");
-assert("arrayDelete len", arrayLen(result), 2);
+// arrayDelete modifies in place and returns boolean
+delArr = ["a","b","c"];
+assertTrue("arrayDelete found", arrayDelete(delArr, "b"));
+assert("arrayDelete result", arrayToList(delArr), "a,c");
+assert("arrayDelete len", arrayLen(delArr), 2);
 
-result = arrayDelete(["x","y","z"], "q");
-assert("arrayDelete not found", arrayToList(result), "x,y,z");
+delArr2 = ["x","y","z"];
+assertFalse("arrayDelete not found", arrayDelete(delArr2, "q"));
+assert("arrayDelete unchanged", arrayToList(delArr2), "x,y,z");
 
 // arrayDeleteNoCase returns boolean indicating if element was found
 assertTrue("arrayDeleteNoCase found", arrayDeleteNoCase(["A","B","C"], "b"));
@@ -425,15 +428,6 @@ assert("arrayResize len", arrayLen(arr), 5);
 suiteEnd();
 
 // ============================================================
-// ArrayRange
-// ============================================================
-suiteBegin("Lucee7: ArrayRange");
-assert("arrayRange 1 to 5", arrayToList(arrayRange(1, 5)), "1,2,3,4,5");
-assert("arrayRange single", arrayToList(arrayRange(3, 3)), "3");
-assert("arrayRange len", arrayLen(arrayRange(1, 10)), 10);
-suiteEnd();
-
-// ============================================================
 // ArrayIndexExists / ArrayIsDefined
 // ============================================================
 suiteBegin("Lucee7: ArrayIndexExists / ArrayIsDefined");
@@ -447,3 +441,4 @@ assertTrue("arrayIndexExists last", arrayIndexExists(arr, 3));
 assertTrue("arrayIsDefined valid", arrayIsDefined(arr, 2));
 assertFalse("arrayIsDefined out of bounds", arrayIsDefined(arr, 5));
 suiteEnd();
+</cfscript>

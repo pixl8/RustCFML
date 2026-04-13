@@ -6,6 +6,7 @@ suiteBegin("cfthread Tag");
 <cfthread name="t1">
     <cfset request.threadTest1 = "hello from thread">
 </cfthread>
+<cfthread action="join" name="t1" timeout="5000"/>
 
 <cfscript>
 assert("cfthread run sets variable", request.threadTest1, "hello from thread");
@@ -15,13 +16,11 @@ assert("cfthread run sets variable", request.threadTest1, "hello from thread");
 <cfthread name="t2" action="run">
     <cfset request.threadTest2 = "explicit run">
 </cfthread>
+<cfthread action="join" name="t2" timeout="5000"/>
 
 <cfscript>
 assert("cfthread explicit action=run", request.threadTest2, "explicit run");
 </cfscript>
-
-<!--- cfthread join (no-op since sequential) --->
-<cfthread action="join" name="t1" timeout="1000"/>
 
 <cfscript>
 assert("cfthread join completes", true, true);
@@ -43,6 +42,7 @@ assert("cfthread.t1 status", cfthread.t1.status, "COMPLETED");
 <cfthread name="t3">
     <cfoutput>hello from thread</cfoutput>
 </cfthread>
+<cfthread action="join" name="t3" timeout="5000"/>
 
 <cfscript>
 assert("cfthread output capture", trim(cfthread.t3.output), "hello from thread");
@@ -52,10 +52,11 @@ assert("cfthread output capture", trim(cfthread.t3.output), "hello from thread")
 <cfthread name="t4">
     <cfthrow message="thread error test">
 </cfthread>
+<cfthread action="join" name="t4" timeout="5000"/>
 
 <cfscript>
 assertTrue("cfthread error captured", len(cfthread.t4.error) > 0);
-assert("cfthread status after error", cfthread.t4.status, "COMPLETED");
+assert("cfthread status after error", cfthread.t4.status, "TERMINATED");
 </cfscript>
 
 <!--- Elapsed time --->
@@ -68,6 +69,7 @@ assertTrue("cfthread elapsedtime is numeric", isNumeric(cfthread.t3.elapsedtime)
     <cfset thread.result = "done">
     <cfset thread.count = 42>
 </cfthread>
+<cfthread action="join" name="t5" timeout="5000"/>
 
 <cfscript>
 assert("cfthread thread scope string", cfthread.t5.result, "done");

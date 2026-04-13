@@ -1,3 +1,4 @@
+<cfscript>
 // Lucee 7 Compatibility Tests: JSON Functions
 // Synthesized from https://github.com/lucee/Lucee/tree/7.0/test
 // Original tests Copyright (c) 2014, the Railo Company LLC / Copyright (c) 2015-2016, Lucee Association Switzerland
@@ -154,3 +155,4 @@ json = serializeJSON(nums);
 rt = deserializeJSON(json);
 assert("numeric precision int", rt.intVal, 42);
 suiteEnd();
+</cfscript>

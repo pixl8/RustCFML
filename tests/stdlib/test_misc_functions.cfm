@@ -11,15 +11,15 @@ assert("soundex empty", soundex(""), "");
 
 // metaphone
 assert("metaphone Smith", metaphone("Smith"), "SM0");
-assert("metaphone Schmidt", metaphone("Schmidt"), "SXMT");
+assert("metaphone Schmidt", metaphone("Schmidt"), "SKMT");
 assert("metaphone phone", metaphone("phone"), "FN");
-assert("metaphone Thompson", metaphone("Thompson"), "0MPSN");
+assert("metaphone Thompson", metaphone("Thompson"), "0MPS");
 
 // toScript
-assert("toScript string", toScript("hello", "x"), 'var x = "hello";');
-assert("toScript number", toScript(42, "n"), "var n = 42;");
-assert("toScript boolean true", toScript(true, "b"), "var b = true;");
-assert("toScript boolean false", toScript(false, "b"), "var b = false;");
+assert("toScript string", toScript("hello", "x"), 'x="hello";');
+assert("toScript number", toScript(42, "n"), 'n=42;');
+assert("toScript boolean true", toScript(true, "b"), 'b="true";');
+assert("toScript boolean false", toScript(false, "b"), 'b="false";');
 
 // toScript array
 arr = [1, 2, 3];

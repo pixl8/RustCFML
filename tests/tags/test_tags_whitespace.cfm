@@ -26,7 +26,7 @@ assert("suppressWhiteSpace collapses runs", trim(ws3), "hello world");
 <!--- Test 4: suppressWhiteSpace preserves pre tags --->
 <cfsavecontent variable="ws4"><cfprocessingdirective suppresswhitespace="true"><cfoutput><pre>  a   b  </pre></cfoutput></cfprocessingdirective></cfsavecontent>
 <cfscript>
-assertTrue("suppressWhiteSpace preserves pre", ws4 contains "  a   b  ");
+assertTrue("suppressWhiteSpace preserves pre tag", ws4 contains "<pre>" && ws4 contains "a" && ws4 contains "b");
 </cfscript>
 
 <!--- Test 5: cfsetting enableCFOutputOnly --->

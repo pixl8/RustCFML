@@ -1,3 +1,4 @@
+<cfscript>
 suiteBegin("Named Args from Includes");
 
 include "helper_named_args.cfm";
@@ -9,8 +10,9 @@ assert("named args direct call", namedArgFunc(name="foo", value="bar"), "foo=bar
 assert("named args from include function", callWithNamedArgs(), "hello=world");
 
 // Named args where arg name matches var name
-var name = "test";
-var value = "data";
+name = "test";
+value = "data";
 assert("named args same name as var", namedArgFunc(name=name, value=value), "test=data");
 
 suiteEnd();
+</cfscript>

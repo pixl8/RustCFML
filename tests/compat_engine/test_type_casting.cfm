@@ -1,3 +1,4 @@
+<cfscript>
 // Lucee 7 Compatibility Tests: Type Casting
 // Synthesized from https://github.com/lucee/Lucee/tree/7.0/test
 // Original tests Copyright (c) 2014, the Railo Company LLC / Copyright (c) 2015-2016, Lucee Association Switzerland
@@ -53,15 +54,15 @@ suiteEnd();
 // ============================================================
 // toBoolean
 // ============================================================
-suiteBegin("Lucee7: toBoolean()");
-assert("toBoolean 1", toBoolean(1), true);
-assert("toBoolean 0", toBoolean(0), false);
-assert("toBoolean yes", toBoolean("yes"), true);
-assert("toBoolean no", toBoolean("no"), false);
-assert("toBoolean true string", toBoolean("true"), true);
-assert("toBoolean false string", toBoolean("false"), false);
-assert("toBoolean true literal", toBoolean(true), true);
-assert("toBoolean false literal", toBoolean(false), false);
+suiteBegin("Lucee7: Boolean Casting");
+assertTrue("boolean cast 1", !!1);
+assertFalse("boolean cast 0", !!0);
+assertTrue("boolean cast yes", !!"yes");
+assertFalse("boolean cast no", !!"no");
+assertTrue("boolean cast true string", !!"true");
+assertFalse("boolean cast false string", !!"false");
+assertTrue("boolean cast true literal", !!true);
+assertFalse("boolean cast false literal", !!false);
 suiteEnd();
 
 // ============================================================
@@ -191,7 +192,8 @@ suiteEnd();
 // de() function - delayed evaluation
 // ============================================================
 suiteBegin("Lucee7: de()");
-assert("de string passthrough", de("hello"), "hello");
-assert("de empty string", de(""), "");
-assert("de with expression-like string", de("1+1"), "1+1");
+assert("de wraps string in quotes", de("hello"), '"hello"');
+assert("de empty string", de(""), '""');
+assert("de with expression-like string", de("1+1"), '"1+1"');
 suiteEnd();
+</cfscript>

@@ -1,3 +1,4 @@
+<cfscript>
 // Lucee 7 Compatibility Tests: Type Checking
 // Synthesized from https://github.com/lucee/Lucee/tree/7.0/test
 // Original tests Copyright (c) 2014, the Railo Company LLC / Copyright (c) 2015-2016, Lucee Association Switzerland
@@ -215,9 +216,9 @@ assertFalse("isValid query on struct", isValid("query", {}));
 // uuid
 assertTrue("isValid uuid", isValid("uuid", createUUID()));
 
-// regex (2-arg form: checks if value is a valid regex pattern)
-assertTrue("isValid regex valid pattern", isValid("regex", "^[a-z]+$"));
-assertTrue("isValid regex simple pattern", isValid("regex", ".*"));
-assertFalse("isValid regex invalid pattern", isValid("regex", "[invalid"));
+// regex (3-arg form: checks if value matches a regex pattern)
+assertTrue("isValid regex match", isValid("regex", "hello", "^[a-z]+$"));
+assertFalse("isValid regex no match", isValid("regex", "HELLO", "^[a-z]+$"));
 
 suiteEnd();
+</cfscript>

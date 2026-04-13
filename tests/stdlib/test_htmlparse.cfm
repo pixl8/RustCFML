@@ -1,3 +1,4 @@
+<cfscript>
 suiteBegin("htmlParse");
 
 // --- Parse simple HTML ---
@@ -44,3 +45,4 @@ assert("div class attr", div.xmlAttributes.class, "container");
 assert("div text content", div.xmlText, "Content");
 
 suiteEnd();
+</cfscript>

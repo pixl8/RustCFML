@@ -42,12 +42,12 @@ totalAge = queryReduce(q, function(acc, row) {
 }, 0);
 assert("queryReduce sum ages", totalAge, 115);
 
-// --- querySort ---
-sorted = querySort(q, function(row1, row2) {
+// --- querySort (sorts in place, returns boolean) ---
+querySort(q, function(row1, row2) {
     return compare(row1.name, row2.name);
 });
-assert("querySort first by name", queryGetRow(sorted, 1).name, "Alice");
-assert("querySort last by name", queryGetRow(sorted, 4).name, "Diana");
+assert("querySort first by name", queryGetRow(q, 1).name, "Alice");
+assert("querySort last by name", queryGetRow(q, 4).name, "Diana");
 
 // --- querySome ---
 hasOlder = querySome(q, function(row) {

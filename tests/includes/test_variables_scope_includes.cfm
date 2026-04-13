@@ -1,3 +1,4 @@
+<cfscript>
 suiteBegin("Variables Scope in Includes");
 
 variables.mainVar = "fromMain";
@@ -8,3 +9,4 @@ assert("function from include can read variables set in include", getHelperVar()
 assert("function from include can read variables set in main", getMainVar(), "fromMain");
 
 suiteEnd();
+</cfscript>

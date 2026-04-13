@@ -1,3 +1,4 @@
+<cfscript>
 suiteBegin("precisionEvaluate");
 
 // --- Basic arithmetic ---
@@ -31,3 +32,4 @@ assertThrows("division by zero", function() {
 assert("modulo", precisionEvaluate("10 % 3"), "1");
 
 suiteEnd();
+</cfscript>

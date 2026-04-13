@@ -1,3 +1,4 @@
+<cfscript>
 // Lucee 7 Compatibility Tests: Query Functions
 // Synthesized from https://github.com/lucee/Lucee/tree/7.0/test/functions
 // Original tests Copyright (c) 2014, the Railo Company LLC / Copyright (c) 2015-2016, Lucee Association Switzerland
@@ -213,3 +214,4 @@ assertFalse("isQuery with string", isQuery("hello"));
 assertFalse("isQuery with number", isQuery(42));
 assertFalse("isQuery with array", isQuery([]));
 suiteEnd();
+</cfscript>

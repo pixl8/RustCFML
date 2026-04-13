@@ -15,7 +15,7 @@ function testConfigSave() {
 assert("direct testConfigSave", testConfigSave(), "/test/path/config.json");
 
 // Test 2: Struct method call (inline)
-var cfgSvc = {};
+cfgSvc = {};
 cfgSvc.save = testConfigSave;
 assert("struct save method", cfgSvc.save(), "/test/path/config.json");
 
@@ -25,14 +25,14 @@ function buildRegistry() {
     reg.save = testConfigSave;
     return reg;
 }
-var builtReg = buildRegistry();
+builtReg = buildRegistry();
 assert("built registry save", builtReg.save(), "/test/path/config.json");
 
 // Test 4: Function that calls another function accessing variables scope
 function testConfigSet(required string key) {
     return testConfigSave();
 }
-var cfgSvc2 = {};
+cfgSvc2 = {};
 cfgSvc2.set = testConfigSet;
 assert("struct set calls save", cfgSvc2.set("x"), "/test/path/config.json");
 
@@ -43,7 +43,7 @@ function buildRegistry2() {
     reg.save = testConfigSave;
     return reg;
 }
-var builtReg2 = buildRegistry2();
+builtReg2 = buildRegistry2();
 assert("built registry set->save", builtReg2.set("y"), "/test/path/config.json");
 
 suiteEnd();

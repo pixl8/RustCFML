@@ -1,7 +1,7 @@
 //! Dynamic value types for CFML runtime
 
-use std::collections::HashMap;
 use indexmap::IndexMap;
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
@@ -118,6 +118,32 @@ impl CfmlValue {
                 }
             }
             _ => {}
+        }
+    }
+
+    pub fn eq(&self, other: &CfmlValue) -> bool {
+        match (self, other) {
+            (CfmlValue::Null, CfmlValue::Null) => true,
+            (CfmlValue::Bool(a), CfmlValue::Bool(b)) => a == b,
+            (CfmlValue::Int(a), CfmlValue::Int(b)) => a == b,
+            (CfmlValue::Double(a), CfmlValue::Double(b)) => a == b,
+            (CfmlValue::String(a), CfmlValue::String(b)) => a.to_lowercase() == b.to_lowercase(),
+            (CfmlValue::Int(a), CfmlValue::Double(b)) => *a as f64 == *b,
+            (CfmlValue::Double(a), CfmlValue::Int(b)) => *a == *b as f64,
+            (CfmlValue::Array(a), CfmlValue::Array(b)) => {
+                if a.len() != b.len() {
+                    return false;
+                }
+                a.iter().zip(b.iter()).all(|(x, y)| x.eq(y))
+            }
+            (CfmlValue::Struct(a), CfmlValue::Struct(b)) => {
+                if a.len() != b.len() {
+                    return false;
+                }
+                a.iter()
+                    .all(|(k, v)| b.get(k).map(|bv| v.eq(bv)).unwrap_or(false))
+            }
+            _ => false,
         }
     }
 }

@@ -1,3 +1,4 @@
+<cfscript>
 // Lucee 7 Compatibility Tests: Closures and Higher-Order Functions
 // Synthesized from https://github.com/lucee/Lucee/tree/7.0/test
 // Original tests Copyright (c) 2014, the Railo Company LLC / Copyright (c) 2015-2016, Lucee Association Switzerland
@@ -166,3 +167,4 @@ function firstArg() {
 assert("arguments positional access", firstArg("hello"), "hello");
 assert("arguments empty fallback", firstArg(), "none");
 suiteEnd();
+</cfscript>

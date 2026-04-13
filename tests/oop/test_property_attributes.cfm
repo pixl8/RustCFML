@@ -34,7 +34,7 @@ assertFalse("prop4 has no inject", structKeyExists(prop4, "inject"));
 // Test that component instantiation still works
 svc = createObject("component", "oop.InjectableService").init();
 assert("component method works", svc.getServiceName(), "InjectableService");
-assert("default value set", svc.greeting, "Hello");
+assert("default value set", svc.getGreeting(), "Hello");
 
 // Test tag-based <cfproperty> attributes
 tmd = getComponentMetadata("oop.TagPropertyComponent");

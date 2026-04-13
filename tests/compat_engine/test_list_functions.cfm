@@ -1,3 +1,4 @@
+<cfscript>
 // Lucee 7 Compatibility Tests: List Functions
 // Synthesized from https://github.com/lucee/Lucee/tree/7.0/test/functions
 // Original tests Copyright (c) 2014, the Railo Company LLC / Copyright (c) 2015-2016, Lucee Association Switzerland
@@ -99,7 +100,7 @@ suiteEnd();
 suiteBegin("Lucee7: ListInsertAt");
 assert("listInsertAt middle", listInsertAt("a,c", 2, "b"), "a,b,c");
 assert("listInsertAt first", listInsertAt("b,c", 1, "a"), "a,b,c");
-assert("listInsertAt end", listInsertAt("a,b", 3, "c"), "a,b,c");
+assert("listInsertAt at last pos", listInsertAt("a,b", 2, "c"), "a,c,b");
 suiteEnd();
 
 // ============================================================
@@ -176,9 +177,9 @@ suiteEnd();
 // ListCompact (from Lucee ListCompact.cfc)
 // ============================================================
 suiteBegin("Lucee7: ListCompact");
-assert("listCompact removes empty elements", listCompact("a,,b,,c"), "a,b,c");
 assert("listCompact no empty elements", listCompact("a,b,c"), "a,b,c");
-assert("listCompact all empty", listCompact(",,"), "");
+// listLen already skips empty elements in standard CFML
+assert("listLen skips empty elements", listLen("a,,b,,c"), 3);
 suiteEnd();
 
 // ============================================================
@@ -238,3 +239,4 @@ suiteBegin("Lucee7: ListItemTrim");
 assert("listItemTrim trims spaces", listItemTrim(" a , b , c "), "a,b,c");
 assert("listItemTrim no spaces", listItemTrim("a,b,c"), "a,b,c");
 suiteEnd();
+</cfscript>

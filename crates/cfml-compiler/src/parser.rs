@@ -195,24 +195,27 @@ impl Parser {
             if self.check(&Token::LParen) {
                 self.consume(&Token::LParen)?;
 
-                // Check if first arg is named (identifier followed by =)
+                // Check if first arg is named (identifier followed by = or :)
                 let is_named = matches!(self.peek(0), Token::Identifier(_))
-                    && matches!(self.peek(1), Token::Equal);
+                    && (matches!(self.peek(1), Token::Equal | Token::Colon));
 
                 let arguments = if is_named {
-                    // Parse named args like throw(message="oops", type="custom")
+                    // Parse named args like throw(message="oops", type="custom") or throw(message : "oops", type : "custom")
                     // Convert to positional: throw("oops", "custom", "", "")
                     let mut named: Vec<(String, Expression)> = Vec::new();
                     loop {
                         let key = self.extract_identifier()?.to_lowercase();
-                        self.consume(&Token::Equal)?;
+                        // Consume either = or :
+                        if !self.match_token(&Token::Equal) {
+                            self.consume(&Token::Colon)?;
+                        }
                         let value = self.parse_expression()?;
                         named.push((key, value));
                         if !self.match_token(&Token::Comma) {
                             break;
                         }
                         // Check if next arg is also named
-                        if !matches!(self.peek(0), Token::Identifier(_)) || !matches!(self.peek(1), Token::Equal) {
+                        if !matches!(self.peek(0), Token::Identifier(_)) || !(matches!(self.peek(1), Token::Equal | Token::Colon)) {
                             break;
                         }
                     }
@@ -1560,9 +1563,10 @@ impl Parser {
 
     fn parse_component(&mut self) -> Result<Component, ParseError> {
         let loc = self.current_location();
+        // Parse component name: can be `component Name` or `component name="Name"`
         // Only consume an identifier as the name if it's NOT followed by '=' (which
         // would indicate a metadata attribute like output="false" or hint="...").
-        let name = if matches!(self.peek(0), Token::Identifier(_))
+        let mut name = if matches!(self.peek(0), Token::Identifier(_))
             && !matches!(self.peek(1), Token::Equal)
             && !matches!(self.peek(0), Token::Extends | Token::Implements)
         {
@@ -1570,6 +1574,19 @@ impl Parser {
         } else {
             "Anonymous".to_string()
         };
+
+        // Check for name="..." attribute before other metadata
+        if name == "Anonymous" && matches!(self.peek(0), Token::Identifier(_))
+            && self.peek(0).to_string() == "name"
+            && matches!(self.peek(1), Token::Equal)
+        {
+            self.advance(); // consume "name"
+            self.consume(&Token::Equal)?;
+            if let Token::String(val) = self.peek(0).clone() {
+                self.advance();
+                name = val.clone();
+            }
+        }
 
         let mut extends = None;
         let mut implements = Vec::new();
@@ -1611,7 +1628,7 @@ impl Parser {
             }
         }
 
-        // Parse component metadata attributes (e.g., taffy_uri="/users/{id}", output="false", hint="...")
+        // Parse component metadata attributes (e.g., taffy_uri="/users/{id}", output="false", hint="...", accessors="true")
         // Accepts both identifiers and keyword tokens as attribute keys.
         let mut metadata = Vec::new();
         loop {
@@ -1634,6 +1651,10 @@ impl Parser {
             self.consume(&Token::Equal)?;
             if let Token::String(val) = self.peek(0).clone() {
                 self.advance();
+                // If this is the name attribute and we have an Anonymous component, use it as the name
+                if key.to_lowercase() == "name" && name == "Anonymous" {
+                    name = val.clone();
+                }
                 metadata.push((key, val));
             } else {
                 break;
@@ -1684,6 +1705,10 @@ impl Parser {
 
         self.consume(&Token::RBrace)?;
 
+        // Check for accessors="true" attribute
+        let accessors = metadata.iter()
+            .any(|(key, value)| key.to_lowercase() == "accessors" && value.to_lowercase() == "true");
+
         Ok(Component {
             name,
             extends,
@@ -1693,6 +1718,7 @@ impl Parser {
             body,
             location: loc,
             metadata,
+            accessors,
         })
     }
 
@@ -1800,7 +1826,7 @@ impl Parser {
         let loc = self.current_location();
 
         // Detect key-value syntax: property name="x" [type="y"] [inject="z"] ...;
-        // Key-value syntax is detected when an identifier is followed by = and a string literal
+        // Key-value syntax is detected when an identifier is followed by = and a string
         let is_kv = {
             let has_ident = matches!(self.peek(0), Token::Identifier(_))
                 || self.token_as_string(&self.peek(0).clone()).is_some();
@@ -1858,15 +1884,16 @@ impl Parser {
         let mut attributes = Vec::new();
 
         loop {
-            // Check for key="value" pattern — key can be an identifier or a keyword token
+            // Check for key="value" or key=value pattern — key can be an identifier or a keyword token
+            // For name and type, we require string values; for default, we accept any expression
             let key_str = if let Token::Identifier(ref s) = self.peek(0) {
-                if matches!(self.peek(1), Token::Equal) && matches!(self.peek(2), Token::String(_)) {
+                if matches!(self.peek(1), Token::Equal) {
                     Some(s.clone())
                 } else {
                     None
                 }
             } else if let Some(s) = self.token_as_string(&self.peek(0).clone()) {
-                if matches!(self.peek(1), Token::Equal) && matches!(self.peek(2), Token::String(_)) {
+                if matches!(self.peek(1), Token::Equal) {
                     Some(s)
                 } else {
                     None
@@ -1882,24 +1909,28 @@ impl Parser {
 
             self.advance(); // consume key
             self.advance(); // consume =
-            let val = if let Token::String(v) = self.peek(0).clone() {
-                self.advance();
-                v
-            } else {
-                break;
-            };
 
-            match key.to_lowercase().as_str() {
-                "name" => name = val,
-                "type" => prop_type = Some(val),
-                "default" => {
-                    default = Some(Expression::Literal(Literal {
-                        value: LiteralValue::String(val),
-                        location: loc.clone(),
-                    }));
+            // For "default", parse as an expression (can be number, string, boolean, etc.)
+            // For other keys, expect a string value
+            if key.to_lowercase() == "default" {
+                // Parse the default value as an expression
+                let expr = self.parse_expression()?;
+                default = Some(expr);
+            } else {
+                // For name, type, required, etc., expect a string
+                let val = if let Token::String(v) = self.peek(0).clone() {
+                    self.advance();
+                    v
+                } else {
+                    break;
+                };
+
+                match key.to_lowercase().as_str() {
+                    "name" => name = val,
+                    "type" => prop_type = Some(val),
+                    "required" => required = val.eq_ignore_ascii_case("true"),
+                    _ => attributes.push((key.to_lowercase(), val)),
                 }
-                "required" => required = val.eq_ignore_ascii_case("true"),
-                _ => attributes.push((key.to_lowercase(), val)),
             }
         }
 
@@ -2641,14 +2672,17 @@ impl Parser {
                 let expr = self.parse_expression()?;
                 args.push(Expression::Spread(Box::new(expr)));
             } else {
-                // Check for named argument: identifier = value
-                // CFML supports foo(name = value, name2 = value2)
+                // Check for named argument: identifier = value or identifier : value
+                // CFML supports foo(name = value, name2 = value2) and foo(name : value)
                 // We must detect this before parse_expression consumes `=` as assignment.
                 let is_named_arg = (matches!(self.peek(0), Token::Identifier(_)) || self.is_identifier_like())
-                    && matches!(self.peek(1), Token::Equal);
+                    && (matches!(self.peek(1), Token::Equal | Token::Colon));
                 if is_named_arg {
                     let name = self.extract_identifier()?;
-                    self.advance(); // consume =
+                    // Consume either = or :
+                    if !self.match_token(&Token::Equal) {
+                        self.consume(&Token::Colon)?;
+                    }
                     let value = self.parse_expression()?;
                     // Encode named arg as a struct entry: argumentCollection-style
                     // Use a NamedArgument expression node or encode as key:value
@@ -2863,23 +2897,66 @@ impl Parser {
             }
             Token::Function => self.parse_closure(),
             Token::LParen => {
-                // Arrow function check: (params) => expr
-                // or regular grouping: (expr)
-                let expr = self.parse_expression()?;
-                self.consume(&Token::RParen)?;
+                // Arrow function check: (params) => expr or regular grouping: (expr)
+                // We need to peek ahead to see if this is an arrow function
+                // Note: parse_primary() already advanced past the LParen, so self.current points to the next token
 
-                if self.match_token(&Token::FatArrow) {
-                    // Arrow function - single param from the grouped expression
-                    let params = vec![Param {
-                        name: if let Expression::Identifier(id) = &expr {
-                            id.name.clone()
-                        } else {
-                            "arg".to_string()
-                        },
-                        param_type: None,
-                        default: None,
-                        required: false,
-                    }];
+                // Look ahead to find ) and check if => follows
+                let mut is_arrow = false;
+                {
+                    let mut offset = 0;
+                    // Skip past identifiers and commas
+                    loop {
+                        if offset < self.tokens.len() - self.current {
+                            match &self.tokens[self.current + offset].token {
+                                Token::Identifier(_) | Token::Comma => {
+                                    offset += 1;
+                                    continue;
+                                }
+                                Token::RParen => {
+                                    // Check for => after )
+                                    if offset + 1 < self.tokens.len() - self.current {
+                                        if matches!(&self.tokens[self.current + offset + 1].token, Token::FatArrow) {
+                                            is_arrow = true;
+                                        }
+                                    }
+                                    break;
+                                }
+                                _ => break,
+                            }
+                        }
+                        break;
+                    }
+                }
+
+                if is_arrow {
+                    // Parse as arrow function
+                    let mut params = Vec::new();
+
+                    if !self.check(&Token::RParen) {
+                        loop {
+                            let param_name = match self.peek(0).clone() {
+                                Token::Identifier(id) => {
+                                    let name = id.clone();
+                                    self.advance();
+                                    name
+                                }
+                                _ => "arg".to_string(),
+                            };
+                            params.push(Param {
+                                name: param_name,
+                                param_type: None,
+                                default: None,
+                                required: false,
+                            });
+                            if !self.match_token(&Token::Comma) {
+                                break;
+                            }
+                        }
+                    }
+                    self.consume(&Token::RParen)?;
+                    self.match_token(&Token::FatArrow); // consume =>
+
                     let body = self.parse_expression()?;
                     return Ok(Expression::ArrowFunction(Box::new(ArrowFunction {
                         params,
@@ -2888,6 +2965,9 @@ impl Parser {
                     })));
                 }
 
+                // Not an arrow function - parse as grouped expression
+                let expr = self.parse_expression()?;
+                self.consume(&Token::RParen)?;
                 Ok(expr)
             }
             Token::LBracket => self.parse_array_literal(),

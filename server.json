@@ -1,0 +1,12 @@
+{
+    "app":{
+        "cfengine":"lucee@be"
+    },
+    "name":"RustCFML",
+    "noOpen":true,
+    "web":{
+        "http":{
+            "port":"8585"
+        }
+    }
+}

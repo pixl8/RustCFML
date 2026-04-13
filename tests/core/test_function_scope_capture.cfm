@@ -11,7 +11,7 @@ function getMyConfig() {
 }
 
 // Store function reference in a struct (like service registry pattern)
-var svc = {};
+svc = {};
 svc.get = getMyConfig;
 
 // Test 1: Function reference in struct can read variables scope
@@ -25,12 +25,12 @@ variables.anotherVar = "test value";
 function getAnotherVar() {
     return variables.anotherVar;
 }
-var svc2 = {};
+svc2 = {};
 svc2.get = getAnotherVar;
 assert("fn ref reads var set before capture", svc2.get(), "test value");
 
 // Test 4: Nested struct - service stored in another struct
-var registry = {};
+registry = {};
 registry.configService = svc;
 assert("nested struct fn access", registry.configService.get(), "hello world");
 
@@ -44,7 +44,7 @@ assert("fn ref through function call", useSvc(svc), "hello world");
 function getConfig2() {
     return variables.myConfig;
 }
-var svc3 = {};
+svc3 = {};
 svc3.get1 = getMyConfig;
 svc3.get2 = getConfig2;
 assert("multiple fn refs same scope", svc3.get1(), svc3.get2());

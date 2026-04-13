@@ -1,3 +1,4 @@
+<cfscript>
 suiteBegin("Cache Functions");
 
 // --- cachePut / cacheGet ---
@@ -70,3 +71,4 @@ assertTrue("cacheClear filter kept order_1", cacheKeyExists("order_1"));
 cacheClear();
 
 suiteEnd();
+</cfscript>

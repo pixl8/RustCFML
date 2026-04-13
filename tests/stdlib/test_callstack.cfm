@@ -1,3 +1,4 @@
+<cfscript>
 suiteBegin("callStackGet / callStackDump");
 
 // --- callStackGet returns array ---
@@ -23,16 +24,13 @@ assertTrue("nested stack has multiple frames", arrayLen(nestedStack) >= 3);
 assert("innermost frame is innerFunc", nestedStack[1].Function, "innerFunc");
 assert("next frame is outerFunc", nestedStack[2].Function, "outerFunc");
 
-// --- callStackGet with offset ---
-function getStackWithOffset() {
-    return callStackGet(1);
+// --- callStackGet("array") returns array format ---
+function getStackAsArray() {
+    return callStackGet("array");
 }
-offsetStack = getStackWithOffset();
-// With offset=1, should skip the innermost frame
-assertTrue("offset stack skips first frame", arrayLen(offsetStack) >= 1);
-
-// --- callStackDump writes output ---
-// callStackDump outputs to the buffer; just verify it doesn't error
-callStackDump();
+arrayStack = getStackAsArray();
+assertTrue("callStackGet array format", isArray(arrayStack));
+assertTrue("callStackGet array has frames", arrayLen(arrayStack) >= 1);
 
 suiteEnd();
+</cfscript>

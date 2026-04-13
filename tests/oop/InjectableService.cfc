@@ -1,4 +1,4 @@
-component {
+component accessors="true" {
 
     property name="packageService" inject="PackageService";
     property name="print" inject="print";

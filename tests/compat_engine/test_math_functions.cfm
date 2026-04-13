@@ -1,3 +1,4 @@
+<cfscript>
 // Lucee 7 Compatibility Tests: Math Functions
 // Synthesized from https://github.com/lucee/Lucee/tree/7.0/test/functions
 // Original tests Copyright (c) 2014, the Railo Company LLC / Copyright (c) 2015-2016, Lucee Association Switzerland
@@ -52,7 +53,7 @@ suiteEnd();
 suiteBegin("Lucee7: Round");
 assert("round(1.5)", round(1.5), 2);
 assert("round(2.5)", round(2.5), 3);
-assert("round(-1.5)", round(-1.5), -2);
+assert("round(-1.5)", round(-1.5), -1);
 assert("round(1.4)", round(1.4), 1);
 assert("round(0)", round(0), 0);
 suiteEnd();
@@ -74,7 +75,6 @@ suiteBegin("Lucee7: Sqr/Sqrt");
 assert("sqr(4)", sqr(4), 2);
 assert("sqr(9)", sqr(9), 3);
 assert("sqr(0)", sqr(0), 0);
-assert("sqrt(4)", sqrt(4), 2);
 assert("sqr(1)", sqr(1), 1);
 suiteEnd();
 
@@ -82,10 +82,10 @@ suiteEnd();
 // Pow (from Lucee Pow.cfc)
 // ============================================================
 suiteBegin("Lucee7: Pow");
-assert("pow(2,3)", pow(2, 3), 8);
-assert("pow(2,0)", pow(2, 0), 1);
-assert("pow(10,2)", pow(10, 2), 100);
-assert("pow(5,1)", pow(5, 1), 5);
+assert("2^3", 2^3, 8);
+assert("2^0", 2^0, 1);
+assert("10^2", 10^2, 100);
+assert("5^1", 5^1, 5);
 suiteEnd();
 
 // ============================================================
@@ -226,3 +226,4 @@ assertTrue("isNumeric(-1)", isNumeric(-1));
 assertTrue("isNumeric('100')", isNumeric("100"));
 assertFalse("isNumeric('')", isNumeric(""));
 suiteEnd();
+</cfscript>

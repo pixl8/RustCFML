@@ -1,3 +1,4 @@
+<cfscript>
 // Lucee 7 Compatibility Tests: Language Operators
 // Synthesized from https://github.com/lucee/Lucee/tree/7.0/test
 // Original tests Copyright (c) 2014, the Railo Company LLC / Copyright (c) 2015-2016, Lucee Association Switzerland
@@ -163,3 +164,4 @@ val = "exists";
 assert("null coalesce with value", val ?: "default", "exists");
 assert("null coalesce chain", nullValue() ?: nullValue() ?: "final", "final");
 suiteEnd();
+</cfscript>

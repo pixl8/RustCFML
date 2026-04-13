@@ -32,7 +32,7 @@ assert("cross-function ref", doTest(), "Hi Alex");
 function mixinMethod(val) {
     return val * 2;
 }
-var obj = { name: "test" };
+obj = { name: "test" };
 obj.doubler = mixinMethod;
 assert("mixin on struct", obj.doubler(21), 42);
 
@@ -46,7 +46,7 @@ function buildMathService() {
     svc.multiply = multiply;
     return svc;
 }
-var math = buildMathService();
+math = buildMathService();
 assert("service add", math.add(3, 4), 7);
 assert("service multiply", math.multiply(3, 4), 12);
 

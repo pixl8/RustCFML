@@ -1,3 +1,4 @@
+<cfscript>
 variables.helperVar = "fromHelper";
 
 function getHelperVar() {
@@ -7,3 +8,4 @@ function getHelperVar() {
 function getMainVar() {
     return variables.mainVar;
 }
+</cfscript>

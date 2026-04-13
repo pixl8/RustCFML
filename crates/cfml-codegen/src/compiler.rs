@@ -3,6 +3,14 @@
 use cfml_compiler::ast::*;
 use std::sync::Arc;
 
+/// Helper function to capitalize the first letter of a string
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    chars.next().map(|c| c.to_uppercase().collect::<String>())
+        .unwrap_or_else(String::new)
+        + &s[1..]
+}
+
 pub struct CfmlCompiler {
     pub program: BytecodeProgram,
     /// Stack of (break_placeholder_indices, continue_placeholder_indices) for loops
@@ -1131,20 +1139,10 @@ impl CfmlCompiler {
 
     fn compile_component(&mut self, component: &Component, instructions: &mut Vec<BytecodeOp>) {
         // Build the component as a struct containing:
-        // 1. Property defaults
-        // 2. Compiled methods as function references
+        // 1. Metadata keys (__name, __extends, __implements, __metadata)
+        // 2. __variables scope with property defaults
+        // 3. Compiled methods as function references
         let mut prop_count = 0;
-
-        // Add properties with defaults
-        for prop in &component.properties {
-            instructions.push(BytecodeOp::String(prop.name.clone()));
-            if let Some(default) = &prop.default {
-                self.compile_expression(default, instructions);
-            } else {
-                instructions.push(BytecodeOp::Null);
-            }
-            prop_count += 1;
-        }
 
         // Add __name metadata
         instructions.push(BytecodeOp::String("__name".to_string()));
@@ -1179,11 +1177,102 @@ impl CfmlCompiler {
             prop_count += 1;
         }
 
+        // Add __variables scope for component properties (needed for accessors)
+        // Include property defaults here
+        if component.accessors || !component.properties.is_empty() {
+            instructions.push(BytecodeOp::String("__variables".to_string()));
+            // Build __variables struct with property defaults
+            let mut vars_count = 0;
+            for prop in &component.properties {
+                instructions.push(BytecodeOp::String(prop.name.clone()));
+                if let Some(default) = &prop.default {
+                    self.compile_expression(default, instructions);
+                } else {
+                    instructions.push(BytecodeOp::Null);
+                }
+                vars_count += 1;
+            }
+            instructions.push(BytecodeOp::BuildStruct(vars_count));
+            prop_count += 1;
+        }
+
         // Build the base struct
         instructions.push(BytecodeOp::BuildStruct(prop_count));
 
-        // Store as a component template in both local and global scope
+        // Store as a component template in local scope first
         instructions.push(BytecodeOp::StoreLocal(component.name.clone()));
+
+        // Generate accessor methods if accessors="true" (BEFORE storing globally)
+        if component.accessors {
+            for prop in &component.properties {
+                // Generate getter: getPropertyName()
+                let getter_name = format!("get{}", capitalize_first(&prop.name));
+                let getter_func = BytecodeFunction {
+                    name: getter_name.clone(),
+                    params: Vec::new(),
+                    required_params: Vec::new(),
+                    instructions: vec![
+                        BytecodeOp::LoadLocal("this".to_string()),
+                        BytecodeOp::GetProperty(prop.name.clone()),
+                        BytecodeOp::Return,
+                    ],
+                    source_file: None,
+                };
+                let getter_idx = self.program.functions.len();
+                self.program.functions.push(Arc::new(getter_func));
+                instructions.push(BytecodeOp::DefineFunction(getter_idx));
+                // Stack: [getter_func]
+
+                // Add getter to component: component[getter_name] = getter_func
+                // Stack: [getter_func]
+                // Load component: [getter_func, component]
+                // Swap: [component, getter_func]
+                // SetProperty(getter_name): sets component.getter_name = getter_func, stack is [component]
+                // StoreLocal: []
+                instructions.push(BytecodeOp::LoadLocal(component.name.clone()));
+                instructions.push(BytecodeOp::Swap);
+                instructions.push(BytecodeOp::SetProperty(getter_name.clone()));
+                instructions.push(BytecodeOp::StoreLocal(component.name.clone()));
+
+                // Generate setter: setPropertyName(value)
+                // Set the property directly on this struct and __variables
+                let setter_name = format!("set{}", capitalize_first(&prop.name));
+                let setter_func = BytecodeFunction {
+                    name: setter_name.clone(),
+                    params: vec![prop.name.clone()],
+                    required_params: vec![true],
+                    instructions: vec![
+                        // Set on this: this.name = value; store modified this back
+                        BytecodeOp::LoadLocal("this".to_string()),
+                        BytecodeOp::LoadLocal(prop.name.clone()),
+                        BytecodeOp::SetProperty(prop.name.clone()),
+                        BytecodeOp::StoreLocal("this".to_string()),
+                        // Set on __variables: this.__variables.name = value
+                        BytecodeOp::LoadLocal("this".to_string()),
+                        BytecodeOp::GetProperty("__variables".to_string()),
+                        BytecodeOp::LoadLocal(prop.name.clone()),
+                        BytecodeOp::SetProperty(prop.name.clone()),
+                        BytecodeOp::StoreLocal("__variables".to_string()),
+                        // Return this
+                        BytecodeOp::LoadLocal("this".to_string()),
+                        BytecodeOp::Return,
+                    ],
+                    source_file: None,
+                };
+                let setter_idx = self.program.functions.len();
+                self.program.functions.push(Arc::new(setter_func));
+                instructions.push(BytecodeOp::DefineFunction(setter_idx));
+                // Stack: [setter_func]
+
+                // Add setter to component (same pattern)
+                instructions.push(BytecodeOp::LoadLocal(component.name.clone()));
+                instructions.push(BytecodeOp::Swap);
+                instructions.push(BytecodeOp::SetProperty(setter_name.clone()));
+                instructions.push(BytecodeOp::StoreLocal(component.name.clone()));
+            }
+        }
+
+        // Now store as a component template in global scope (with accessors included)
         instructions.push(BytecodeOp::LoadLocal(component.name.clone()));
         instructions.push(BytecodeOp::StoreGlobal(component.name.clone()));
 
@@ -1714,6 +1803,23 @@ impl CfmlCompiler {
             }
             Expression::ArrowFunction(arrow) => {
                 let mut func_instructions = Vec::new();
+                // Emit default parameter value preamble for arrow functions
+                for param in &arrow.params {
+                    if let Some(ref default_expr) = param.default {
+                        func_instructions.push(BytecodeOp::LoadLocal(param.name.clone()));
+                        func_instructions.push(BytecodeOp::IsNull);
+                        let jump_idx = func_instructions.len();
+                        func_instructions.push(BytecodeOp::JumpIfFalse(0));
+                        self.compile_expression(default_expr, &mut func_instructions);
+                        func_instructions.push(BytecodeOp::StoreLocal(param.name.clone()));
+                        // Also update the arguments scope
+                        func_instructions.push(BytecodeOp::LoadLocal("arguments".to_string()));
+                        func_instructions.push(BytecodeOp::LoadLocal(param.name.clone()));
+                        func_instructions.push(BytecodeOp::SetProperty(param.name.clone()));
+                        func_instructions.push(BytecodeOp::StoreLocal("arguments".to_string()));
+                        func_instructions[jump_idx] = BytecodeOp::JumpIfFalse(func_instructions.len());
+                    }
+                }
                 self.compile_expression(&arrow.body, &mut func_instructions);
                 func_instructions.push(BytecodeOp::Return);
 

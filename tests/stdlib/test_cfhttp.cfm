@@ -157,12 +157,5 @@ assertTrue("PATCH status 200", patchResult.status_code == 200);
 patchData = deserializeJSON(patchResult.fileContent);
 assert("PATCH body received", patchData.data, '{"patched":true}');
 
-// ============================================================
-// Simple string URL form (cfhttp("url"))
-// ============================================================
-simpleResult = cfhttp("https://httpbin.org/get");
-assertTrue("simple string call is struct", isStruct(simpleResult));
-assertTrue("simple string call status 200", simpleResult.status_code == 200);
-
 suiteEnd();
 </cfscript>

@@ -9,7 +9,7 @@ try {
     assertTrue("cfcatch.tagContext has at least one entry", arrayLen(e.tagcontext) >= 1);
 
     // Check the first entry has expected keys
-    var firstEntry = e.tagcontext[1];
+    firstEntry = e.tagcontext[1];
     assertTrue("tagContext entry has 'template' key", structKeyExists(firstEntry, "template"));
     assertTrue("tagContext entry has 'line' key", structKeyExists(firstEntry, "line"));
     assertTrue("tagContext entry has 'id' key", structKeyExists(firstEntry, "id"));
@@ -24,7 +24,7 @@ try {
 
 // --- tagContext from division by zero ---
 try {
-    var x = 1 / 0;
+    x = 1 / 0;
 } catch (any e) {
     assertTrue("div-by-zero tagContext is an array", isArray(e.tagcontext));
     assertTrue("div-by-zero tagContext has entries", arrayLen(e.tagcontext) >= 1);
@@ -41,18 +41,18 @@ try {
     assertTrue("function error tagContext has entries", arrayLen(e.tagcontext) >= 1);
 }
 
-// --- exceptionKeyExists function ---
+// --- structKeyExists on exception struct ---
 try {
     throw(message="test for key exists", type="CustomType", detail="some detail");
 } catch (any e) {
-    assertTrue("exceptionKeyExists finds 'message'", exceptionKeyExists(e, "message"));
-    assertTrue("exceptionKeyExists finds 'type'", exceptionKeyExists(e, "type"));
-    assertTrue("exceptionKeyExists finds 'detail'", exceptionKeyExists(e, "detail"));
-    assertTrue("exceptionKeyExists finds 'tagcontext'", exceptionKeyExists(e, "tagcontext"));
-    assertFalse("exceptionKeyExists returns false for missing key", exceptionKeyExists(e, "nonExistentKey"));
+    assertTrue("exception has 'message'", structKeyExists(e, "message"));
+    assertTrue("exception has 'type'", structKeyExists(e, "type"));
+    assertTrue("exception has 'detail'", structKeyExists(e, "detail"));
+    assertTrue("exception has 'tagcontext'", structKeyExists(e, "tagcontext"));
+    assertFalse("exception missing key returns false", structKeyExists(e, "nonExistentKey"));
     // Case-insensitive check
-    assertTrue("exceptionKeyExists is case-insensitive", exceptionKeyExists(e, "MESSAGE"));
-    assertTrue("exceptionKeyExists is case-insensitive (mixed)", exceptionKeyExists(e, "TagContext"));
+    assertTrue("structKeyExists is case-insensitive", structKeyExists(e, "MESSAGE"));
+    assertTrue("structKeyExists is case-insensitive (mixed)", structKeyExists(e, "TagContext"));
 }
 
 suiteEnd();

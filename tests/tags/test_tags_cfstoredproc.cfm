@@ -2,7 +2,9 @@
 
 <cfscript>
 // Requires RUSTCFML_TEST_MYSQL_DSN env var, e.g. "mysql://root:pass@127.0.0.1:3306/rustcfml"
-ds = getEnvironmentVariable("RUSTCFML_TEST_MYSQL_DSN");
+ds = "";
+try { ds = createObject("java", "java.lang.System").getenv("RUSTCFML_TEST_MYSQL_DSN"); } catch (any e) {}
+if (isNull(ds)) ds = "";
 </cfscript>
 
 <cfif len(ds) GT 0>

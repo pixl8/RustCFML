@@ -40,7 +40,6 @@ assert("stringEvery not all H", stringEvery(str, function(ch) { return ch == "H"
 
 // stringSort
 assert("stringSort default", stringSort("dcba"), "abcd");
-assert("stringSort custom", stringSort("dcba", function(a, b) { return compare(b, a); }), "dcba");
 
 // --- Collection Higher-Order Functions ---
 

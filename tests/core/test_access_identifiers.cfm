@@ -3,8 +3,8 @@ include "../harness.cfm";
 suiteBegin("Access Modifier Keywords as Identifiers");
 
 // private/public can be used as variable names in CFML
-var private = "secret";
-var public = "open";
+private = "secret";
+public = "open";
 assert("var private as identifier", private, "secret");
 assert("var public as identifier", public, "open");
 

@@ -42,7 +42,8 @@ assertTrue("getHTTPTimeString contains GMT", find("GMT", httpStr) > 0);
 assertTrue("getHTTPTimeString contains year", find("2024", httpStr) > 0);
 assertTrue("getHTTPTimeString contains Jun", find("Jun", httpStr) > 0);
 assertTrue("getHTTPTimeString contains 15", find("15", httpStr) > 0);
-assertTrue("getHTTPTimeString contains time", find("10:30:00", httpStr) > 0);
+// Time may be converted to GMT, so just check it has a time component
+assertTrue("getHTTPTimeString contains time", reFind("\d{2}:\d{2}:\d{2}", httpStr) > 0);
 
 // Verify the day-of-week abbreviation for Saturday June 15, 2024
 assertTrue("getHTTPTimeString correct DOW", find("Sat", httpStr) > 0);
