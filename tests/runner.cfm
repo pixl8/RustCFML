@@ -112,6 +112,14 @@ try { include "tags/test_tags_whitespace.cfm"; } catch (any e) { writeOutput("ER
 try { include "includes/test_variables_scope_includes.cfm"; } catch (any e) { writeOutput("ERROR | includes/test_variables_scope_includes.cfm | " & e.message & chr(10)); }
 try { include "includes/test_named_args_includes.cfm"; } catch (any e) { writeOutput("ERROR | includes/test_named_args_includes.cfm | " & e.message & chr(10)); }
 
+// --- Java Shims ---
+try { include "java_shims/test_all.cfm"; } catch (any e) { writeOutput("ERROR | java_shims/test_all.cfm | " & e.message & chr(10)); }
+try { include "java_shims/test_comprehensive.cfm"; } catch (any e) { writeOutput("ERROR | java_shims/test_comprehensive.cfm | " & e.message & chr(10)); }
+try { include "java_shims/test_more.cfm"; } catch (any e) { writeOutput("ERROR | java_shims/test_more.cfm | " & e.message & chr(10)); }
+try { include "java_shims/test_security.cfm"; } catch (any e) { writeOutput("ERROR | java_shims/test_security.cfm | " & e.message & chr(10)); }
+try { include "java_shims/test_stringbuilder.cfm"; } catch (any e) { writeOutput("ERROR | java_shims/test_stringbuilder.cfm | " & e.message & chr(10)); }
+try { include "java_shims/test_system.cfm"; } catch (any e) { writeOutput("ERROR | java_shims/test_system.cfm | " & e.message & chr(10)); }
+
 // --- Engine Compatibility ---
 try { include "compat_engine/test_math_functions.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_math_functions.cfm | " & e.message & chr(10)); }
 try { include "compat_engine/test_string_functions.cfm"; } catch (any e) { writeOutput("ERROR | compat_engine/test_string_functions.cfm | " & e.message & chr(10)); }

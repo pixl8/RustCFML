@@ -1,60 +1,53 @@
 <cfscript>
-include "../harness.cfm";
-
-var sb = "";
-var result = "";
-var map = "";
-var lmap = "";
-var queue = "";
-var paths = "";
-var keys = "";
-
 suiteBegin("More Java Shims");
 
-// StringBuilder
+// StringBuilder — chained append() works on both engines (real Java returns this).
 writeOutput("1. StringBuilder: ");
 sb = createObject("java", "java.lang.StringBuilder").init("Hello");
-sb = sb.append(" World");
-result = sb.toString();
-writeOutput(result & "<br>");
+sb.append(" World");
+sbValue = sb.toString();
+writeOutput(sbValue & "<br>");
 
 writeOutput("2. StringBuilder length: ");
-result = sb.length();
-writeOutput(result & "<br>");
+sbLen = sb.length();
+writeOutput(sbLen & "<br>");
 
-// TreeMap
+// TreeMap — populate via put() so key casing is preserved on Lucee.
 writeOutput("3. TreeMap: ");
-map = createObject("java", "java.util.TreeMap").init({z=3, a=1, m=2});
-keys = map.keySet();
+map = createObject("java", "java.util.TreeMap").init();
+map.put("z", 3);
+map.put("a", 1);
+map.put("m", 2);
+keys = map.keySet().toArray();
 writeOutput("keys: " & arrayLen(keys) & "<br>");
 
 writeOutput("4. TreeMap get: ");
-result = map.get("a");
-writeOutput(result & "<br>");
+tmGet = map.get("a");
+writeOutput(tmGet & "<br>");
 
-// LinkedHashMap
+// LinkedHashMap — do NOT reassign put() result (Lucee returns null).
 writeOutput("5. LinkedHashMap: ");
 lmap = createObject("java", "java.util.LinkedHashMap").init();
-lmap = lmap.put("first", 1);
-lmap = lmap.put("second", 2);
+lmap.put("first", 1);
+lmap.put("second", 2);
 writeOutput("size: " & lmap.size() & "<br>");
 
-// ConcurrentLinkedQueue
+// ConcurrentLinkedQueue — same: don't reassign offer() return (boolean in Lucee).
 writeOutput("6. ConcurrentLinkedQueue: ");
 queue = createObject("java", "java.util.concurrent.ConcurrentLinkedQueue").init();
-queue = queue.offer("a");
-queue = queue.offer("b");
+queue.offer("a");
+queue.offer("b");
 writeOutput("size: " & queue.size() & "<br>");
 
 writeOutput("7. Queue peek: ");
-result = queue.peek();
-writeOutput(result & "<br>");
+qPeek = queue.peek();
+writeOutput(qPeek & "<br>");
 
-// Paths
+// Paths — via File.toPath() (portable)
 writeOutput("8. Paths: ");
-paths = createObject("java", "java.nio.file.Paths").get("/tmp/test.txt");
-result = paths.toString();
-writeOutput(result & "<br>");
+paths = createObject("java", "java.io.File").init("/tmp/test.txt").toPath();
+pStr = paths.toString();
+writeOutput(pStr & "<br>");
 
 suiteEnd();
 </cfscript>

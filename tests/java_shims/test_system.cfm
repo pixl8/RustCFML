@@ -2,7 +2,6 @@
 // Test Java shims - System class static methods
 // Note: In real Java, System is a final class and cannot be instantiated.
 // You call static methods directly on the class without init()
-include "../harness.cfm";
 
 suiteBegin("Java System Static Methods");
 

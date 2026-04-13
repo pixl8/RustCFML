@@ -2380,7 +2380,9 @@ fn fn_is_query(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_is_object(args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::Bool(match args.first() {
         Some(CfmlValue::Component(_)) => true,
-        Some(CfmlValue::Struct(s)) => s.contains_key("__name"),
+        Some(CfmlValue::Struct(s)) => {
+            s.contains_key("__name") || s.contains_key("__java_shim")
+        }
         _ => false,
     }))
 }
@@ -4378,6 +4380,18 @@ fn fn_is_instance_of(args: Vec<CfmlValue>) -> CfmlResult {
             }
             // Also check last segment (e.g., "resource" matches "taffy.core.resource")
             if let Some(last) = name.split('.').last() {
+                if last.to_lowercase() == type_lower {
+                    return Ok(CfmlValue::Bool(true));
+                }
+            }
+        }
+
+        // Java shim structs carry __java_class ("java.lang.stringbuilder" etc.)
+        if let Some(CfmlValue::String(jclass)) = s.get("__java_class") {
+            if jclass.to_lowercase() == type_lower {
+                return Ok(CfmlValue::Bool(true));
+            }
+            if let Some(last) = jclass.split('.').last() {
                 if last.to_lowercase() == type_lower {
                     return Ok(CfmlValue::Bool(true));
                 }

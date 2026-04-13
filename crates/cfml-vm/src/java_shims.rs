@@ -26,12 +26,19 @@ pub fn handle_java_messagedigest(
             Ok(CfmlValue::Struct(shim))
         }
         "update" => {
+            // Real Java MessageDigest.update takes a byte[]. We accept both
+            // Binary (from "...".getBytes()) and String (lenient) so Lucee and
+            // RustCFML run the same interop code without rewrites.
             if let CfmlValue::Struct(ref shim) = object {
                 let current = shim
                     .get("__data")
                     .map(|d| d.as_string())
                     .unwrap_or_default();
-                let input = args.first().map(|a| a.as_string()).unwrap_or_default();
+                let input = match args.first() {
+                    Some(CfmlValue::Binary(b)) => String::from_utf8_lossy(b).to_string(),
+                    Some(v) => v.as_string(),
+                    None => String::new(),
+                };
                 let mut new_shim = shim.clone();
                 new_shim.insert(
                     "__data".to_string(),
@@ -111,8 +118,26 @@ pub fn handle_java_uuid(method: &str, _args: Vec<CfmlValue>, object: &CfmlValue)
 }
 
 pub fn handle_java_thread(method: &str, _args: Vec<CfmlValue>, object: &CfmlValue) -> CfmlResult {
+    // "threadgroup" is a nested shim for java.lang.ThreadGroup accessed via
+    // Thread.getThreadGroup(). We route its own methods here too.
+    if let CfmlValue::Struct(ref shim) = object {
+        if shim
+            .get("__java_class")
+            .map(|v| v.as_string())
+            .unwrap_or_default()
+            == "java.lang.threadgroup"
+        {
+            return match method {
+                "getname" => Ok(shim
+                    .get("__name")
+                    .cloned()
+                    .unwrap_or(CfmlValue::String("main".to_string()))),
+                _ => Ok(CfmlValue::Null),
+            };
+        }
+    }
     match method {
-        "currentthread" => {
+        "init" | "currentthread" => {
             let mut shim = IndexMap::new();
             shim.insert(
                 "__java_class".to_string(),
@@ -131,6 +156,16 @@ pub fn handle_java_thread(method: &str, _args: Vec<CfmlValue>, object: &CfmlValu
             } else {
                 Ok(CfmlValue::String("main".to_string()))
             }
+        }
+        "getthreadgroup" => {
+            let mut tg = IndexMap::new();
+            tg.insert(
+                "__java_class".to_string(),
+                CfmlValue::String("java.lang.threadgroup".to_string()),
+            );
+            tg.insert("__java_shim".to_string(), CfmlValue::Bool(true));
+            tg.insert("__name".to_string(), CfmlValue::String("main".to_string()));
+            Ok(CfmlValue::Struct(tg))
         }
         "getpriority" => Ok(CfmlValue::Int(5)),
         "isdaemon" => Ok(CfmlValue::Bool(false)),
@@ -218,7 +253,17 @@ pub fn handle_java_file(method: &str, args: Vec<CfmlValue>, object: &CfmlValue) 
             shim.insert("__path".to_string(), CfmlValue::String(path));
             Ok(CfmlValue::Struct(shim))
         }
-        "tostring" | "getabsolute_path" | "getabsolutepath" => {
+        "tostring" => {
+            // java.io.File.toString() returns the original path as given.
+            if let CfmlValue::Struct(ref shim) = object {
+                return Ok(shim
+                    .get("__path")
+                    .cloned()
+                    .unwrap_or(CfmlValue::String(String::new())));
+            }
+            Ok(CfmlValue::String(String::new()))
+        }
+        "getabsolute_path" | "getabsolutepath" | "getcanonicalpath" => {
             if let CfmlValue::Struct(ref shim) = object {
                 if let Some(CfmlValue::String(path)) = shim.get("__path") {
                     let p = std::path::Path::new(path);
@@ -233,6 +278,14 @@ pub fn handle_java_file(method: &str, args: Vec<CfmlValue>, object: &CfmlValue) 
                 }
             }
             Ok(CfmlValue::String(String::new()))
+        }
+        "isabsolute" => {
+            if let CfmlValue::Struct(ref shim) = object {
+                if let Some(CfmlValue::String(path)) = shim.get("__path") {
+                    return Ok(CfmlValue::Bool(std::path::Path::new(path).is_absolute()));
+                }
+            }
+            Ok(CfmlValue::Bool(false))
         }
         "exists" => {
             if let CfmlValue::Struct(ref shim) = object {
@@ -276,12 +329,49 @@ pub fn handle_java_file(method: &str, args: Vec<CfmlValue>, object: &CfmlValue) 
             }
             Ok(CfmlValue::Int(0))
         }
+        "topath" => {
+            // File.toPath() returns a java.nio.file.Path. This is the portable
+            // alternative to Paths.get(…), which Lucee can't dispatch to
+            // cleanly due to its String/varargs signature.
+            if let CfmlValue::Struct(ref shim) = object {
+                if let Some(path) = shim.get("__path") {
+                    let mut ps = IndexMap::new();
+                    ps.insert(
+                        "__java_class".to_string(),
+                        CfmlValue::String("java.nio.file.paths".to_string()),
+                    );
+                    ps.insert("__java_shim".to_string(), CfmlValue::Bool(true));
+                    ps.insert("__path".to_string(), path.clone());
+                    return Ok(CfmlValue::Struct(ps));
+                }
+            }
+            Ok(CfmlValue::Null)
+        }
         _ => Ok(CfmlValue::Null),
     }
 }
 
 pub fn handle_java_system(method: &str, args: Vec<CfmlValue>, _object: &CfmlValue) -> CfmlResult {
     match method {
+        "init" => {
+            // java.lang.System is a static-only class in real Java, but we
+            // return a shim struct so both init() and static-style access work.
+            let mut shim = IndexMap::new();
+            shim.insert(
+                "__java_class".to_string(),
+                CfmlValue::String("java.lang.system".to_string()),
+            );
+            shim.insert("__java_shim".to_string(), CfmlValue::Bool(true));
+            // Expose `out` as a nested shim so `system.out.println(...)` works.
+            let mut out = IndexMap::new();
+            out.insert(
+                "__java_class".to_string(),
+                CfmlValue::String("java.lang.system.out".to_string()),
+            );
+            out.insert("__java_shim".to_string(), CfmlValue::Bool(true));
+            shim.insert("out".to_string(), CfmlValue::Struct(out));
+            Ok(CfmlValue::Struct(shim))
+        }
         "currenttimemillis" => {
             let n = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -297,36 +387,52 @@ pub fn handle_java_system(method: &str, args: Vec<CfmlValue>, _object: &CfmlValu
             Ok(CfmlValue::Double(n))
         }
         "getproperty" => {
-            if let Some(CfmlValue::String(key)) = args.first() {
-                let val = match key.to_lowercase().as_str() {
-                    "os.name" => std::env::consts::OS.to_string(),
-                    "file.separator" => std::path::MAIN_SEPARATOR.to_string(),
-                    "path.separator" => {
-                        if cfg!(unix) {
-                            ":".to_string()
-                        } else {
-                            ";".to_string()
-                        }
+            // Some callers pass the key as the first "real" arg, but member
+            // dispatch prepends the object — skip leading shim structs.
+            let key = args
+                .iter()
+                .find_map(|a| match a {
+                    CfmlValue::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let val = match key.to_lowercase().as_str() {
+                "os.name" => std::env::consts::OS.to_string(),
+                "file.separator" => std::path::MAIN_SEPARATOR.to_string(),
+                "path.separator" => {
+                    if cfg!(unix) {
+                        ":".to_string()
+                    } else {
+                        ";".to_string()
                     }
-                    "user.dir" => std::env::current_dir()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default(),
-                    "user.home" => std::env::var("HOME")
-                        .or_else(|_| std::env::var("USERPROFILE"))
-                        .unwrap_or_default(),
-                    "java.version" => "rustcfml".to_string(),
-                    _ => String::new(),
-                };
-                Ok(CfmlValue::String(val))
-            } else {
-                Ok(CfmlValue::String(String::new()))
-            }
+                }
+                "user.dir" => std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                "user.home" => std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .unwrap_or_default(),
+                "java.version" => "rustcfml".to_string(),
+                _ => String::new(),
+            };
+            Ok(CfmlValue::String(val))
         }
         "getenv" => {
-            if let Some(CfmlValue::String(v)) = args.first() {
-                Ok(CfmlValue::String(std::env::var(v).unwrap_or_default()))
-            } else {
-                Ok(CfmlValue::String(String::new()))
+            // No-arg form returns a struct of all env vars (real Java returns a Map).
+            // Single-arg form returns the value for that key.
+            let key = args.iter().find_map(|a| match a {
+                CfmlValue::String(s) => Some(s.clone()),
+                _ => None,
+            });
+            match key {
+                Some(k) => Ok(CfmlValue::String(std::env::var(&k).unwrap_or_default())),
+                None => {
+                    let mut env = IndexMap::new();
+                    for (k, v) in std::env::vars() {
+                        env.insert(k, CfmlValue::String(v));
+                    }
+                    Ok(CfmlValue::Struct(env))
+                }
             }
         }
         _ => Ok(CfmlValue::Null),
@@ -429,6 +535,57 @@ pub fn handle_java_treemap(method: &str, args: Vec<CfmlValue>, object: &CfmlValu
                 }
             } else {
                 Ok(CfmlValue::Null)
+            }
+        }
+        "keyset" | "keys" => {
+            if let CfmlValue::Struct(ref shim) = object {
+                let mut ks: Vec<String> = shim
+                    .iter()
+                    .filter(|(k, _)| !k.starts_with("__"))
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                ks.sort(); // TreeMap = sorted key order
+                Ok(CfmlValue::Array(
+                    ks.into_iter().map(CfmlValue::String).collect(),
+                ))
+            } else {
+                Ok(CfmlValue::Array(Vec::new()))
+            }
+        }
+        "get" => {
+            if let CfmlValue::Struct(ref shim) = object {
+                if let Some(key) = args.first() {
+                    let k = key.as_string();
+                    return Ok(shim.get(&k).cloned().unwrap_or(CfmlValue::Null));
+                }
+            }
+            Ok(CfmlValue::Null)
+        }
+        "size" | "len" => {
+            if let CfmlValue::Struct(ref shim) = object {
+                Ok(CfmlValue::Int(
+                    shim.iter().filter(|(k, _)| !k.starts_with("__")).count() as i64,
+                ))
+            } else {
+                Ok(CfmlValue::Int(0))
+            }
+        }
+        "containskey" => {
+            if let CfmlValue::Struct(ref shim) = object {
+                if let Some(key) = args.first() {
+                    let k = key.as_string();
+                    return Ok(CfmlValue::Bool(shim.contains_key(&k)));
+                }
+            }
+            Ok(CfmlValue::Bool(false))
+        }
+        "isempty" => {
+            if let CfmlValue::Struct(ref shim) = object {
+                Ok(CfmlValue::Bool(
+                    shim.iter().all(|(k, _)| k.starts_with("__")),
+                ))
+            } else {
+                Ok(CfmlValue::Bool(true))
             }
         }
         _ => Ok(CfmlValue::Null),
@@ -607,6 +764,17 @@ pub fn handle_java_concurrentlinkedqueue(
 
 pub fn handle_java_paths(method: &str, args: Vec<CfmlValue>, object: &CfmlValue) -> CfmlResult {
     match method {
+        "init" => {
+            // Paths is a static-only class; return a stub shim so that
+            // the subsequent .get(path) static call dispatches here.
+            let mut shim = IndexMap::new();
+            shim.insert(
+                "__java_class".to_string(),
+                CfmlValue::String("java.nio.file.paths".to_string()),
+            );
+            shim.insert("__java_shim".to_string(), CfmlValue::Bool(true));
+            Ok(CfmlValue::Struct(shim))
+        }
         "get" => {
             let path = args.first().map(|a| a.as_string()).unwrap_or_default();
             let mut shim = IndexMap::new();

@@ -4830,7 +4830,8 @@ impl CfmlVirtualMachine {
                                 "java.util.linkedhashmap" => {
                                     handle_java_linkedhashmap("init", empty_args, &CfmlValue::Null)
                                 }
-                                "java.util.concurrent.linkedqueue" => {
+                                "java.util.concurrent.linkedqueue"
+                                | "java.util.concurrent.concurrentlinkedqueue" => {
                                     handle_java_concurrentlinkedqueue(
                                         "init",
                                         empty_args,
@@ -6542,7 +6543,9 @@ impl CfmlVirtualMachine {
             // Struct mutators
             "delete" | "insert" | "update" |
             // Query mutators
-            "addrow" | "setcell" | "addcolumn" | "deleterow" | "deletecolumn"
+            "addrow" | "setcell" | "addcolumn" | "deleterow" | "deletecolumn" |
+            // Java shim mutators (Map.put, Queue.offer)
+            "put" | "offer"
         )
     }
 
@@ -6656,11 +6659,88 @@ impl CfmlVirtualMachine {
     ) -> CfmlResult {
         let method_lower = method.to_lowercase();
 
+        // Java shim dispatch must run BEFORE struct-method interception:
+        // methods like append/clear/insert collide with struct-builtins and
+        // would otherwise never reach the shim handler.
+        if let CfmlValue::Struct(ref s) = object {
+            if s.contains_key("__java_shim") {
+                let java_class = s
+                    .get("__java_class")
+                    .map(|v| v.as_string().to_lowercase())
+                    .unwrap_or_default();
+
+                // Special: Queue.poll() returns the head and mutates in place.
+                // Set method_this_writeback so the bytecode CallMethod handler
+                // writes the reduced queue back to the variable.
+                if method_lower == "poll"
+                    && java_class == "java.util.concurrent.concurrentlinkedqueue"
+                {
+                    if let Some(CfmlValue::Array(q)) = s.get("__queue").cloned() {
+                        if q.is_empty() {
+                            return Ok(CfmlValue::Null);
+                        }
+                        let head = q[0].clone();
+                        let mut ns = s.clone();
+                        ns.insert("__queue".to_string(), CfmlValue::Array(q[1..].to_vec()));
+                        self.method_this_writeback = Some(CfmlValue::Struct(ns));
+                        return Ok(head);
+                    }
+                    return Ok(CfmlValue::Null);
+                }
+
+                let all_args: Vec<CfmlValue> = std::mem::take(extra_args);
+                let m = method_lower.clone();
+                let result = match java_class.as_str() {
+                    "java.security.messagedigest" => {
+                        handle_java_messagedigest(&m, all_args, object)
+                    }
+                    "java.util.uuid" => handle_java_uuid(&m, all_args, object),
+                    "java.lang.thread" | "java.lang.threadgroup" => {
+                        handle_java_thread(&m, all_args, object)
+                    }
+                    "java.net.inetaddress" => handle_java_inetaddress(&m, all_args, object),
+                    "java.io.file" => handle_java_file(&m, all_args, object),
+                    "java.lang.system" => handle_java_system(&m, all_args, object),
+                    "java.lang.stringbuilder" | "java.lang.stringbuffer" => {
+                        handle_java_stringbuilder(&m, all_args, object)
+                    }
+                    "java.util.treemap" => handle_java_treemap(&m, all_args, object),
+                    "java.util.linkedhashmap" => {
+                        handle_java_linkedhashmap(&m, all_args, object)
+                    }
+                    "java.util.concurrent.linkedqueue"
+                    | "java.util.concurrent.concurrentlinkedqueue" => {
+                        handle_java_concurrentlinkedqueue(&m, all_args, object)
+                    }
+                    "java.nio.file.paths" | "java.nio.file.path" => {
+                        handle_java_paths(&m, all_args, object)
+                    }
+                    _ => Ok(CfmlValue::Null),
+                };
+                match result {
+                    Ok(CfmlValue::Null) => {
+                        // Shim didn't handle the method — fall through to the
+                        // regular dispatch below so property access (e.g.
+                        // system.out) still works.
+                    }
+                    Ok(val) => return Ok(val),
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
         // Map member function names to standalone builtin names
         // The object becomes the first argument
         let builtin_name = match object {
             CfmlValue::String(_) => match method_lower.as_str() {
                 "len" | "length" => Some("len"),
+                "getbytes" => {
+                    // java.lang.String.getBytes() returns byte[]. Users wire
+                    // this into e.g. MessageDigest.update(...).getBytes()).
+                    // We honour the common no-arg form and ignore encoding
+                    // arg (Rust strings are UTF-8 already).
+                    return Ok(CfmlValue::Binary(object.as_string().into_bytes()));
+                }
                 "ucase" | "touppercase" => Some("ucase"),
                 "lcase" | "tolowercase" => Some("lcase"),
                 "trim" => Some("trim"),
@@ -6713,6 +6793,13 @@ impl CfmlVirtualMachine {
             },
             CfmlValue::Array(arr) => match method_lower.as_str() {
                 "len" | "length" | "size" => Some("arrayLen"),
+                "toarray" => {
+                    // .toArray() on a CFML array is a no-op; this matches
+                    // java.util.Set.toArray() returning an Object[], which
+                    // Lucee users chain to after keySet(). Keeping the same
+                    // code path working on both engines.
+                    return Ok(object.clone());
+                }
                 "append" | "push" => Some("arrayAppend"),
                 "prepend" => Some("arrayPrepend"),
                 "deleteat" => Some("arrayDeleteAt"),
@@ -7206,65 +7293,9 @@ impl CfmlVirtualMachine {
             }
         }
 
-        // ---- Java shim routing ----
-        // Check if object is a Java shim (has __java_shim key)
-        if let CfmlValue::Struct(ref s) = object {
-            if s.contains_key("__java_shim") {
-                let java_class = s
-                    .get("__java_class")
-                    .map(|v| v.as_string().to_lowercase())
-                    .unwrap_or_default();
-                // Build args: method name + object + extra_args
-                let mut all_args = vec![object.clone()];
-                all_args.append(extra_args);
-                let result = match java_class.as_str() {
-                    "java.security.messagedigest" => {
-                        handle_java_messagedigest(&method, all_args, object)
-                    }
-                    "java.util.uuid" => handle_java_uuid(&method, all_args, object),
-                    "java.lang.thread" => handle_java_thread(&method, all_args, object),
-                    "java.net.inetaddress" => handle_java_inetaddress(&method, all_args, object),
-                    "java.io.file" => handle_java_file(&method, all_args, object),
-                    "java.lang.system" => handle_java_system(&method, all_args, object),
-                    "java.lang.stringbuilder" | "java.lang.stringbuffer" => {
-                        handle_java_stringbuilder(&method, all_args, object)
-                    }
-                    "java.util.treemap" => handle_java_treemap(&method, all_args, object),
-                    "java.util.linkedhashmap" => {
-                        handle_java_linkedhashmap(&method, all_args, object)
-                    }
-                    "java.util.concurrent.linkedqueue" => {
-                        handle_java_concurrentlinkedqueue(&method, all_args, object)
-                    }
-                    "java.nio.file.paths" | "java.nio.file.path" => {
-                        handle_java_paths(&method, all_args, object)
-                    }
-                    _ => Ok(CfmlValue::Null),
-                };
-                // If result is not Null, propagate; but for methods that mutate (returning
-                // modified shim), we need to replace the original object in the caller's scope.
-                // For now, just return the result.
-                match result {
-                    Ok(CfmlValue::Null) => {}
-                    Ok(val) => {
-                        // Check if this is a mutating method (returns modified shim struct)
-                        if let CfmlValue::Struct(ref new_shim) = val {
-                            if new_shim.contains_key("__java_shim") {
-                                // Mutating method - the shim was returned but we need to
-                                // have the VM write it back. Instead of complex writeback,
-                                // we return the struct and the bytecode compiler's
-                                // CallMethod handler should handle writeback if needed.
-                                // Actually, the CallMethod bytecode already handles
-                                // writeback via the write_back parameter.
-                                return Ok(val);
-                            }
-                        }
-                        return Ok(val);
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-        }
+        // NOTE: Java shim routing lives at the top of this function (before
+        // struct-builtin interception), so it already ran for any __java_shim
+        // receiver. Control only reaches here for non-shim objects.
 
         // If no builtin match found, try to get property and call it
         // This handles user-defined methods on components

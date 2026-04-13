@@ -1,17 +1,16 @@
 <cfscript>
 // Test Java security shims for Wheels compatibility
-include "../harness.cfm";
 
-var shim = "";
-var md = "";
-var result = "";
-var uuid = "";
-var t = "";
-var addr = "";
-var f = "";
-var exists = "";
-var path = "";
-var resultType = "";
+shim = "";
+md = "";
+result = "";
+uuid = "";
+t = "";
+addr = "";
+f = "";
+exists = "";
+path = "";
+resultType = "";
 
 suiteBegin("Java Security & UUID Shims");
 
@@ -25,9 +24,9 @@ writeOutput("2. getInstance: ");
 md = shim.getInstance("SHA-256");
 writeOutput("OK<br>");
 
-// Test 3: MessageDigest.update
+// Test 3: MessageDigest.update — real Java wants byte[], .getBytes() gives us that
 writeOutput("3. update: ");
-md.update("test data");
+md.update("test data".getBytes());
 writeOutput("OK<br>");
 
 // Test 4: MessageDigest.digest
@@ -35,10 +34,10 @@ writeOutput("4. digest: ");
 result = md.digest();
 writeOutput("OK - result type: Binary<br>");
 
-// Test 5: MessageDigest.isEqual
+// Test 5: MessageDigest.isEqual — static method, takes byte[] arrays
 writeOutput("5. isEqual: ");
 md = createObject("java", "java.security.MessageDigest");
-result = md.isEqual("test", "test");
+result = md.isEqual("test".getBytes(), "test".getBytes());
 writeOutput("OK - result: " & result & "<br>");
 
 // Test 6: UUID.randomUUID

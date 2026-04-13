@@ -1,9 +1,8 @@
 <cfscript>
-include "../harness.cfm";
 
 suiteBegin("StringBuilder Test");
 
-var sb = createObject("java", "java.lang.StringBuilder");
+sb = createObject("java", "java.lang.StringBuilder");
 writeOutput("Created StringBuilder<br>");
 
 sb = sb.init("Hello");
@@ -18,7 +17,8 @@ sb = sb.append("!");
 writeOutput("After second append: buffer = '" & sb.toString() & "'<br>");
 writeOutput("Final length = " & sb.length() & "<br>");
 
-var result = sb.toString();
+result = sb.toString();
 assert("toString result", result, "Hello World!");
 
 suiteEnd();
+</cfscript>

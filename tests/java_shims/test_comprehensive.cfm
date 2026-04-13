@@ -1,23 +1,9 @@
 <cfscript>
-// Test Java shims
-include "../harness.cfm";
-
-var sb = "";
-var result = "";
-var system = "";
-var file = "";
-var thread = "";
-var map = "";
-var lmap = "";
-var queue = "";
-var paths = "";
-var osName = "";
-var fileSep = "";
-var userDir = "";
-var out = "";
-var keys = "";
-var lkeys = "";
-var parent = "";
+// Comprehensive Java shim exercise — written to match real Lucee Java-interop
+// behaviour so the same code runs unchanged on RustCFML. Do not assign .put()
+// / .offer() / .poll() results back to the map/queue variable: on Lucee
+// those return previous-value / boolean / head (respectively) and reassigning
+// over the receiver deletes or replaces it. Populate via standalone calls.
 
 suiteBegin("Java Shims Comprehensive");
 
@@ -27,20 +13,20 @@ sb = createObject("java", "java.lang.StringBuilder").init("");
 writeOutput("OK<br>");
 
 writeOutput("2. StringBuilder.append: ");
-sb = sb.append("Hello");
-sb = sb.append(" ");
-sb = sb.append("World");
+sb.append("Hello");
+sb.append(" ");
+sb.append("World");
 writeOutput("OK<br>");
 
 writeOutput("3. StringBuilder.toString: ");
-result = sb.toString();
-writeOutput("OK - " & result & "<br>");
+sbValue = sb.toString();
+writeOutput("OK - " & sbValue & "<br>");
 
 writeOutput("4. StringBuilder.length: ");
-result = sb.length();
-writeOutput("OK - " & result & "<br>");
+sbLen = sb.length();
+writeOutput("OK - " & sbLen & "<br>");
 
-// Test System
+// Test System — static class, no .init()
 writeOutput("5. System.getProperty os.name: ");
 system = createObject("java", "java.lang.System");
 osName = system.getProperty("os.name");
@@ -55,7 +41,7 @@ userDir = system.getProperty("user.dir");
 writeOutput("OK - " & userDir & "<br>");
 
 writeOutput("8. System.getenv HOME: ");
-var envHome = system.getenv("HOME");
+envHome = system.getenv("HOME");
 writeOutput("OK - " & envHome & "<br>");
 
 // Test File
@@ -64,24 +50,24 @@ file = createObject("java", "java.io.File").init("/tmp");
 writeOutput("OK<br>");
 
 writeOutput("10. File.isAbsolute: ");
-result = file.isAbsolute();
-writeOutput("OK - " & result & "<br>");
+fIsAbs = file.isAbsolute();
+writeOutput("OK - " & fIsAbs & "<br>");
 
 writeOutput("11. File.getAbsolutePath: ");
-result = file.getAbsolutePath();
-writeOutput("OK - " & result & "<br>");
+fAbs = file.getAbsolutePath();
+writeOutput("OK - " & fAbs & "<br>");
 
 writeOutput("12. File.exists: ");
-result = file.exists();
-writeOutput("OK - " & result & "<br>");
+fExists = file.exists();
+writeOutput("OK - " & fExists & "<br>");
 
 writeOutput("13. File.isDirectory: ");
-result = file.isDirectory();
-writeOutput("OK - " & result & "<br>");
+fIsDir = file.isDirectory();
+writeOutput("OK - " & fIsDir & "<br>");
 
 writeOutput("14. File.lastModified: ");
-result = file.lastModified();
-writeOutput("OK - " & result & "<br>");
+fLast = file.lastModified();
+writeOutput("OK - " & fLast & "<br>");
 
 // Test Thread
 writeOutput("15. Thread.currentThread: ");
@@ -89,60 +75,64 @@ thread = createObject("java", "java.lang.Thread").currentThread();
 writeOutput("OK<br>");
 
 writeOutput("16. Thread.getName: ");
-result = thread.getName();
-writeOutput("OK - " & result & "<br>");
+tName = thread.getName();
+writeOutput("OK - " & tName & "<br>");
 
 writeOutput("17. Thread.getPriority: ");
-result = thread.getPriority();
-writeOutput("OK - " & result & "<br>");
+tPri = thread.getPriority();
+writeOutput("OK - " & tPri & "<br>");
 
 writeOutput("18. Thread.isDaemon: ");
-result = thread.isDaemon();
-writeOutput("OK - " & result & "<br>");
+tDaemon = thread.isDaemon();
+writeOutput("OK - " & tDaemon & "<br>");
 
-// Test TreeMap
+// Test TreeMap — populate via put(), not a struct literal (Lucee uppercases
+// unquoted struct keys when converting to Java Map, breaking later .get()).
 writeOutput("19. TreeMap.init: ");
-map = createObject("java", "java.util.TreeMap").init({z=3, a=1, m=2});
+map = createObject("java", "java.util.TreeMap").init();
+map.put("z", 3);
+map.put("a", 1);
+map.put("m", 2);
 writeOutput("OK<br>");
 
 writeOutput("20. TreeMap.keySet: ");
-keys = map.keySet();
+keys = map.keySet().toArray();
 writeOutput("OK - count: " & arrayLen(keys) & "<br>");
 
 writeOutput("21. TreeMap.get: ");
-result = map.get("a");
-writeOutput("OK - " & result & "<br>");
+tmGet = map.get("a");
+writeOutput("OK - " & tmGet & "<br>");
 
 writeOutput("22. TreeMap.size: ");
-result = map.size();
-writeOutput("OK - " & result & "<br>");
+tmSize = map.size();
+writeOutput("OK - " & tmSize & "<br>");
 
 writeOutput("23. TreeMap.containsKey: ");
-result = map.containsKey("a");
-writeOutput("OK - " & result & "<br>");
+tmHas = map.containsKey("a");
+writeOutput("OK - " & tmHas & "<br>");
 
-// Test LinkedHashMap
+// Test LinkedHashMap — do not reassign put() result (Lucee returns null).
 writeOutput("24. LinkedHashMap.init: ");
 lmap = createObject("java", "java.util.LinkedHashMap").init();
 writeOutput("OK<br>");
 
 writeOutput("25. LinkedHashMap.put: ");
-lmap = lmap.put("first", 1);
-lmap = lmap.put("second", 2);
-lmap = lmap.put("third", 3);
+lmap.put("first", 1);
+lmap.put("second", 2);
+lmap.put("third", 3);
 writeOutput("OK<br>");
 
 writeOutput("26. LinkedHashMap.keySet: ");
-lkeys = lmap.keySet();
+lkeys = lmap.keySet().toArray();
 writeOutput("OK - count: " & arrayLen(lkeys) & "<br>");
 
 writeOutput("27. LinkedHashMap.get: ");
-result = lmap.get("first");
-writeOutput("OK - " & result & "<br>");
+lmGet = lmap.get("first");
+writeOutput("OK - " & lmGet & "<br>");
 
 writeOutput("28. LinkedHashMap.size: ");
-result = lmap.size();
-writeOutput("OK - " & result & "<br>");
+lmSize = lmap.size();
+writeOutput("OK - " & lmSize & "<br>");
 
 // Test ConcurrentLinkedQueue
 writeOutput("29. ConcurrentLinkedQueue.init: ");
@@ -150,25 +140,25 @@ queue = createObject("java", "java.util.concurrent.ConcurrentLinkedQueue").init(
 writeOutput("OK<br>");
 
 writeOutput("30. ConcurrentLinkedQueue.offer: ");
-queue = queue.offer("a");
-queue = queue.offer("b");
+queue.offer("a");
+queue.offer("b");
 writeOutput("OK<br>");
 
 writeOutput("31. ConcurrentLinkedQueue.size: ");
-result = queue.size();
-writeOutput("OK - " & result & "<br>");
+qSize = queue.size();
+writeOutput("OK - " & qSize & "<br>");
 
 writeOutput("32. ConcurrentLinkedQueue.peek: ");
-result = queue.peek();
-writeOutput("OK - " & result & "<br>");
+qPeek = queue.peek();
+writeOutput("OK - " & qPeek & "<br>");
 
 writeOutput("33. ConcurrentLinkedQueue.poll: ");
-queue = queue.poll();
-writeOutput("OK<br>");
+qPoll = queue.poll();
+writeOutput("OK - " & qPoll & "<br>");
 
-// Test Paths
+// Test Paths — via File.toPath() (portable; Paths.get varargs doesn't dispatch on Lucee)
 writeOutput("34. Paths.get: ");
-paths = createObject("java", "java.nio.file.Paths").get("/tmp/test.txt");
+paths = createObject("java", "java.io.File").init("/tmp/test.txt").toPath();
 writeOutput("OK<br>");
 
 writeOutput("35. Paths.getParent: ");
@@ -176,12 +166,12 @@ parent = paths.getParent();
 writeOutput("OK<br>");
 
 writeOutput("36. Paths.isAbsolute: ");
-result = paths.isAbsolute();
-writeOutput("OK - " & result & "<br>");
+pIsAbs = paths.isAbsolute();
+writeOutput("OK - " & pIsAbs & "<br>");
 
 writeOutput("37. Paths.toString: ");
-result = paths.toString();
-writeOutput("OK - " & result & "<br>");
+pStr = paths.toString();
+writeOutput("OK - " & pStr & "<br>");
 
 suiteEnd();
 </cfscript>

@@ -17,6 +17,25 @@ cargo test                           # Rust unit tests (tag_parser, etc.)
 
 Tests are CFML-based, not Rust-based. The test runner (`tests/runner.cfm`) includes all test files and uses the harness (`tests/harness.cfm`) which provides `assert()`, `assertTrue()`, `assertFalse()`, `assertNull()`, `assertThrows()`, `suiteBegin()`, `suiteEnd()`.
 
+### Cross-engine testing (Lucee)
+
+The same test suite runs against Lucee to verify compatibility with the reference engine. Start Lucee via CommandBox (served out of the project root), then hit `tests/runner.cfm` over HTTP:
+
+```bash
+box server start cfengine=lucee@be   # starts Lucee on a CommandBox-assigned port (e.g. 127.0.0.1:8585)
+curl -s http://127.0.0.1:8585/tests/runner.cfm -o /tmp/lucee_out.txt
+grep -E "^(SUMMARY|FAIL \||ERROR)" /tmp/lucee_out.txt
+box server status                    # show port if you don't see it in startup output
+box server stop                      # shut it down
+```
+
+**Writing tests that pass on both engines:**
+- Do NOT use `var` at page scope — Lucee rejects it ("Unsupported Context for Local Scope"). Declare without `var` at page level, or wrap the test body in a function.
+- Always close `<cfscript>` blocks with `</cfscript>` — Lucee's parser is strict about this; RustCFML tolerates EOF.
+- The test runner includes `harness.cfm` once at the top. Individual test files must NOT re-include it, because the harness body resets `request._test_total*` counters and masks the grand summary.
+- HTTP-dependent tests (`tests/tags/test_tags_cfscript_statements.cfm`) discover the port from `cgi.server_port` (set by the server at request-time) and skip the HTTP subtests when the runner is invoked from the CLI with no server available. Don't hardcode a port.
+- Lucee and RustCFML both run through the same `tests/runner.cfm`, so a green run on both is the compatibility bar.
+
 ## Architecture
 
 ```
