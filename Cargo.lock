@@ -534,6 +534,7 @@ dependencies = [
  "log",
  "md-5",
  "mysql",
+ "once_cell",
  "pbkdf2",
  "postgres",
  "quick-xml",

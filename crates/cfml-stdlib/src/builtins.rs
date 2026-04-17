@@ -19,8 +19,30 @@ use cfml_common::vm::{CfmlError, CfmlResult};
 use std::collections::HashMap;
 use indexmap::IndexMap;
 use regex::Regex;
+use once_cell::sync::Lazy;
 use serde_json;
 use chrono::{NaiveDateTime, NaiveDate, NaiveTime, Datelike, Timelike, Local, Utc, TimeZone};
+
+// Pre-compiled regex patterns used by isValid() and other builtins.
+// Hoisted to module-level Lazy statics to avoid recompiling on every call.
+static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
+        .expect("EMAIL_REGEX pattern is valid")
+});
+static UUID_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{16}$")
+        .expect("UUID_REGEX pattern is valid")
+});
+static GUID_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")
+        .expect("GUID_REGEX pattern is valid")
+});
+static ZIPCODE_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\d{5}(-\d{4})?$").expect("ZIPCODE_REGEX pattern is valid")
+});
+static SSN_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\d{3}-\d{2}-\d{4}$").expect("SSN_REGEX pattern is valid")
+});
 
 pub type BuiltinFunction = fn(Vec<CfmlValue>) -> CfmlResult;
 
@@ -2416,8 +2438,7 @@ fn fn_is_valid(args: Vec<CfmlValue>) -> CfmlResult {
             "struct" => fn_is_struct(vec![value.clone()]),
             "email" => {
                 let s = value.as_string();
-                let re = Regex::new(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$").unwrap();
-                Ok(CfmlValue::Bool(re.is_match(&s)))
+                Ok(CfmlValue::Bool(EMAIL_REGEX.is_match(&s)))
             }
             "url" => {
                 let s = value.as_string().to_lowercase();
@@ -2429,14 +2450,12 @@ fn fn_is_valid(args: Vec<CfmlValue>) -> CfmlResult {
             "uuid" => {
                 // CFML UUID format: 8-4-4-16 (35 chars total)
                 let s = value.as_string();
-                let re = Regex::new(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{16}$").unwrap();
-                Ok(CfmlValue::Bool(re.is_match(&s)))
+                Ok(CfmlValue::Bool(UUID_REGEX.is_match(&s)))
             }
             "guid" => {
                 // Standard GUID format: 8-4-4-4-12
                 let s = value.as_string();
-                let re = Regex::new(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$").unwrap();
-                Ok(CfmlValue::Bool(re.is_match(&s)))
+                Ok(CfmlValue::Bool(GUID_REGEX.is_match(&s)))
             }
             "range" => {
                 // isValid("range", value, min, max)
@@ -2480,8 +2499,7 @@ fn fn_is_valid(args: Vec<CfmlValue>) -> CfmlResult {
             }
             "zipcode" => {
                 let s = value.as_string();
-                let re = Regex::new(r"^\d{5}(-\d{4})?$").unwrap();
-                Ok(CfmlValue::Bool(re.is_match(&s)))
+                Ok(CfmlValue::Bool(ZIPCODE_REGEX.is_match(&s)))
             }
             "telephone" | "phone" => {
                 let digits: String = value.as_string().chars().filter(|c| c.is_ascii_digit()).collect();
@@ -2489,8 +2507,7 @@ fn fn_is_valid(args: Vec<CfmlValue>) -> CfmlResult {
             }
             "ssn" | "social_security_number" => {
                 let s = value.as_string();
-                let re = Regex::new(r"^\d{3}-\d{2}-\d{4}$").unwrap();
-                Ok(CfmlValue::Bool(re.is_match(&s)))
+                Ok(CfmlValue::Bool(SSN_REGEX.is_match(&s)))
             }
             _ => Ok(CfmlValue::Bool(false)),
         }
