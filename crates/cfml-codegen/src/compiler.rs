@@ -17,6 +17,12 @@ pub struct CfmlCompiler {
     loop_stack: Vec<(Vec<usize>, Vec<usize>)>,
     /// Finally body to emit before rethrow (set when inside try-catch-finally)
     current_finally: Option<Vec<Statement>>,
+    /// Nesting depth of function-body compilation. 0 means page-scope; inside any
+    /// UDF or CFC method this is > 0. Used to gate the `variables.x` peephole:
+    /// at page scope `variables.x` is a read of globals (LoadGlobal semantics),
+    /// but inside a function body `variables` refers to the local-scope merge or
+    /// a CFC's `__variables` struct — different semantics entirely.
+    function_depth: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +182,7 @@ impl CfmlCompiler {
             },
             loop_stack: Vec::new(),
             current_finally: None,
+            function_depth: 0,
         }
     }
 
@@ -1001,6 +1008,8 @@ impl CfmlCompiler {
         // Compile the function body into a separate BytecodeFunction
         let mut func_instructions = Vec::new();
 
+        self.function_depth += 1;
+
         // Emit default parameter value preamble:
         // For each param with a default, if the arg is null, assign the default
         // and also update the arguments scope
@@ -1029,6 +1038,8 @@ impl CfmlCompiler {
         // Ensure function returns null if no explicit return
         func_instructions.push(BytecodeOp::Null);
         func_instructions.push(BytecodeOp::Return);
+
+        self.function_depth -= 1;
 
         let bc_func = BytecodeFunction {
             name: func.name.clone(),
@@ -1490,6 +1501,20 @@ impl CfmlCompiler {
                 }
             }
             Expression::MemberAccess(access) => {
+                // Phase H peephole: at page scope, `variables.foo` clones the entire
+                // globals map before reading one key. LoadGlobal semantics match
+                // page-scope `variables.x` reads exactly (locals-then-globals).
+                // Unsafe inside function bodies: `variables` there means the locals
+                // merge or a CFC's `__variables` struct — LoadGlobal would hit page
+                // globals instead. Also unsafe for null-safe `variables?.foo`.
+                if !access.null_safe && self.function_depth == 0 {
+                    if let Expression::Identifier(ref ident) = *access.object {
+                        if ident.name.eq_ignore_ascii_case("variables") {
+                            instructions.push(BytecodeOp::LoadGlobal(access.member.clone()));
+                            return;
+                        }
+                    }
+                }
                 // For null-safe access, use TryLoadLocal for simple identifiers
                 if access.null_safe {
                     if let Expression::Identifier(ref ident) = *access.object {
