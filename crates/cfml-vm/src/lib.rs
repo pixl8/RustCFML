@@ -1440,38 +1440,25 @@ impl CfmlVirtualMachine {
                             let mut positional =
                                 vec![CfmlValue::Null; f.params.len().max(expanded_names.len())];
                             for (i, name) in expanded_names.iter().enumerate() {
-                                if name.is_empty() {
-                                    // Positional arg — keep in place
-                                    if i < positional.len() {
-                                        positional[i] = expanded_values
-                                            .get(i)
-                                            .cloned()
-                                            .unwrap_or(CfmlValue::Null);
-                                    }
+                                let value = if i < expanded_values.len() {
+                                    std::mem::replace(&mut expanded_values[i], CfmlValue::Null)
                                 } else {
-                                    // Named arg — find matching param
-                                    let mut placed = false;
-                                    for (pi, param) in f.params.iter().enumerate() {
-                                        if param.name.eq_ignore_ascii_case(name) {
-                                            if pi < positional.len() {
-                                                positional[pi] = expanded_values
-                                                    .get(i)
-                                                    .cloned()
-                                                    .unwrap_or(CfmlValue::Null);
-                                            }
-                                            placed = true;
-                                            break;
-                                        }
+                                    CfmlValue::Null
+                                };
+                                if name.is_empty() {
+                                    if i < positional.len() {
+                                        positional[i] = value;
                                     }
-                                    if !placed {
-                                        // No matching param — append at end (will be in arguments scope by position)
-                                        positional.push(
-                                            expanded_values
-                                                .get(i)
-                                                .cloned()
-                                                .unwrap_or(CfmlValue::Null),
-                                        );
-                                    }
+                                    continue;
+                                }
+                                let target = f
+                                    .params
+                                    .iter()
+                                    .position(|p| p.name.eq_ignore_ascii_case(name));
+                                match target {
+                                    Some(pi) if pi < positional.len() => positional[pi] = value,
+                                    Some(_) => {}
+                                    None => positional.push(value),
                                 }
                             }
                             positional
@@ -2021,16 +2008,18 @@ impl CfmlVirtualMachine {
                     );
                     // Create or reuse a shared closure environment so all closures
                     // defined in this function invocation share the same mutable state.
-                    let env =
-                        closure_env.get_or_insert_with(|| Arc::new(RwLock::new(locals.clone())));
-                    // Sync current locals into the shared env so that closures defined
-                    // later see variables declared between earlier DefineFunction ops.
-                    {
-                        let mut m = env.write().unwrap();
-                        for (k, v) in &locals {
-                            m.insert(k.clone(), v.clone());
+                    // On first definition, seed directly from locals; on subsequent
+                    // definitions, sync so later closures see intervening declarations.
+                    let env = match closure_env {
+                        Some(ref env) => {
+                            let mut m = env.write().unwrap();
+                            for (k, v) in &locals {
+                                m.insert(k.clone(), v.clone());
+                            }
+                            env
                         }
-                    }
+                        None => closure_env.insert(Arc::new(RwLock::new(locals.clone()))),
+                    };
                     // Push function reference — encode func_idx in body for super dispatch
                     let bc_func_ref = &self.program.functions[func_idx];
                     stack.push(CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
@@ -2137,13 +2126,9 @@ impl CfmlVirtualMachine {
                 }
 
                 BytecodeOp::CallMethod(method_name, arg_count, write_back) => {
-                    // Pop explicit args
-                    let mut extra_args: Vec<CfmlValue> = (0..*arg_count)
-                        .filter_map(|_| stack.pop())
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect();
+                    let mut extra_args: Vec<CfmlValue> =
+                        (0..*arg_count).filter_map(|_| stack.pop()).collect();
+                    extra_args.reverse();
                     // Pop the object (receiver)
                     let object = stack.pop().unwrap_or(CfmlValue::Null);
 
