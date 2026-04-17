@@ -642,115 +642,87 @@ impl CfmlVirtualMachine {
                             }),
                         );
                         CfmlValue::Struct(info)
-                    } else if let Some(val) = locals.get(name.as_str()) {
-                        val.clone()
-                    } else {
-                        // Check __variables scope for CFC methods (like Lucee/BoxLang)
-                        let from_vars =
-                            if let Some(CfmlValue::Struct(vars)) = locals.get("__variables") {
-                                vars.get(name.as_str()).cloned().or_else(|| {
-                                    vars.iter()
-                                        .find(|(k, _)| k.eq_ignore_ascii_case(&name_lower))
-                                        .map(|(_, v)| v.clone())
+                    } else if let Some(val) =
+                        self.lookup_name_in_scopes(name.as_str(), &name_lower, &locals)
+                    {
+                        val
+                    } else if let Some(bc_func) = self
+                        .user_functions
+                        .get(name.as_str())
+                        .or_else(|| {
+                            self.user_functions
+                                .iter()
+                                .find(|(k, _)| k.eq_ignore_ascii_case(&name_lower))
+                                .map(|(_, v)| v)
+                        })
+                        .cloned()
+                    {
+                        // User-defined function referenced as a value (first-class function)
+                        // Like Lucee/BoxLang: functions are in variables scope.
+                        // Capture the current scope so the function retains access to its
+                        // defining scope's variables when stored in a struct and called later.
+                        // Filter out Function values to avoid recursive reference chains.
+                        let func_idx = self
+                            .program
+                            .functions
+                            .iter()
+                            .position(|f| f.name == bc_func.name)
+                            .unwrap_or(0);
+                        let filtered: IndexMap<String, CfmlValue> = locals
+                            .iter()
+                            .filter(|(_, v)| !matches!(v, CfmlValue::Function(_)))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        let scope = Arc::new(RwLock::new(filtered));
+                        CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
+                            name: bc_func.name.clone(),
+                            params: bc_func
+                                .params
+                                .iter()
+                                .enumerate()
+                                .map(|(i, pname)| cfml_common::dynamic::CfmlParam {
+                                    name: pname.clone(),
+                                    param_type: None,
+                                    default: None,
+                                    required: bc_func
+                                        .required_params
+                                        .get(i)
+                                        .copied()
+                                        .unwrap_or(false),
                                 })
-                            } else {
-                                None
-                            };
-                        if let Some(val) = from_vars {
-                            val
-                        } else if let Some(val) = self.globals.get(name.as_str()) {
-                            val.clone()
-                        } else if let Some(val) = locals
-                            .iter()
-                            .find(|(k, _)| k.to_lowercase() == name_lower)
-                            .map(|(_, v)| v.clone())
-                        {
-                            val
-                        } else if let Some(val) = self
-                            .globals
-                            .iter()
-                            .find(|(k, _)| k.to_lowercase() == name_lower)
-                            .map(|(_, v)| v.clone())
-                        {
-                            val
-                        } else if let Some(bc_func) = self
-                            .user_functions
-                            .get(name.as_str())
-                            .or_else(|| {
-                                self.user_functions
-                                    .iter()
-                                    .find(|(k, _)| k.to_lowercase() == name_lower)
-                                    .map(|(_, v)| v)
-                            })
-                            .cloned()
-                        {
-                            // User-defined function referenced as a value (first-class function)
-                            // Like Lucee/BoxLang: functions are in variables scope.
-                            // Capture the current scope so the function retains access to its
-                            // defining scope's variables when stored in a struct and called later.
-                            // Filter out Function values to avoid recursive reference chains.
-                            let func_idx = self
-                                .program
-                                .functions
-                                .iter()
-                                .position(|f| f.name == bc_func.name)
-                                .unwrap_or(0);
-                            let filtered: IndexMap<String, CfmlValue> = locals
-                                .iter()
-                                .filter(|(_, v)| !matches!(v, CfmlValue::Function(_)))
-                                .map(|(k, v)| (k.clone(), v.clone()))
-                                .collect();
-                            let scope = Arc::new(RwLock::new(filtered));
-                            CfmlValue::Function(cfml_common::dynamic::CfmlFunction {
-                                name: bc_func.name.clone(),
-                                params: bc_func
-                                    .params
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, pname)| cfml_common::dynamic::CfmlParam {
-                                        name: pname.clone(),
-                                        param_type: None,
-                                        default: None,
-                                        required: bc_func
-                                            .required_params
-                                            .get(i)
-                                            .copied()
-                                            .unwrap_or(false),
-                                    })
-                                    .collect(),
-                                body: cfml_common::dynamic::CfmlClosureBody::Expression(Box::new(
-                                    CfmlValue::Int(func_idx as i64),
-                                )),
-                                return_type: None,
-                                access: cfml_common::dynamic::CfmlAccess::Public,
-                                captured_scope: Some(scope),
-                            })
-                        } else {
-                            // Variable not found — check try_stack for error handler
-                            if let Some(handler) = self.try_stack.pop() {
-                                let mut exception = IndexMap::new();
-                                exception.insert(
-                                    "message".to_string(),
-                                    CfmlValue::String(format!("Variable '{}' is undefined", name)),
-                                );
-                                exception.insert(
-                                    "type".to_string(),
-                                    CfmlValue::String("expression".to_string()),
-                                );
-                                exception
-                                    .insert("detail".to_string(), CfmlValue::String(String::new()));
-                                stack.truncate(handler.stack_depth);
-                                let exc = CfmlValue::Struct(exception);
-                                self.last_exception = Some(exc.clone());
-                                locals.insert("cfcatch".to_string(), exc);
-                                ip = handler.catch_ip;
-                                continue;
-                            }
-                            return Err(self.wrap_error(CfmlError::runtime(format!(
-                                "Variable '{}' is undefined",
-                                name
-                            ))));
+                                .collect(),
+                            body: cfml_common::dynamic::CfmlClosureBody::Expression(Box::new(
+                                CfmlValue::Int(func_idx as i64),
+                            )),
+                            return_type: None,
+                            access: cfml_common::dynamic::CfmlAccess::Public,
+                            captured_scope: Some(scope),
+                        })
+                    } else {
+                        // Variable not found — check try_stack for error handler
+                        if let Some(handler) = self.try_stack.pop() {
+                            let mut exception = IndexMap::new();
+                            exception.insert(
+                                "message".to_string(),
+                                CfmlValue::String(format!("Variable '{}' is undefined", name)),
+                            );
+                            exception.insert(
+                                "type".to_string(),
+                                CfmlValue::String("expression".to_string()),
+                            );
+                            exception
+                                .insert("detail".to_string(), CfmlValue::String(String::new()));
+                            stack.truncate(handler.stack_depth);
+                            let exc = CfmlValue::Struct(exception);
+                            self.last_exception = Some(exc.clone());
+                            locals.insert("cfcatch".to_string(), exc);
+                            ip = handler.catch_ip;
+                            continue;
                         }
+                        return Err(self.wrap_error(CfmlError::runtime(format!(
+                            "Variable '{}' is undefined",
+                            name
+                        ))));
                     };
                     stack.push(val);
                 }
@@ -779,34 +751,8 @@ impl CfmlVirtualMachine {
                         }
                     } else if name_lower == "server" {
                         CfmlValue::Null // server scope handled by LoadLocal
-                    } else if let Some(val) = locals.get(name.as_str()) {
-                        val.clone()
                     } else {
-                        // Check __variables scope for CFC methods
-                        let from_vars =
-                            if let Some(CfmlValue::Struct(vars)) = locals.get("__variables") {
-                                vars.get(name.as_str()).cloned().or_else(|| {
-                                    vars.iter()
-                                        .find(|(k, _)| k.eq_ignore_ascii_case(&name_lower))
-                                        .map(|(_, v)| v.clone())
-                                })
-                            } else {
-                                None
-                            };
-                        from_vars
-                            .or_else(|| self.globals.get(name.as_str()).cloned())
-                            .or_else(|| {
-                                locals
-                                    .iter()
-                                    .find(|(k, _)| k.to_lowercase() == name_lower)
-                                    .map(|(_, v)| v.clone())
-                            })
-                            .or_else(|| {
-                                self.globals
-                                    .iter()
-                                    .find(|(k, _)| k.to_lowercase() == name_lower)
-                                    .map(|(_, v)| v.clone())
-                            })
+                        self.lookup_name_in_scopes(name.as_str(), &name_lower, &locals)
                             .unwrap_or(CfmlValue::Null)
                     };
                     stack.push(val);
@@ -6620,6 +6566,60 @@ impl CfmlVirtualMachine {
             }
         }
         if let Some(v) = self.globals.get(name) {
+            return Some(v.clone());
+        }
+        None
+    }
+
+    /// Shared identifier-lookup used by `LoadLocal` and `TryLoadLocal`.
+    ///
+    /// Walks the CFML scope chain after the caller has already handled
+    /// explicit special-scope names (variables/local/request/application/
+    /// session/cookie/server). The ordering is:
+    ///   1. `locals` direct-case
+    ///   2. `__variables` struct (direct-case, then case-insensitive)
+    ///   3. `self.globals` direct-case (covers cgi/url/form/cookie/etc.
+    ///      inserted by the host with lowercase keys)
+    ///   4. `locals` case-insensitive scan
+    ///   5. `self.globals` case-insensitive scan
+    ///
+    /// `name_lower` MUST be the lowercase form of `name`; the caller
+    /// already computes it once for special-scope dispatch so we reuse it
+    /// instead of re-allocating per scope.
+    fn lookup_name_in_scopes(
+        &self,
+        name: &str,
+        name_lower: &str,
+        locals: &IndexMap<String, CfmlValue>,
+    ) -> Option<CfmlValue> {
+        if let Some(v) = locals.get(name) {
+            return Some(v.clone());
+        }
+        if let Some(CfmlValue::Struct(vars)) = locals.get("__variables") {
+            if let Some(v) = vars.get(name) {
+                return Some(v.clone());
+            }
+            if let Some((_, v)) = vars
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name_lower))
+            {
+                return Some(v.clone());
+            }
+        }
+        if let Some(v) = self.globals.get(name) {
+            return Some(v.clone());
+        }
+        if let Some((_, v)) = locals
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name_lower))
+        {
+            return Some(v.clone());
+        }
+        if let Some((_, v)) = self
+            .globals
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name_lower))
+        {
             return Some(v.clone());
         }
         None
