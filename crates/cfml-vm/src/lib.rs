@@ -420,6 +420,26 @@ impl CfmlVirtualMachine {
         CfmlValue::Struct(err_struct)
     }
 
+    // If `last_exception` already holds a struct whose `message` matches
+    // `e.message`, reuse it (inner throw preserved detail); otherwise build a
+    // fresh error struct. Avoids cloning the whole exception just to compare
+    // a message string.
+    fn resolve_catch_error_val(&mut self, e: &CfmlError) -> CfmlValue {
+        let matched = matches!(
+            self.last_exception.as_ref(),
+            Some(CfmlValue::Struct(s))
+                if matches!(s.get("message"), Some(CfmlValue::String(msg)) if msg == &e.message)
+        );
+        if matched {
+            // last_exception already holds the right value; clone once for the stack
+            self.last_exception.as_ref().unwrap().clone()
+        } else {
+            let v = Self::build_error_struct(e, self.build_tag_context());
+            self.last_exception = Some(v.clone());
+            v
+        }
+    }
+
     fn wrap_error(&self, mut err: CfmlError) -> CfmlError {
         if err.stack_trace.is_empty() {
             err.stack_trace = self.build_stack_trace();
@@ -1371,25 +1391,7 @@ impl CfmlVirtualMachine {
                                     // (e.g. an inner throw). Build from the CfmlError
                                     // otherwise, to avoid reusing a stale exception from
                                     // a previous catch block.
-                                    let error_val = if let Some(ref exc) = self.last_exception {
-                                        if let CfmlValue::Struct(ref s) = exc {
-                                            if s.get("message").map(|v| v.as_string())
-                                                == Some(e.message.clone())
-                                            {
-                                                exc.clone()
-                                            } else {
-                                                Self::build_error_struct(
-                                                    &e,
-                                                    self.build_tag_context(),
-                                                )
-                                            }
-                                        } else {
-                                            Self::build_error_struct(&e, self.build_tag_context())
-                                        }
-                                    } else {
-                                        Self::build_error_struct(&e, self.build_tag_context())
-                                    };
-                                    self.last_exception = Some(error_val.clone());
+                                    let error_val = self.resolve_catch_error_val(&e);
                                     stack.push(error_val);
                                     ip = handler.catch_ip;
                                 } else {
@@ -1556,25 +1558,7 @@ impl CfmlVirtualMachine {
                                     while stack.len() > handler.stack_depth {
                                         stack.pop();
                                     }
-                                    let error_val = if let Some(ref exc) = self.last_exception {
-                                        if let CfmlValue::Struct(ref s) = exc {
-                                            if s.get("message").map(|v| v.as_string())
-                                                == Some(e.message.clone())
-                                            {
-                                                exc.clone()
-                                            } else {
-                                                Self::build_error_struct(
-                                                    &e,
-                                                    self.build_tag_context(),
-                                                )
-                                            }
-                                        } else {
-                                            Self::build_error_struct(&e, self.build_tag_context())
-                                        }
-                                    } else {
-                                        Self::build_error_struct(&e, self.build_tag_context())
-                                    };
-                                    self.last_exception = Some(error_val.clone());
+                                    let error_val = self.resolve_catch_error_val(&e);
                                     stack.push(error_val);
                                     ip = handler.catch_ip;
                                 } else {
@@ -2228,22 +2212,7 @@ impl CfmlVirtualMachine {
                                 while stack.len() > handler.stack_depth {
                                     stack.pop();
                                 }
-                                let error_val = if let Some(ref exc) = self.last_exception {
-                                    if let CfmlValue::Struct(ref s) = exc {
-                                        if s.get("message").map(|v| v.as_string())
-                                            == Some(e.message.clone())
-                                        {
-                                            exc.clone()
-                                        } else {
-                                            Self::build_error_struct(&e, self.build_tag_context())
-                                        }
-                                    } else {
-                                        Self::build_error_struct(&e, self.build_tag_context())
-                                    }
-                                } else {
-                                    Self::build_error_struct(&e, self.build_tag_context())
-                                };
-                                self.last_exception = Some(error_val.clone());
+                                let error_val = self.resolve_catch_error_val(&e);
                                 stack.push(error_val);
                                 ip = handler.catch_ip;
                                 continue;
