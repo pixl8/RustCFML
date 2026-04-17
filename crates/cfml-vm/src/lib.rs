@@ -188,7 +188,9 @@ pub struct CfmlVirtualMachine {
     /// Virtual filesystem for source file I/O (real disk or embedded archive)
     pub vfs: Arc<dyn Vfs>,
     /// User-defined functions (name -> function definition)
-    pub user_functions: HashMap<String, BytecodeFunction>,
+    /// Held as `Arc<BytecodeFunction>` so that cloning (very hot on every call)
+    /// is a refcount bump rather than a deep clone of the whole bytecode body.
+    pub user_functions: HashMap<String, Arc<BytecodeFunction>>,
     /// Source file path (for include resolution)
     pub source_file: Option<String>,
     /// Call stack for tracking execution
@@ -2015,7 +2017,7 @@ impl CfmlVirtualMachine {
                     let func_name = self.program.functions[func_idx].name.clone();
                     self.user_functions.insert(
                         func_name.clone(),
-                        (*self.program.functions[func_idx]).clone(),
+                        Arc::clone(&self.program.functions[func_idx]),
                     );
                     // Create or reuse a shared closure environment so all closures
                     // defined in this function invocation share the same mutable state.
@@ -2507,15 +2509,16 @@ impl CfmlVirtualMachine {
                                         }
                                     }
                                 }
-                                // Update user_functions entries — they were cloned before
-                                // the fixup and still have sub-program-relative indices.
-                                // user_functions uses original casing, so match by name directly.
+                                // Update user_functions entries — they shared the
+                                // sub-program's Arcs, which still have pre-fixup indices.
+                                // Point them at the fixed Arcs from old_program so that
+                                // subsequent calls see the corrected DefineFunction indices.
                                 for fi in base_idx..old_program.functions.len() {
-                                    let name = &old_program.functions[fi].name;
-                                    if self.user_functions.contains_key(name) {
+                                    let name = old_program.functions[fi].name.clone();
+                                    if self.user_functions.contains_key(&name) {
                                         self.user_functions.insert(
-                                            name.clone(),
-                                            (*old_program.functions[fi]).clone(),
+                                            name,
+                                            Arc::clone(&old_program.functions[fi]),
                                         );
                                     }
                                 }
@@ -2641,13 +2644,15 @@ impl CfmlVirtualMachine {
                                         }
                                     }
                                 }
-                                // Update user_functions entries with fixed bytecode
+                                // Update user_functions entries with fixed bytecode.
+                                // Share the Arc with the (now fixed) old_program entry
+                                // rather than deep-cloning.
                                 for fi in base_idx..old_program.functions.len() {
-                                    let name = &old_program.functions[fi].name;
-                                    if self.user_functions.contains_key(name) {
+                                    let name = old_program.functions[fi].name.clone();
+                                    if self.user_functions.contains_key(&name) {
                                         self.user_functions.insert(
-                                            name.clone(),
-                                            (*old_program.functions[fi]).clone(),
+                                            name,
+                                            Arc::clone(&old_program.functions[fi]),
                                         );
                                     }
                                 }
@@ -8207,10 +8212,10 @@ impl CfmlVirtualMachine {
             let base_idx = self.program.functions.len();
             for func in sub_funcs {
                 if func.name != "__main__" {
-                    self.program.functions.push(func.clone());
+                    self.program.functions.push(Arc::clone(&func));
                     if self.user_functions.contains_key(&func.name) {
                         self.user_functions
-                            .insert(func.name.clone(), (*func).clone());
+                            .insert(func.name.clone(), Arc::clone(&func));
                     }
                 }
             }
@@ -9176,9 +9181,9 @@ impl CfmlVirtualMachine {
         let base_idx = self.program.functions.len();
         for func in sub_funcs {
             if func.name != "__main__" {
-                self.program.functions.push(func.clone());
+                self.program.functions.push(Arc::clone(&func));
                 self.user_functions
-                    .insert(func.name.clone(), (*func).clone());
+                    .insert(func.name.clone(), Arc::clone(&func));
             }
         }
 
