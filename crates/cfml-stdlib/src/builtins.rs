@@ -7770,7 +7770,7 @@ fn fn_xml_parse(args: Vec<CfmlValue>) -> CfmlResult {
             Ok(Event::End(_)) => {
                 if let Some(completed) = stack.pop() {
                     if let Some(parent) = stack.last_mut() {
-                        if let Some(CfmlValue::Array(ref mut children)) = parent.get_mut("xmlChildren") {
+                        if let Some(children) = parent.get_mut("xmlChildren").and_then(|v| v.as_array_mut()) {
                             children.push(CfmlValue::Struct(completed));
                         }
                     } else {
@@ -7795,7 +7795,7 @@ fn fn_xml_parse(args: Vec<CfmlValue>) -> CfmlResult {
                 element.insert("xmlAttributes".to_string(), CfmlValue::Struct(attrs));
 
                 if let Some(parent) = stack.last_mut() {
-                    if let Some(CfmlValue::Array(ref mut children)) = parent.get_mut("xmlChildren") {
+                    if let Some(children) = parent.get_mut("xmlChildren").and_then(|v| v.as_array_mut()) {
                         children.push(CfmlValue::Struct(element));
                     }
                 } else {

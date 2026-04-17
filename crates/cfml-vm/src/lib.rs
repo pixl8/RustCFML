@@ -845,8 +845,8 @@ impl CfmlVirtualMachine {
                             && name_lower != "cfcatch"
                         {
                             // CFC method: unscoped, non-local variables go to __variables
-                            if let Some(CfmlValue::Struct(ref mut vars)) =
-                                locals.get_mut("__variables")
+                            if let Some(vars) =
+                                locals.get_mut("__variables").and_then(|v| v.as_struct_mut())
                             {
                                 vars.insert(name.clone(), val);
                             }
@@ -865,8 +865,8 @@ impl CfmlVirtualMachine {
                                         | CfmlValue::Component(_)
                                 )
                             {
-                                if let Some(CfmlValue::Struct(ref mut args)) =
-                                    locals.get_mut("arguments")
+                                if let Some(args) =
+                                    locals.get_mut("arguments").and_then(|v| v.as_struct_mut())
                                 {
                                     args.insert(name.clone(), val.clone());
                                 }
@@ -1723,8 +1723,8 @@ impl CfmlVirtualMachine {
                                         false
                                     };
                                 if is_declared {
-                                    if let Some(CfmlValue::Struct(ref mut vars)) =
-                                        s.get_mut("__variables")
+                                    if let Some(vars) =
+                                        s.get_mut("__variables").and_then(|v| v.as_struct_mut())
                                     {
                                         vars.insert(key.clone(), value.clone());
                                     }
@@ -1839,7 +1839,7 @@ impl CfmlVirtualMachine {
                             // If setting on a CFC struct with declared properties,
                             // also update __variables for properties declared via
                             // `property name="x"` so they're accessible unscoped in methods.
-                            if let CfmlValue::Struct(ref mut s) = obj {
+                            if let Some(s) = obj.as_struct_mut() {
                                 if s.contains_key("__variables") && s.contains_key("__properties") {
                                     let name_lower = name.to_lowercase();
                                     let is_declared = if let Some(CfmlValue::Array(props)) =
@@ -1860,8 +1860,8 @@ impl CfmlVirtualMachine {
                                         false
                                     };
                                     if is_declared {
-                                        if let Some(CfmlValue::Struct(ref mut vars)) =
-                                            s.get_mut("__variables")
+                                        if let Some(vars) =
+                                            s.get_mut("__variables").and_then(|v| v.as_struct_mut())
                                         {
                                             vars.insert(name.clone(), value.clone());
                                         }
@@ -1956,7 +1956,7 @@ impl CfmlVirtualMachine {
                                         };
                                         // Merge init()'s __variables mutations back into the component
                                         if let Some(vars) = vars_wb {
-                                            if let CfmlValue::Struct(ref mut s) = final_obj {
+                                            if let Some(s) = final_obj.as_struct_mut() {
                                                 s.insert(
                                                     "__variables".to_string(),
                                                     CfmlValue::Struct(vars),
@@ -2282,11 +2282,11 @@ impl CfmlVirtualMachine {
                                         comp_obj = comp_obj.get(part).unwrap_or(CfmlValue::Null);
                                     }
                                 }
-                                if let CfmlValue::Struct(ref mut s) = comp_obj {
+                                if let Some(s) = comp_obj.as_struct_mut() {
                                     let vars = s
                                         .entry("__variables".to_string())
                                         .or_insert_with(|| CfmlValue::Struct(IndexMap::new()));
-                                    if let CfmlValue::Struct(ref mut vs) = vars {
+                                    if let Some(vs) = vars.as_struct_mut() {
                                         for (k, v) in vars_wb {
                                             vs.insert(k, v);
                                         }
@@ -6182,7 +6182,7 @@ impl CfmlVirtualMachine {
 
                     // Store in cfthread scope
                     let thread_struct = self.get_or_create_cfthread_scope();
-                    if let CfmlValue::Struct(ref mut ts) = thread_struct {
+                    if let Some(ts) = thread_struct.as_struct_mut() {
                         ts.insert(thread_name.to_lowercase(), CfmlValue::Struct(thread_meta));
                     }
                     return Ok(CfmlValue::Null);
@@ -6472,7 +6472,7 @@ impl CfmlVirtualMachine {
             return;
         }
         // Recurse into the nested struct
-        if let CfmlValue::Struct(ref mut s) = root {
+        if let Some(s) = root.as_struct_mut() {
             if let Some(child) = s.get_mut(&path[0]) {
                 Self::deep_set(child, &path[1..], value);
             }
@@ -7361,7 +7361,7 @@ impl CfmlVirtualMachine {
                     let prop_name = &method[3..];
                     if let Some(value) = extra_args.first() {
                         let mut modified = object.clone();
-                        if let CfmlValue::Struct(ref mut ms) = modified {
+                        if let Some(ms) = modified.as_struct_mut() {
                             let actual_key = ms
                                 .keys()
                                 .find(|k| k.to_lowercase() == prop_name.to_lowercase())
@@ -8216,7 +8216,7 @@ impl CfmlVirtualMachine {
             // context where DefineFunction attaches a captured scope, but that scope
             // carries stale/unfixed data.  CFC method scope resolution should use
             // __variables (injected at call time), not captured scopes.
-            if let Some(CfmlValue::Struct(ref mut s)) = result {
+            if let Some(s) = result.as_mut().and_then(|v| v.as_struct_mut()) {
                 for (_, v) in s.iter_mut() {
                     if let CfmlValue::Function(ref mut f) = v {
                         f.captured_scope = None;
@@ -8224,7 +8224,7 @@ impl CfmlVirtualMachine {
                 }
             }
             // Store the CFC source path for parent resolution during inheritance
-            if let Some(CfmlValue::Struct(ref mut s)) = result {
+            if let Some(s) = result.as_mut().and_then(|v| v.as_struct_mut()) {
                 s.insert(
                     "__source_file".to_string(),
                     CfmlValue::String(cfc_path.clone()),
@@ -8233,7 +8233,7 @@ impl CfmlVirtualMachine {
             // Inject functions added by cfinclude inside the component body
             // These were registered in user_functions during execution but aren't
             // in the component struct (which was built at compile time)
-            if let Some(CfmlValue::Struct(ref mut s)) = result {
+            if let Some(s) = result.as_mut().and_then(|v| v.as_struct_mut()) {
                 let existing_keys: std::collections::HashSet<String> =
                     s.keys().map(|k| k.to_lowercase()).collect();
                 for (func_name, func_def) in &self.user_functions {
@@ -8279,7 +8279,7 @@ impl CfmlVirtualMachine {
             // Store component body variables + all methods as __variables
             // In CFML, component methods live in the variables scope so
             // unqualified calls inside methods resolve via the normal scope chain.
-            if let Some(CfmlValue::Struct(ref mut s)) = result {
+            if let Some(s) = result.as_mut().and_then(|v| v.as_struct_mut()) {
                 let mut vars_scope: IndexMap<String, CfmlValue> = IndexMap::new();
                 // Add component body variables (non-function values from pseudo-constructor)
                 // Functions from component_variables have sub-program indices that need
@@ -8667,7 +8667,7 @@ impl CfmlVirtualMachine {
             // Also update __variables when child overrides a method, so
             // unqualified calls within CFC methods resolve to the override
             if matches!(v, CfmlValue::Function(_)) && !k.starts_with("__") {
-                if let Some(CfmlValue::Struct(ref mut vars)) = parent_map.get_mut("__variables") {
+                if let Some(vars) = parent_map.get_mut("__variables").and_then(|v| v.as_struct_mut()) {
                     vars.insert(k.clone(), v.clone());
                 }
             }
@@ -9207,7 +9207,7 @@ impl CfmlVirtualMachine {
                 vars_scope.insert(k.clone(), v.clone());
             }
             if !vars_scope.is_empty() {
-                if let CfmlValue::Struct(ref mut s) = template {
+                if let Some(s) = template.as_struct_mut() {
                     s.insert("__variables".to_string(), CfmlValue::Struct(vars_scope));
                 }
             }
@@ -9419,11 +9419,11 @@ impl CfmlVirtualMachine {
 
                 // Propagate variables scope mutations back into __variables
                 if let Some(vars_wb) = self.method_variables_writeback.take() {
-                    if let CfmlValue::Struct(ref mut ts) = template {
+                    if let Some(ts) = template.as_struct_mut() {
                         let vars = ts
                             .entry("__variables".to_string())
                             .or_insert_with(|| CfmlValue::Struct(IndexMap::new()));
-                        if let CfmlValue::Struct(ref mut vs) = vars {
+                        if let Some(vs) = vars.as_struct_mut() {
                             for (k, v) in vars_wb {
                                 vs.insert(k, v);
                             }
@@ -9433,7 +9433,7 @@ impl CfmlVirtualMachine {
 
                 // Propagate this modifications back into template
                 if let Some(modified_this) = self.method_this_writeback.take() {
-                    if let CfmlValue::Struct(ref mut ts) = template {
+                    if let Some(ts) = template.as_struct_mut() {
                         if let CfmlValue::Struct(ref modified_s) = modified_this {
                             for (k, v) in modified_s {
                                 if k != "__variables" && k != "__extends" {
