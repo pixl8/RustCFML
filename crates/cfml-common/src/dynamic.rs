@@ -121,6 +121,34 @@ impl CfmlValue {
         }
     }
 
+    pub fn as_array(&self) -> Option<&Vec<CfmlValue>> {
+        match self {
+            CfmlValue::Array(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    pub fn as_struct(&self) -> Option<&IndexMap<String, CfmlValue>> {
+        match self {
+            CfmlValue::Struct(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn as_array_mut(&mut self) -> Option<&mut Vec<CfmlValue>> {
+        match self {
+            CfmlValue::Array(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    pub fn as_struct_mut(&mut self) -> Option<&mut IndexMap<String, CfmlValue>> {
+        match self {
+            CfmlValue::Struct(s) => Some(s),
+            _ => None,
+        }
+    }
+
     pub fn eq(&self, other: &CfmlValue) -> bool {
         match (self, other) {
             (CfmlValue::Null, CfmlValue::Null) => true,
