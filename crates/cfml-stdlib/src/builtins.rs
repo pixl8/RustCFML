@@ -17,6 +17,7 @@
 use cfml_common::dynamic::{CfmlAccess, CfmlClosureBody, CfmlFunction, CfmlQuery, CfmlValue};
 use cfml_common::vm::{CfmlError, CfmlResult};
 use std::collections::HashMap;
+use std::sync::Arc;
 use indexmap::IndexMap;
 use regex::Regex;
 use once_cell::sync::Lazy;
@@ -1626,10 +1627,10 @@ fn fn_array_append(args: Vec<CfmlValue>) -> CfmlResult {
     if args.len() >= 2 {
         let mut arr = match &args[0] {
             CfmlValue::Array(a) => a.clone(),
-            _ => Vec::new(),
+            _ => Arc::new(Vec::new()),
         };
-        arr.push(args[1].clone());
-        Ok(CfmlValue::array(arr))
+        Arc::make_mut(&mut arr).push(args[1].clone());
+        Ok(CfmlValue::Array(arr))
     } else {
         Ok(args.into_iter().next().unwrap_or(CfmlValue::array(Vec::new())))
     }
@@ -1639,10 +1640,10 @@ fn fn_array_prepend(args: Vec<CfmlValue>) -> CfmlResult {
     if args.len() >= 2 {
         let mut arr = match &args[0] {
             CfmlValue::Array(a) => a.clone(),
-            _ => Vec::new(),
+            _ => Arc::new(Vec::new()),
         };
-        arr.insert(0, args[1].clone());
-        Ok(CfmlValue::array(arr))
+        Arc::make_mut(&mut arr).insert(0, args[1].clone());
+        Ok(CfmlValue::Array(arr))
     } else {
         Ok(args.into_iter().next().unwrap_or(CfmlValue::array(Vec::new())))
     }
@@ -1656,10 +1657,10 @@ fn fn_array_delete_at(args: Vec<CfmlValue>) -> CfmlResult {
         };
         let idx = (get_int(&args, 1) as usize).saturating_sub(1);
         if idx < arr.len() {
-            arr.remove(idx);
-            Ok(CfmlValue::array(arr))
+            Arc::make_mut(&mut arr).remove(idx);
+            Ok(CfmlValue::Array(arr))
         } else {
-            Ok(CfmlValue::array(arr))
+            Ok(CfmlValue::Array(arr))
         }
     } else {
         Ok(CfmlValue::Bool(false))
@@ -1674,9 +1675,9 @@ fn fn_array_insert_at(args: Vec<CfmlValue>) -> CfmlResult {
         };
         let idx = (get_int(&args, 1) as usize).saturating_sub(1);
         if idx <= arr.len() {
-            arr.insert(idx, args[2].clone());
+            Arc::make_mut(&mut arr).insert(idx, args[2].clone());
         }
-        Ok(CfmlValue::array(arr))
+        Ok(CfmlValue::Array(arr))
     } else {
         Ok(CfmlValue::Bool(false))
     }
@@ -1739,21 +1740,21 @@ fn fn_array_sort(args: Vec<CfmlValue>) -> CfmlResult {
         let sort_order = if args.len() > 2 { get_str(&args, 2).to_lowercase() } else { "asc".to_string() };
         match sort_type.as_str() {
             "numeric" => {
-                result.sort_by(|a, b| {
+                Arc::make_mut(&mut result).sort_by(|a, b| {
                     let fa = a.as_string().parse::<f64>().unwrap_or(0.0);
                     let fb = b.as_string().parse::<f64>().unwrap_or(0.0);
                     fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
                 });
             }
             "textnocase" => {
-                result.sort_by(|a, b| a.as_string().to_lowercase().cmp(&b.as_string().to_lowercase()));
+                Arc::make_mut(&mut result).sort_by(|a, b| a.as_string().to_lowercase().cmp(&b.as_string().to_lowercase()));
             }
             _ => {
-                result.sort_by(|a, b| a.as_string().cmp(&b.as_string()));
+                Arc::make_mut(&mut result).sort_by(|a, b| a.as_string().cmp(&b.as_string()));
             }
         }
-        if sort_order == "desc" { result.reverse(); }
-        Ok(CfmlValue::array(result))
+        if sort_order == "desc" { Arc::make_mut(&mut result).reverse(); }
+        Ok(CfmlValue::Array(result))
     } else {
         Ok(CfmlValue::array(Vec::new()))
     }
@@ -1762,8 +1763,8 @@ fn fn_array_sort(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_array_reverse(args: Vec<CfmlValue>) -> CfmlResult {
     if let Some(CfmlValue::Array(arr)) = args.first() {
         let mut reversed = arr.clone();
-        reversed.reverse();
-        Ok(CfmlValue::array(reversed))
+        Arc::make_mut(&mut reversed).reverse();
+        Ok(CfmlValue::Array(reversed))
     } else {
         Ok(CfmlValue::array(Vec::new()))
     }
@@ -1815,16 +1816,16 @@ fn fn_array_merge(args: Vec<CfmlValue>) -> CfmlResult {
                 let mut result = a.clone();
                 for (i, item) in b.iter().enumerate() {
                     if i < result.len() {
-                        result[i] = item.clone();
+                        Arc::make_mut(&mut result)[i] = item.clone();
                     } else {
-                        result.push(item.clone());
+                        Arc::make_mut(&mut result).push(item.clone());
                     }
                 }
-                return Ok(CfmlValue::array(result));
+                return Ok(CfmlValue::Array(result));
             } else {
                 let mut result = a.clone();
-                result.extend(b.clone());
-                return Ok(CfmlValue::array(result));
+                Arc::make_mut(&mut result).extend(b.iter().cloned());
+                return Ok(CfmlValue::Array(result));
             }
         }
     }
@@ -1853,12 +1854,12 @@ fn fn_array_set(args: Vec<CfmlValue>) -> CfmlResult {
             let start = (get_int(&args, 1) as usize).saturating_sub(1);
             let end = get_int(&args, 2) as usize;
             while result.len() < end {
-                result.push(CfmlValue::Null);
+                Arc::make_mut(&mut result).push(CfmlValue::Null);
             }
             for i in start..end.min(result.len()) {
-                result[i] = args[3].clone();
+                Arc::make_mut(&mut result)[i]= args[3].clone();
             }
-            return Ok(CfmlValue::array(result));
+            return Ok(CfmlValue::Array(result));
         }
     }
     Ok(CfmlValue::Bool(false))
@@ -1871,9 +1872,9 @@ fn fn_array_swap(args: Vec<CfmlValue>) -> CfmlResult {
             let i = (get_int(&args, 1) as usize).saturating_sub(1);
             let j = (get_int(&args, 2) as usize).saturating_sub(1);
             if i < result.len() && j < result.len() {
-                result.swap(i, j);
+                Arc::make_mut(&mut result).swap(i, j);
             }
-            return Ok(CfmlValue::array(result));
+            return Ok(CfmlValue::Array(result));
         }
     }
     Ok(CfmlValue::Bool(false))
@@ -1882,7 +1883,7 @@ fn fn_array_swap(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_array_min(args: Vec<CfmlValue>) -> CfmlResult {
     if let Some(CfmlValue::Array(arr)) = args.first() {
         let mut min = f64::INFINITY;
-        for v in arr {
+        for v in arr.iter() {
             let n = get_float(&[v.clone()], 0);
             if n < min { min = n; }
         }
@@ -1895,7 +1896,7 @@ fn fn_array_min(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_array_max(args: Vec<CfmlValue>) -> CfmlResult {
     if let Some(CfmlValue::Array(arr)) = args.first() {
         let mut max = f64::NEG_INFINITY;
-        for v in arr {
+        for v in arr.iter() {
             let n = get_float(&[v.clone()], 0);
             if n > max { max = n; }
         }
@@ -1955,9 +1956,9 @@ fn fn_array_delete(args: Vec<CfmlValue>) -> CfmlResult {
             let value_str = args[1].as_string().to_lowercase();
             let mut result = arr.clone();
             if let Some(pos) = result.iter().position(|v| v.as_string().to_lowercase() == value_str) {
-                result.remove(pos);
+                Arc::make_mut(&mut result).remove(pos);
             }
-            return Ok(CfmlValue::array(result));
+            return Ok(CfmlValue::Array(result));
         }
     }
     Ok(CfmlValue::array(Vec::new()))
@@ -2066,9 +2067,9 @@ fn fn_struct_delete(args: Vec<CfmlValue>) -> CfmlResult {
             let key = args[1].as_string();
             if let Some(actual_key) = struct_find_key_ci(&result, &key) {
                 let owned_key = actual_key.to_string();
-                result.shift_remove(&owned_key);
+                Arc::make_mut(&mut result).shift_remove(&owned_key);
             }
-            return Ok(CfmlValue::strukt(result));
+            return Ok(CfmlValue::Struct(result));
         }
     }
     Ok(CfmlValue::Bool(false))
@@ -2088,11 +2089,11 @@ fn fn_struct_insert(args: Vec<CfmlValue>) -> CfmlResult {
             if let Some(actual_key) = struct_find_key_ci(&result, &key) {
                 if actual_key != key {
                     let owned_key = actual_key.to_string();
-                    result.shift_remove(&owned_key);
+                    Arc::make_mut(&mut result).shift_remove(&owned_key);
                 }
             }
-            result.insert(key, args[2].clone());
-            return Ok(CfmlValue::strukt(result));
+            Arc::make_mut(&mut result).insert(key, args[2].clone());
+            return Ok(CfmlValue::Struct(result));
         }
     }
     Ok(CfmlValue::Bool(false))
@@ -2215,7 +2216,7 @@ fn fn_struct_clear(_args: Vec<CfmlValue>) -> CfmlResult {
 
 fn fn_struct_copy(args: Vec<CfmlValue>) -> CfmlResult {
     match args.first() {
-        Some(CfmlValue::Struct(s)) => Ok(CfmlValue::strukt(s.clone())),
+        Some(CfmlValue::Struct(s)) => Ok(CfmlValue::Struct(s.clone())),
         _ => Ok(CfmlValue::strukt(IndexMap::new())),
     }
 }
@@ -2225,12 +2226,12 @@ fn fn_struct_append(args: Vec<CfmlValue>) -> CfmlResult {
         if let (CfmlValue::Struct(a), CfmlValue::Struct(b)) = (&args[0], &args[1]) {
             let overwrite = if args.len() >= 3 { args[2].is_true() } else { true };
             let mut result = a.clone();
-            for (k, v) in b {
+            for (k, v) in b.iter() {
                 if overwrite || struct_find_key_ci(&result, k).is_none() {
-                    result.insert(k.clone(), v.clone());
+                    Arc::make_mut(&mut result).insert(k.clone(), v.clone());
                 }
             }
-            return Ok(CfmlValue::strukt(result));
+            return Ok(CfmlValue::Struct(result));
         }
     }
     Ok(args.into_iter().next().unwrap_or(CfmlValue::strukt(IndexMap::new())))
@@ -2279,7 +2280,7 @@ fn fn_is_struct(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_struct_get(args: Vec<CfmlValue>) -> CfmlResult {
     let path = get_str(&args, 0);
     let parts: Vec<&str> = path.split('.').collect();
-    let mut current = CfmlValue::Struct(IndexMap::new());
+    let mut current = CfmlValue::strukt(IndexMap::new());
     for part in parts.iter().rev() {
         let mut s = IndexMap::new();
         s.insert(part.to_string(), current);
@@ -2309,7 +2310,7 @@ fn fn_struct_equals(args: Vec<CfmlValue>) -> CfmlResult {
     if args.len() >= 2 {
         if let (CfmlValue::Struct(a), CfmlValue::Struct(b)) = (&args[0], &args[1]) {
             if a.len() != b.len() { return Ok(CfmlValue::Bool(false)); }
-            for (k, v) in a {
+            for (k, v) in a.iter() {
                 match b.get(k) {
                     Some(bv) => {
                         if v.as_string() != bv.as_string() {
@@ -2338,7 +2339,7 @@ fn fn_struct_key_translate(args: Vec<CfmlValue>) -> CfmlResult {
     if let Some(CfmlValue::Struct(s)) = args.first() {
         let retain = args.get(1).map(|v| v.is_true()).unwrap_or(false);
         let mut result = IndexMap::new();
-        for (k, v) in s {
+        for (k, v) in s.iter() {
             let new_key = if retain { k.clone() } else { k.to_lowercase() };
             result.insert(new_key, v.clone());
         }
@@ -3895,7 +3896,7 @@ fn fn_query_new(args: Vec<CfmlValue>) -> CfmlResult {
     // 3rd arg: initial data as array of arrays or array of structs
     if args.len() >= 3 {
         if let CfmlValue::Array(data_rows) = &args[2] {
-            for row_data in data_rows {
+            for row_data in data_rows.iter() {
                 match row_data {
                     CfmlValue::Array(values) => {
                         // Array of arrays: each inner array maps positionally to columns
@@ -3908,7 +3909,7 @@ fn fn_query_new(args: Vec<CfmlValue>) -> CfmlResult {
                         query.rows.push(row);
                     }
                     CfmlValue::Struct(s) => {
-                        query.rows.push(s.clone());
+                        query.rows.push((**s).clone());
                     }
                     _ => {
                         // Single-column shortcut: wrap scalar in a row
@@ -3933,16 +3934,16 @@ fn fn_query_add_row(args: Vec<CfmlValue>) -> CfmlResult {
                 CfmlValue::Int(n) => *n as usize,
                 CfmlValue::Struct(data) => {
                     let mut row = IndexMap::new();
-                    for (k, v) in data {
+                    for (k, v) in data.iter() {
                         row.insert(k.clone(), v.clone());
                     }
                     result.rows.push(row);
                     return Ok(CfmlValue::Query(result));
                 }
                 CfmlValue::Array(rows) => {
-                    for item in rows {
+                    for item in rows.iter() {
                         if let CfmlValue::Struct(data) = item {
-                            result.rows.push(data.clone());
+                            result.rows.push((**data).clone());
                         } else {
                             result.rows.push(IndexMap::new());
                         }
@@ -4125,9 +4126,9 @@ fn fn_query_insert_at(args: Vec<CfmlValue>) -> CfmlResult {
             }
             let row_data = match &args[1] {
                 CfmlValue::Struct(data) => data.clone(),
-                _ => IndexMap::new(),
+                _ => Arc::new(IndexMap::new()),
             };
-            result.rows.insert(position, row_data);
+            result.rows.insert(position, (*row_data).clone());
             return Ok(CfmlValue::Query(result));
         }
     }
@@ -4200,9 +4201,9 @@ fn fn_query_set_row(args: Vec<CfmlValue>) -> CfmlResult {
             }
             let row_data = match &args[2] {
                 CfmlValue::Struct(data) => data.clone(),
-                _ => IndexMap::new(),
+                _ => Arc::new(IndexMap::new()),
             };
-            result.rows[row_idx] = row_data;
+            result.rows[row_idx] = (*row_data).clone();
             return Ok(CfmlValue::Query(result));
         }
     }
@@ -4280,21 +4281,21 @@ fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
                         extends_meta.insert("name".to_string(), first.clone());
                         meta.insert("extends".to_string(), CfmlValue::strukt(extends_meta));
                     }
-                    meta.insert("fullExtends".to_string(), CfmlValue::array(chain.clone()));
+                    meta.insert("fullExtends".to_string(), CfmlValue::Array(chain.clone()));
                 }
 
                 // Extract __metadata (custom attributes)
                 // In CFML, custom attributes appear as top-level keys in getMetadata()
                 if let Some(CfmlValue::Struct(md)) = s.get("__metadata") {
-                    for (mk, mv) in md {
+                    for (mk, mv) in md.iter() {
                         meta.insert(mk.clone(), mv.clone());
                     }
-                    meta.insert("metadata".to_string(), CfmlValue::strukt(md.clone()));
+                    meta.insert("metadata".to_string(), CfmlValue::Struct(md.clone()));
                 }
 
                 // Enumerate functions
                 let mut functions = Vec::new();
-                for (k, v) in s {
+                for (k, v) in s.iter() {
                     if k.starts_with("__") { continue; }
                     if let CfmlValue::Function(f) = v {
                         let mut func_meta = IndexMap::new();
@@ -4327,7 +4328,7 @@ fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
                         // Check for function metadata (__funcmeta_<name>)
                         let meta_key = format!("__funcmeta_{}", k);
                         if let Some(CfmlValue::Struct(fm)) = s.get(&meta_key) {
-                            func_meta.insert("metadata".to_string(), CfmlValue::strukt(fm.clone()));
+                            func_meta.insert("metadata".to_string(), CfmlValue::Struct(fm.clone()));
                         }
                         functions.push(CfmlValue::strukt(func_meta));
                     }
@@ -4336,7 +4337,7 @@ fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
 
                 // Enumerate properties (non-function, non-internal keys)
                 let mut properties = Vec::new();
-                for (k, v) in s {
+                for (k, v) in s.iter() {
                     if k.starts_with("__") { continue; }
                     if matches!(v, CfmlValue::Function(_)) { continue; }
                     let mut prop_meta = IndexMap::new();
@@ -4417,7 +4418,7 @@ fn fn_is_instance_of(args: Vec<CfmlValue>) -> CfmlResult {
 
         // Walk extends chain
         if let Some(CfmlValue::Array(chain)) = s.get("__extends_chain") {
-            for item in chain {
+            for item in chain.iter() {
                 let item_str = item.as_string();
                 if item_str.to_lowercase() == type_lower {
                     return Ok(CfmlValue::Bool(true));
@@ -4433,7 +4434,7 @@ fn fn_is_instance_of(args: Vec<CfmlValue>) -> CfmlResult {
 
         // Check direct interfaces (__implements)
         if let Some(CfmlValue::Array(ifaces)) = s.get("__implements") {
-            for item in ifaces {
+            for item in ifaces.iter() {
                 let item_str = item.as_string();
                 if item_str.to_lowercase() == type_lower {
                     return Ok(CfmlValue::Bool(true));
@@ -4448,7 +4449,7 @@ fn fn_is_instance_of(args: Vec<CfmlValue>) -> CfmlResult {
 
         // Check inherited interfaces (__implements_chain)
         if let Some(CfmlValue::Array(ifaces)) = s.get("__implements_chain") {
-            for item in ifaces {
+            for item in ifaces.iter() {
                 let item_str = item.as_string();
                 if item_str.to_lowercase() == type_lower {
                     return Ok(CfmlValue::Bool(true));
@@ -5253,7 +5254,7 @@ fn fn_list_reduce(_args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_array_pop(args: Vec<CfmlValue>) -> CfmlResult {
     if let Some(CfmlValue::Array(arr)) = args.first() {
         let mut result = arr.clone();
-        if let Some(last) = result.pop() {
+        if let Some(last) = Arc::make_mut(&mut result).pop() {
             Ok(last)
         } else {
             Err(CfmlError::runtime("Cannot pop from empty array".to_string()))
@@ -5267,7 +5268,7 @@ fn fn_array_shift(args: Vec<CfmlValue>) -> CfmlResult {
     if let Some(CfmlValue::Array(arr)) = args.first() {
         let mut result = arr.clone();
         if !result.is_empty() {
-            Ok(result.remove(0))
+            Ok(Arc::make_mut(&mut result).remove(0))
         } else {
             Err(CfmlError::runtime("Cannot shift from empty array".to_string()))
         }
@@ -5306,7 +5307,7 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
                 .unwrap_or_default();
             // Process cfhttpparam params array
             if let Some((_, CfmlValue::Array(params))) = opts.iter().find(|(k, _)| k.eq_ignore_ascii_case("params")) {
-                for param in params {
+                for param in params.iter() {
                     if let CfmlValue::Struct(p) = param {
                         let ptype = p.iter().find(|(k, _)| k.eq_ignore_ascii_case("type"))
                             .map(|(_, v)| v.as_string().to_lowercase()).unwrap_or_default();
@@ -5334,7 +5335,7 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
                 if let Some((_, CfmlValue::Array(params))) = opts.iter().find(|(k, _)| k.eq_ignore_ascii_case("params")) {
                     let mut form_parts = Vec::new();
                     let mut xml_body = None;
-                    for param in params {
+                    for param in params.iter() {
                         if let CfmlValue::Struct(p) = param {
                             let ptype = p.iter().find(|(k, _)| k.eq_ignore_ascii_case("type"))
                                 .map(|(_, v)| v.as_string().to_lowercase()).unwrap_or_default();
@@ -5798,7 +5799,7 @@ fn normalize_query_params(params_arg: &CfmlValue) -> (Vec<CfmlValue>, Vec<String
                 if has_value_key {
                     let mut values = Vec::with_capacity(arr.len());
                     let mut type_hints = Vec::with_capacity(arr.len());
-                    for item in arr {
+                    for item in arr.iter() {
                         if let CfmlValue::Struct(s) = item {
                             let value = s.iter()
                                 .find(|(k, _)| k.eq_ignore_ascii_case("value"))
@@ -5862,7 +5863,7 @@ fn normalize_query_params(params_arg: &CfmlValue) -> (Vec<CfmlValue>, Vec<String
                 }
             }
             // Plain array — pass through
-            (arr.clone(), vec!["cf_sql_varchar".to_string(); arr.len()])
+            (arr.to_vec(), vec!["cf_sql_varchar".to_string(); arr.len()])
         }
         _ => (vec![], vec![]),
     }
@@ -7868,7 +7869,7 @@ fn xml_search_descendants(node: &CfmlValue, tag_name: &str, results: &mut Vec<Cf
             }
         }
         if let Some(CfmlValue::Array(ref children)) = s.get("xmlChildren") {
-            for child in children {
+            for child in children.iter() {
                 xml_search_descendants(child, tag_name, results);
             }
         }
@@ -7890,7 +7891,7 @@ fn xml_search_path(node: &CfmlValue, parts: &[&str], depth: usize, results: &mut
                 if depth == parts.len() - 1 {
                     results.push(node.clone());
                 } else if let Some(CfmlValue::Array(ref children)) = s.get("xmlChildren") {
-                    for child in children {
+                    for child in children.iter() {
                         xml_search_path(child, parts, depth + 1, results);
                     }
                 }
@@ -8489,9 +8490,9 @@ fn fn_array_resize(args: Vec<CfmlValue>) -> CfmlResult {
             let size = get_int(&args, 1) as usize;
             let mut new_arr = arr.clone();
             while new_arr.len() < size {
-                new_arr.push(CfmlValue::String(String::new()));
+                Arc::make_mut(&mut new_arr).push(CfmlValue::String(String::new()));
             }
-            Ok(CfmlValue::array(new_arr))
+            Ok(CfmlValue::Array(new_arr))
         }
         _ => Err(CfmlError::runtime("arrayResize() requires an array".to_string())),
     }
@@ -8545,7 +8546,7 @@ fn fn_array_splice(args: Vec<CfmlValue>) -> CfmlResult {
             let mut new_arr = arr.clone();
             let end = std::cmp::min(index + delete_count, new_arr.len());
             let removed: Vec<CfmlValue> = if index < new_arr.len() {
-                new_arr.drain(index..end).collect()
+                Arc::make_mut(&mut new_arr).drain(index..end).collect()
             } else {
                 Vec::new()
             };
@@ -8553,7 +8554,7 @@ fn fn_array_splice(args: Vec<CfmlValue>) -> CfmlResult {
             if let Some(CfmlValue::Array(replacements)) = args.get(3) {
                 for (i, val) in replacements.iter().enumerate() {
                     let pos = std::cmp::min(index + i, new_arr.len());
-                    new_arr.insert(pos, val.clone());
+                    Arc::make_mut(&mut new_arr).insert(pos, val.clone());
                 }
             }
             // Return removed elements (mutating the original would require VM support)
@@ -9335,7 +9336,7 @@ fn fn_cfmail(args: Vec<CfmlValue>) -> CfmlResult {
     // Collect file attachments from params array
     let mut attachments: Vec<String> = Vec::new();
     if let Some((_, CfmlValue::Array(params))) = opts.iter().find(|(k, _)| k.eq_ignore_ascii_case("params")) {
-        for param in params {
+        for param in params.iter() {
             if let CfmlValue::Struct(p) = param {
                 if let Some(file_path) = p.iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("file"))

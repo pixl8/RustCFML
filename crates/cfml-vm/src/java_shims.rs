@@ -3,6 +3,7 @@
 use cfml_common::dynamic::CfmlValue;
 use cfml_common::vm::CfmlResult;
 use indexmap::IndexMap;
+use std::sync::Arc;
 
 pub fn handle_java_messagedigest(
     method: &str,
@@ -40,11 +41,11 @@ pub fn handle_java_messagedigest(
                     None => String::new(),
                 };
                 let mut new_shim = shim.clone();
-                new_shim.insert(
+                Arc::make_mut(&mut new_shim).insert(
                     "__data".to_string(),
                     CfmlValue::String(format!("{}{}", current, input)),
                 );
-                Ok(CfmlValue::strukt(new_shim))
+                Ok(CfmlValue::Struct(new_shim))
             } else {
                 Ok(CfmlValue::Null)
             }
@@ -70,8 +71,8 @@ pub fn handle_java_messagedigest(
         "reset" => {
             if let CfmlValue::Struct(ref shim) = object {
                 let mut new_shim = shim.clone();
-                new_shim.insert("__data".to_string(), CfmlValue::String(String::new()));
-                Ok(CfmlValue::strukt(new_shim))
+                Arc::make_mut(&mut new_shim).insert("__data".to_string(), CfmlValue::String(String::new()));
+                Ok(CfmlValue::Struct(new_shim))
             } else {
                 Ok(CfmlValue::Null)
             }
@@ -464,11 +465,11 @@ pub fn handle_java_stringbuilder(
                     .unwrap_or_default();
                 let app = args.first().map(|a| a.as_string()).unwrap_or_default();
                 let mut ns = shim.clone();
-                ns.insert(
+                Arc::make_mut(&mut ns).insert(
                     "__buffer".to_string(),
                     CfmlValue::String(format!("{}{}", cur, app)),
                 );
-                Ok(CfmlValue::strukt(ns))
+                Ok(CfmlValue::Struct(ns))
             } else {
                 Ok(CfmlValue::Null)
             }
@@ -497,8 +498,8 @@ pub fn handle_java_stringbuilder(
         "clear" => {
             if let CfmlValue::Struct(ref shim) = object {
                 let mut ns = shim.clone();
-                ns.insert("__buffer".to_string(), CfmlValue::String(String::new()));
-                Ok(CfmlValue::strukt(ns))
+                Arc::make_mut(&mut ns).insert("__buffer".to_string(), CfmlValue::String(String::new()));
+                Ok(CfmlValue::Struct(ns))
             } else {
                 Ok(CfmlValue::Null)
             }
@@ -518,7 +519,7 @@ pub fn handle_java_treemap(method: &str, args: Vec<CfmlValue>, object: &CfmlValu
             );
             shim.insert("__java_shim".to_string(), CfmlValue::Bool(true));
             if let Some(CfmlValue::Struct(init)) = args.first() {
-                for (k, v) in init {
+                for (k, v) in init.iter() {
                     shim.insert(k.clone(), v.clone());
                 }
             }
@@ -528,8 +529,8 @@ pub fn handle_java_treemap(method: &str, args: Vec<CfmlValue>, object: &CfmlValu
             if let CfmlValue::Struct(ref shim) = object {
                 if let Some((k, v)) = args.get(0).zip(args.get(1)) {
                     let mut ns = shim.clone();
-                    ns.insert(k.as_string(), v.clone());
-                    Ok(CfmlValue::strukt(ns))
+                    Arc::make_mut(&mut ns).insert(k.as_string(), v.clone());
+                    Ok(CfmlValue::Struct(ns))
                 } else {
                     Ok(object.clone())
                 }
@@ -654,8 +655,8 @@ pub fn handle_java_linkedhashmap(
             if let CfmlValue::Struct(ref shim) = object {
                 if let Some((k, v)) = args.get(0).zip(args.get(1)) {
                     let mut ns = shim.clone();
-                    ns.insert(k.as_string(), v.clone());
-                    Ok(CfmlValue::strukt(ns))
+                    Arc::make_mut(&mut ns).insert(k.as_string(), v.clone());
+                    Ok(CfmlValue::Struct(ns))
                 } else {
                     Ok(object.clone())
                 }
@@ -698,10 +699,10 @@ pub fn handle_java_concurrentlinkedqueue(
                     let mut ns = shim.clone();
                     if let Some(CfmlValue::Array(q)) = ns.get("__queue").cloned() {
                         let mut nq = q.clone();
-                        nq.push(item.clone());
-                        ns.insert("__queue".to_string(), CfmlValue::array(nq));
+                        Arc::make_mut(&mut nq).push(item.clone());
+                        Arc::make_mut(&mut ns).insert("__queue".to_string(), CfmlValue::Array(nq));
                     }
-                    Ok(CfmlValue::strukt(ns))
+                    Ok(CfmlValue::Struct(ns))
                 } else {
                     Ok(object.clone())
                 }
@@ -716,8 +717,8 @@ pub fn handle_java_concurrentlinkedqueue(
                         let mut ns = shim.clone();
                         let itm = q[0].clone();
                         let mut nq = q[1..].to_vec();
-                        ns.insert("__queue".to_string(), CfmlValue::array(nq));
-                        return Ok(CfmlValue::strukt(ns));
+                        Arc::make_mut(&mut ns).insert("__queue".to_string(), CfmlValue::array(nq));
+                        return Ok(CfmlValue::Struct(ns));
                     }
                 }
                 Ok(CfmlValue::Null)
@@ -790,8 +791,8 @@ pub fn handle_java_concurrenthashmap(
                         return Ok(object.clone());
                     }
                     let mut ns = shim.clone();
-                    ns.insert(key, v.clone());
-                    return Ok(CfmlValue::strukt(ns));
+                    Arc::make_mut(&mut ns).insert(key, v.clone());
+                    return Ok(CfmlValue::Struct(ns));
                 }
                 return Ok(object.clone());
             }
@@ -895,7 +896,7 @@ pub fn handle_java_collections(
             // Collections.list(Enumeration) → ArrayList. Our callers hand in
             // a CFML Array already, so this is an identity operation.
             match args.into_iter().next() {
-                Some(CfmlValue::Array(a)) => Ok(CfmlValue::array(a)),
+                Some(CfmlValue::Array(a)) => Ok(CfmlValue::Array(a)),
                 Some(other) => Ok(other),
                 None => Ok(CfmlValue::array(Vec::new())),
             }
@@ -915,15 +916,15 @@ pub fn handle_java_collections(
         },
         "sort" => {
             if let Some(CfmlValue::Array(mut a)) = args.into_iter().next() {
-                a.sort_by(|x, y| x.as_string().cmp(&y.as_string()));
-                return Ok(CfmlValue::array(a));
+                Arc::make_mut(&mut a).sort_by(|x, y| x.as_string().cmp(&y.as_string()));
+                return Ok(CfmlValue::Array(a));
             }
             Ok(CfmlValue::Null)
         }
         "reverse" => {
             if let Some(CfmlValue::Array(mut a)) = args.into_iter().next() {
-                a.reverse();
-                return Ok(CfmlValue::array(a));
+                Arc::make_mut(&mut a).reverse();
+                return Ok(CfmlValue::Array(a));
             }
             Ok(CfmlValue::Null)
         }
@@ -1007,11 +1008,11 @@ pub fn handle_java_paths(method: &str, args: Vec<CfmlValue>, object: &CfmlValue)
                     if let Ok(cwd) = std::env::current_dir() {
                         let full = cwd.join(path);
                         let mut ns = shim.clone();
-                        ns.insert(
+                        Arc::make_mut(&mut ns).insert(
                             "__path".to_string(),
                             CfmlValue::String(full.to_string_lossy().to_string()),
                         );
-                        return Ok(CfmlValue::strukt(ns));
+                        return Ok(CfmlValue::Struct(ns));
                     }
                 }
                 Ok(CfmlValue::Null)

@@ -5,20 +5,41 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum CfmlValue {
     Null,
     Bool(bool),
     Int(i64),
     Double(f64),
     String(String),
-    Array(Vec<CfmlValue>),
-    Struct(IndexMap<String, CfmlValue>),
+    Array(Arc<Vec<CfmlValue>>),
+    Struct(Arc<IndexMap<String, CfmlValue>>),
     Closure(Box<CfmlClosure>),
     Component(Box<CfmlComponent>),
     Function(CfmlFunction),
     Query(CfmlQuery),
     Binary(Vec<u8>),
+}
+
+/// Hand-rolled Debug elides the Arc<_> wrapper on Array/Struct so log diffs
+/// and test output remain byte-identical to the pre-Arc-flip representation.
+impl fmt::Debug for CfmlValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CfmlValue::Null => f.write_str("Null"),
+            CfmlValue::Bool(b) => f.debug_tuple("Bool").field(b).finish(),
+            CfmlValue::Int(i) => f.debug_tuple("Int").field(i).finish(),
+            CfmlValue::Double(d) => f.debug_tuple("Double").field(d).finish(),
+            CfmlValue::String(s) => f.debug_tuple("String").field(s).finish(),
+            CfmlValue::Array(a) => f.debug_tuple("Array").field(&**a).finish(),
+            CfmlValue::Struct(s) => f.debug_tuple("Struct").field(&**s).finish(),
+            CfmlValue::Closure(c) => f.debug_tuple("Closure").field(c).finish(),
+            CfmlValue::Component(c) => f.debug_tuple("Component").field(c).finish(),
+            CfmlValue::Function(fun) => f.debug_tuple("Function").field(fun).finish(),
+            CfmlValue::Query(q) => f.debug_tuple("Query").field(q).finish(),
+            CfmlValue::Binary(b) => f.debug_tuple("Binary").field(b).finish(),
+        }
+    }
 }
 
 impl CfmlValue {
@@ -108,12 +129,12 @@ impl CfmlValue {
     pub fn set(&mut self, key: String, value: CfmlValue) {
         match self {
             CfmlValue::Struct(s) => {
-                s.insert(key, value);
+                Arc::make_mut(s).insert(key, value);
             }
             CfmlValue::Array(a) => {
                 if let Ok(idx) = key.parse::<usize>() {
                     if idx < a.len() {
-                        a[idx] = value;
+                        Arc::make_mut(a)[idx] = value;
                     }
                 }
             }
@@ -121,22 +142,19 @@ impl CfmlValue {
         }
     }
 
-    /// Construct a `CfmlValue::Array` from an owned `Vec`. Single abstraction
-    /// point for construction so that a future refactor (Phase G C3c) to wrap
-    /// the inner storage in `Arc` only needs to update this body.
-    /// `#[inline]` because this is called from every Array-producing builtin
-    /// across crate boundaries and must not add a function-call on the hot path.
+    /// Construct a `CfmlValue::Array` from an owned `Vec`, wrapping in the
+    /// shared Arc layer. `#[inline]` because this is called from every
+    /// Array-producing builtin across crate boundaries.
     #[inline]
     pub fn array(v: Vec<CfmlValue>) -> Self {
-        CfmlValue::Array(v)
+        CfmlValue::Array(Arc::new(v))
     }
 
-    /// Construct a `CfmlValue::Struct` from an owned `IndexMap`. Named
-    /// `strukt` because `struct` is a Rust keyword. See `array()` for the
-    /// reason this helper exists.
+    /// Construct a `CfmlValue::Struct` from an owned `IndexMap`, wrapping in
+    /// the shared Arc layer. Named `strukt` because `struct` is a keyword.
     #[inline]
     pub fn strukt(m: IndexMap<String, CfmlValue>) -> Self {
-        CfmlValue::Struct(m)
+        CfmlValue::Struct(Arc::new(m))
     }
 
     pub fn as_array(&self) -> Option<&Vec<CfmlValue>> {
@@ -155,14 +173,14 @@ impl CfmlValue {
 
     pub fn as_array_mut(&mut self) -> Option<&mut Vec<CfmlValue>> {
         match self {
-            CfmlValue::Array(a) => Some(a),
+            CfmlValue::Array(a) => Some(Arc::make_mut(a)),
             _ => None,
         }
     }
 
     pub fn as_struct_mut(&mut self) -> Option<&mut IndexMap<String, CfmlValue>> {
         match self {
-            CfmlValue::Struct(s) => Some(s),
+            CfmlValue::Struct(s) => Some(Arc::make_mut(s)),
             _ => None,
         }
     }
