@@ -1086,16 +1086,16 @@ fn re_find_impl(args: Vec<CfmlValue>, case_insensitive: bool) -> CfmlResult {
                 }
             }
             let mut result = IndexMap::new();
-            result.insert("POS".to_string(), CfmlValue::Array(pos_arr));
-            result.insert("MATCH".to_string(), CfmlValue::Array(match_arr));
-            result.insert("LEN".to_string(), CfmlValue::Array(len_arr));
-            Ok(CfmlValue::Struct(result))
+            result.insert("POS".to_string(), CfmlValue::array(pos_arr));
+            result.insert("MATCH".to_string(), CfmlValue::array(match_arr));
+            result.insert("LEN".to_string(), CfmlValue::array(len_arr));
+            Ok(CfmlValue::strukt(result))
         } else {
             let mut result = IndexMap::new();
-            result.insert("POS".to_string(), CfmlValue::Array(vec![CfmlValue::Int(0)]));
-            result.insert("MATCH".to_string(), CfmlValue::Array(vec![CfmlValue::String(String::new())]));
-            result.insert("LEN".to_string(), CfmlValue::Array(vec![CfmlValue::Int(0)]));
-            Ok(CfmlValue::Struct(result))
+            result.insert("POS".to_string(), CfmlValue::array(vec![CfmlValue::Int(0)]));
+            result.insert("MATCH".to_string(), CfmlValue::array(vec![CfmlValue::String(String::new())]));
+            result.insert("LEN".to_string(), CfmlValue::array(vec![CfmlValue::Int(0)]));
+            Ok(CfmlValue::strukt(result))
         }
     } else {
         match re.find(search_str) {
@@ -1145,7 +1145,7 @@ fn fn_re_match_no_case(args: Vec<CfmlValue>) -> CfmlResult {
 
 fn re_match_impl(args: Vec<CfmlValue>, case_insensitive: bool) -> CfmlResult {
     if args.len() < 2 {
-        return Ok(CfmlValue::Array(Vec::new()));
+        return Ok(CfmlValue::array(Vec::new()));
     }
     // reMatch(regex, string) - regex is first arg
     let pattern = get_str(&args, 0);
@@ -1154,13 +1154,13 @@ fn re_match_impl(args: Vec<CfmlValue>, case_insensitive: bool) -> CfmlResult {
     let pat = if case_insensitive { format!("(?i){}", pattern) } else { pattern };
     let re = match Regex::new(&pat) {
         Ok(r) => r,
-        Err(_) => return Ok(CfmlValue::Array(Vec::new())),
+        Err(_) => return Ok(CfmlValue::array(Vec::new())),
     };
 
     let matches: Vec<CfmlValue> = re.find_iter(&string)
         .map(|m| CfmlValue::String(m.as_str().to_string()))
         .collect();
-    Ok(CfmlValue::Array(matches))
+    Ok(CfmlValue::array(matches))
 }
 
 fn fn_wrap(args: Vec<CfmlValue>) -> CfmlResult {
@@ -1606,7 +1606,7 @@ fn fn_cjustify(args: Vec<CfmlValue>) -> CfmlResult {
 // ===============================================
 
 fn fn_array_new(_args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(CfmlValue::Array(Vec::new()))
+    Ok(CfmlValue::array(Vec::new()))
 }
 
 fn fn_array_len(args: Vec<CfmlValue>) -> CfmlResult {
@@ -1629,9 +1629,9 @@ fn fn_array_append(args: Vec<CfmlValue>) -> CfmlResult {
             _ => Vec::new(),
         };
         arr.push(args[1].clone());
-        Ok(CfmlValue::Array(arr))
+        Ok(CfmlValue::array(arr))
     } else {
-        Ok(args.into_iter().next().unwrap_or(CfmlValue::Array(Vec::new())))
+        Ok(args.into_iter().next().unwrap_or(CfmlValue::array(Vec::new())))
     }
 }
 
@@ -1642,9 +1642,9 @@ fn fn_array_prepend(args: Vec<CfmlValue>) -> CfmlResult {
             _ => Vec::new(),
         };
         arr.insert(0, args[1].clone());
-        Ok(CfmlValue::Array(arr))
+        Ok(CfmlValue::array(arr))
     } else {
-        Ok(args.into_iter().next().unwrap_or(CfmlValue::Array(Vec::new())))
+        Ok(args.into_iter().next().unwrap_or(CfmlValue::array(Vec::new())))
     }
 }
 
@@ -1657,9 +1657,9 @@ fn fn_array_delete_at(args: Vec<CfmlValue>) -> CfmlResult {
         let idx = (get_int(&args, 1) as usize).saturating_sub(1);
         if idx < arr.len() {
             arr.remove(idx);
-            Ok(CfmlValue::Array(arr))
+            Ok(CfmlValue::array(arr))
         } else {
-            Ok(CfmlValue::Array(arr))
+            Ok(CfmlValue::array(arr))
         }
     } else {
         Ok(CfmlValue::Bool(false))
@@ -1676,7 +1676,7 @@ fn fn_array_insert_at(args: Vec<CfmlValue>) -> CfmlResult {
         if idx <= arr.len() {
             arr.insert(idx, args[2].clone());
         }
-        Ok(CfmlValue::Array(arr))
+        Ok(CfmlValue::array(arr))
     } else {
         Ok(CfmlValue::Bool(false))
     }
@@ -1753,9 +1753,9 @@ fn fn_array_sort(args: Vec<CfmlValue>) -> CfmlResult {
             }
         }
         if sort_order == "desc" { result.reverse(); }
-        Ok(CfmlValue::Array(result))
+        Ok(CfmlValue::array(result))
     } else {
-        Ok(CfmlValue::Array(Vec::new()))
+        Ok(CfmlValue::array(Vec::new()))
     }
 }
 
@@ -1763,9 +1763,9 @@ fn fn_array_reverse(args: Vec<CfmlValue>) -> CfmlResult {
     if let Some(CfmlValue::Array(arr)) = args.first() {
         let mut reversed = arr.clone();
         reversed.reverse();
-        Ok(CfmlValue::Array(reversed))
+        Ok(CfmlValue::array(reversed))
     } else {
-        Ok(CfmlValue::Array(Vec::new()))
+        Ok(CfmlValue::array(Vec::new()))
     }
 }
 
@@ -1783,7 +1783,7 @@ fn fn_array_slice(args: Vec<CfmlValue>) -> CfmlResult {
         };
 
         if start >= arr.len() {
-            return Ok(CfmlValue::Array(Vec::new()));
+            return Ok(CfmlValue::array(Vec::new()));
         }
 
         let end = match length {
@@ -1791,9 +1791,9 @@ fn fn_array_slice(args: Vec<CfmlValue>) -> CfmlResult {
             None => arr.len(),
         };
 
-        Ok(CfmlValue::Array(arr[start..end].to_vec()))
+        Ok(CfmlValue::array(arr[start..end].to_vec()))
     } else {
-        Ok(CfmlValue::Array(Vec::new()))
+        Ok(CfmlValue::array(Vec::new()))
     }
 }
 
@@ -1820,19 +1820,19 @@ fn fn_array_merge(args: Vec<CfmlValue>) -> CfmlResult {
                         result.push(item.clone());
                     }
                 }
-                return Ok(CfmlValue::Array(result));
+                return Ok(CfmlValue::array(result));
             } else {
                 let mut result = a.clone();
                 result.extend(b.clone());
-                return Ok(CfmlValue::Array(result));
+                return Ok(CfmlValue::array(result));
             }
         }
     }
-    Ok(CfmlValue::Array(Vec::new()))
+    Ok(CfmlValue::array(Vec::new()))
 }
 
 fn fn_array_clear(_args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(CfmlValue::Array(Vec::new()))
+    Ok(CfmlValue::array(Vec::new()))
 }
 
 fn fn_array_is_defined(args: Vec<CfmlValue>) -> CfmlResult {
@@ -1858,7 +1858,7 @@ fn fn_array_set(args: Vec<CfmlValue>) -> CfmlResult {
             for i in start..end.min(result.len()) {
                 result[i] = args[3].clone();
             }
-            return Ok(CfmlValue::Array(result));
+            return Ok(CfmlValue::array(result));
         }
     }
     Ok(CfmlValue::Bool(false))
@@ -1873,7 +1873,7 @@ fn fn_array_swap(args: Vec<CfmlValue>) -> CfmlResult {
             if i < result.len() && j < result.len() {
                 result.swap(i, j);
             }
-            return Ok(CfmlValue::Array(result));
+            return Ok(CfmlValue::array(result));
         }
     }
     Ok(CfmlValue::Bool(false))
@@ -1926,10 +1926,10 @@ fn fn_array_sum(args: Vec<CfmlValue>) -> CfmlResult {
 
 // Higher-order array functions (stubs - would need closure support in builtins)
 fn fn_array_map(args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(args.into_iter().next().unwrap_or(CfmlValue::Array(Vec::new())))
+    Ok(args.into_iter().next().unwrap_or(CfmlValue::array(Vec::new())))
 }
 fn fn_array_filter(args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(args.into_iter().next().unwrap_or(CfmlValue::Array(Vec::new())))
+    Ok(args.into_iter().next().unwrap_or(CfmlValue::array(Vec::new())))
 }
 fn fn_array_reduce(_args: Vec<CfmlValue>) -> CfmlResult {
     Ok(CfmlValue::Null)
@@ -1957,10 +1957,10 @@ fn fn_array_delete(args: Vec<CfmlValue>) -> CfmlResult {
             if let Some(pos) = result.iter().position(|v| v.as_string().to_lowercase() == value_str) {
                 result.remove(pos);
             }
-            return Ok(CfmlValue::Array(result));
+            return Ok(CfmlValue::array(result));
         }
     }
-    Ok(CfmlValue::Array(Vec::new()))
+    Ok(CfmlValue::array(Vec::new()))
 }
 
 fn fn_array_find_all(args: Vec<CfmlValue>) -> CfmlResult {
@@ -1971,10 +1971,10 @@ fn fn_array_find_all(args: Vec<CfmlValue>) -> CfmlResult {
                 .filter(|(_, v)| v.as_string() == value)
                 .map(|(i, _)| CfmlValue::Int((i + 1) as i64))
                 .collect();
-            return Ok(CfmlValue::Array(indices));
+            return Ok(CfmlValue::array(indices));
         }
     }
-    Ok(CfmlValue::Array(Vec::new()))
+    Ok(CfmlValue::array(Vec::new()))
 }
 
 fn fn_array_find_all_no_case(args: Vec<CfmlValue>) -> CfmlResult {
@@ -1985,10 +1985,10 @@ fn fn_array_find_all_no_case(args: Vec<CfmlValue>) -> CfmlResult {
                 .filter(|(_, v)| v.as_string().to_lowercase() == value)
                 .map(|(i, _)| CfmlValue::Int((i + 1) as i64))
                 .collect();
-            return Ok(CfmlValue::Array(indices));
+            return Ok(CfmlValue::array(indices));
         }
     }
-    Ok(CfmlValue::Array(Vec::new()))
+    Ok(CfmlValue::array(Vec::new()))
 }
 
 fn fn_array_first(args: Vec<CfmlValue>) -> CfmlResult {
@@ -2020,7 +2020,7 @@ fn fn_is_empty(args: Vec<CfmlValue>) -> CfmlResult {
 // ===============================================
 
 fn fn_struct_new(_args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(CfmlValue::Struct(IndexMap::new()))
+    Ok(CfmlValue::strukt(IndexMap::new()))
 }
 
 fn fn_struct_count(args: Vec<CfmlValue>) -> CfmlResult {
@@ -2053,9 +2053,9 @@ fn fn_struct_key_list(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_struct_key_array(args: Vec<CfmlValue>) -> CfmlResult {
     if let Some(CfmlValue::Struct(s)) = args.first() {
         let keys: Vec<CfmlValue> = s.keys().map(|k| CfmlValue::String(k.clone())).collect();
-        Ok(CfmlValue::Array(keys))
+        Ok(CfmlValue::array(keys))
     } else {
-        Ok(CfmlValue::Array(Vec::new()))
+        Ok(CfmlValue::array(Vec::new()))
     }
 }
 
@@ -2068,7 +2068,7 @@ fn fn_struct_delete(args: Vec<CfmlValue>) -> CfmlResult {
                 let owned_key = actual_key.to_string();
                 result.shift_remove(&owned_key);
             }
-            return Ok(CfmlValue::Struct(result));
+            return Ok(CfmlValue::strukt(result));
         }
     }
     Ok(CfmlValue::Bool(false))
@@ -2092,7 +2092,7 @@ fn fn_struct_insert(args: Vec<CfmlValue>) -> CfmlResult {
                 }
             }
             result.insert(key, args[2].clone());
-            return Ok(CfmlValue::Struct(result));
+            return Ok(CfmlValue::strukt(result));
         }
     }
     Ok(CfmlValue::Bool(false))
@@ -2122,10 +2122,10 @@ fn fn_struct_find_key(args: Vec<CfmlValue>) -> CfmlResult {
             let scope = if args.len() >= 3 { get_str(&args, 2).to_lowercase() } else { "one".to_string() };
             let mut results = Vec::new();
             struct_find_key_recursive(s, &key, "", &scope, &mut results);
-            return Ok(CfmlValue::Array(results));
+            return Ok(CfmlValue::array(results));
         }
     }
-    Ok(CfmlValue::Array(Vec::new()))
+    Ok(CfmlValue::array(Vec::new()))
 }
 
 fn struct_find_key_recursive(
@@ -2140,10 +2140,10 @@ fn struct_find_key_recursive(
         let current_path = if path.is_empty() { k.clone() } else { format!("{}.{}", path, k) };
         if k.to_lowercase() == search_lower {
             let mut result_struct = IndexMap::new();
-            result_struct.insert("owner".to_string(), CfmlValue::Struct(s.clone()));
+            result_struct.insert("owner".to_string(), CfmlValue::strukt(s.clone()));
             result_struct.insert("path".to_string(), CfmlValue::String(current_path.clone()));
             result_struct.insert("value".to_string(), v.clone());
-            results.push(CfmlValue::Struct(result_struct));
+            results.push(CfmlValue::strukt(result_struct));
             if scope == "one" { return; }
         }
         if let CfmlValue::Struct(nested) = v {
@@ -2169,10 +2169,10 @@ fn fn_struct_find_value(args: Vec<CfmlValue>) -> CfmlResult {
             let scope = if args.len() >= 3 { get_str(&args, 2).to_lowercase() } else { "one".to_string() };
             let mut results = Vec::new();
             struct_find_value_recursive(s, &search_value, "", &scope, &mut results);
-            return Ok(CfmlValue::Array(results));
+            return Ok(CfmlValue::array(results));
         }
     }
-    Ok(CfmlValue::Array(Vec::new()))
+    Ok(CfmlValue::array(Vec::new()))
 }
 
 fn struct_find_value_recursive(
@@ -2187,10 +2187,10 @@ fn struct_find_value_recursive(
         let current_path = if path.is_empty() { k.clone() } else { format!("{}.{}", path, k) };
         if v.as_string().to_lowercase() == search_lower {
             let mut result_struct = IndexMap::new();
-            result_struct.insert("owner".to_string(), CfmlValue::Struct(s.clone()));
+            result_struct.insert("owner".to_string(), CfmlValue::strukt(s.clone()));
             result_struct.insert("path".to_string(), CfmlValue::String(current_path.clone()));
             result_struct.insert("key".to_string(), CfmlValue::String(k.clone()));
-            results.push(CfmlValue::Struct(result_struct));
+            results.push(CfmlValue::strukt(result_struct));
             if scope == "one" { return; }
         }
         if let CfmlValue::Struct(nested) = v {
@@ -2210,13 +2210,13 @@ fn struct_find_value_recursive(
 }
 
 fn fn_struct_clear(_args: Vec<CfmlValue>) -> CfmlResult {
-    Ok(CfmlValue::Struct(IndexMap::new()))
+    Ok(CfmlValue::strukt(IndexMap::new()))
 }
 
 fn fn_struct_copy(args: Vec<CfmlValue>) -> CfmlResult {
     match args.first() {
-        Some(CfmlValue::Struct(s)) => Ok(CfmlValue::Struct(s.clone())),
-        _ => Ok(CfmlValue::Struct(IndexMap::new())),
+        Some(CfmlValue::Struct(s)) => Ok(CfmlValue::strukt(s.clone())),
+        _ => Ok(CfmlValue::strukt(IndexMap::new())),
     }
 }
 
@@ -2230,10 +2230,10 @@ fn fn_struct_append(args: Vec<CfmlValue>) -> CfmlResult {
                     result.insert(k.clone(), v.clone());
                 }
             }
-            return Ok(CfmlValue::Struct(result));
+            return Ok(CfmlValue::strukt(result));
         }
     }
-    Ok(args.into_iter().next().unwrap_or(CfmlValue::Struct(IndexMap::new())))
+    Ok(args.into_iter().next().unwrap_or(CfmlValue::strukt(IndexMap::new())))
 }
 
 fn fn_struct_is_empty(args: Vec<CfmlValue>) -> CfmlResult {
@@ -2262,9 +2262,9 @@ fn fn_struct_sort(args: Vec<CfmlValue>) -> CfmlResult {
             _ => keys.sort(),
         }
         if sort_order == "desc" { keys.reverse(); }
-        Ok(CfmlValue::Array(keys.into_iter().map(CfmlValue::String).collect()))
+        Ok(CfmlValue::array(keys.into_iter().map(CfmlValue::String).collect()))
     } else {
-        Ok(CfmlValue::Array(Vec::new()))
+        Ok(CfmlValue::array(Vec::new()))
     }
 }
 
@@ -2283,7 +2283,7 @@ fn fn_struct_get(args: Vec<CfmlValue>) -> CfmlResult {
     for part in parts.iter().rev() {
         let mut s = IndexMap::new();
         s.insert(part.to_string(), current);
-        current = CfmlValue::Struct(s);
+        current = CfmlValue::strukt(s);
     }
     let mut result = &current;
     for part in &parts {
@@ -2299,9 +2299,9 @@ fn fn_struct_get(args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_struct_value_array(args: Vec<CfmlValue>) -> CfmlResult {
     if let Some(CfmlValue::Struct(s)) = args.first() {
         let values: Vec<CfmlValue> = s.values().cloned().collect();
-        Ok(CfmlValue::Array(values))
+        Ok(CfmlValue::array(values))
     } else {
-        Ok(CfmlValue::Array(Vec::new()))
+        Ok(CfmlValue::array(Vec::new()))
     }
 }
 
@@ -2342,7 +2342,7 @@ fn fn_struct_key_translate(args: Vec<CfmlValue>) -> CfmlResult {
             let new_key = if retain { k.clone() } else { k.to_lowercase() };
             result.insert(new_key, v.clone());
         }
-        return Ok(CfmlValue::Struct(result));
+        return Ok(CfmlValue::strukt(result));
     }
     Err(CfmlError::runtime("structKeyTranslate requires a struct argument".into()))
 }
@@ -3521,7 +3521,7 @@ fn fn_get_function_list(_args: Vec<CfmlValue>) -> CfmlResult {
     for (name, _) in get_builtin_functions() {
         result.insert(name, CfmlValue::String(String::new()));
     }
-    Ok(CfmlValue::Struct(result))
+    Ok(CfmlValue::strukt(result))
 }
 
 fn fn_get_context_root(_args: Vec<CfmlValue>) -> CfmlResult {
@@ -3535,7 +3535,7 @@ fn fn_get_page_context(_args: Vec<CfmlValue>) -> CfmlResult {
     let mut ctx = IndexMap::new();
     ctx.insert("getRequest".to_string(), CfmlValue::Null);
     ctx.insert("getResponse".to_string(), CfmlValue::Null);
-    Ok(CfmlValue::Struct(ctx))
+    Ok(CfmlValue::strukt(ctx))
 }
 
 // ===============================================
@@ -3692,14 +3692,14 @@ fn fn_list_to_array(args: Vec<CfmlValue>) -> CfmlResult {
     let delimiter = get_delimiter(&args, 1);
     let include_empty = args.get(2).map(|v| v.is_true()).unwrap_or(false);
     if list.is_empty() {
-        return Ok(CfmlValue::Array(Vec::new()));
+        return Ok(CfmlValue::array(Vec::new()));
     }
     let items: Vec<CfmlValue> = if include_empty {
         cfml_list_split_keep_empty(&list, &delimiter).iter().map(|s| CfmlValue::String(s.to_string())).collect()
     } else {
         cfml_list_split(&list, &delimiter).iter().map(|s| CfmlValue::String(s.to_string())).collect()
     };
-    Ok(CfmlValue::Array(items))
+    Ok(CfmlValue::array(items))
 }
 
 fn fn_list_first(args: Vec<CfmlValue>) -> CfmlResult {
@@ -3860,14 +3860,14 @@ fn serde_json_to_cfml(value: serde_json::Value) -> CfmlValue {
         }
         serde_json::Value::String(s) => CfmlValue::String(s),
         serde_json::Value::Array(arr) => {
-            CfmlValue::Array(arr.into_iter().map(serde_json_to_cfml).collect())
+            CfmlValue::array(arr.into_iter().map(serde_json_to_cfml).collect())
         }
         serde_json::Value::Object(obj) => {
             let mut map = IndexMap::new();
             for (k, v) in obj {
                 map.insert(k, serde_json_to_cfml(v));
             }
-            CfmlValue::Struct(map)
+            CfmlValue::strukt(map)
         }
     }
 }
@@ -4007,7 +4007,7 @@ fn fn_query_get_row(args: Vec<CfmlValue>) -> CfmlResult {
         if let CfmlValue::Query(q) = &args[0] {
             let row_idx = (get_int(&args, 1) as usize).saturating_sub(1);
             if row_idx < q.rows.len() {
-                return Ok(CfmlValue::Struct(q.rows[row_idx].clone()));
+                return Ok(CfmlValue::strukt(q.rows[row_idx].clone()));
             }
             return Err(CfmlError::runtime(format!("queryGetRow: row {} is out of range (query has {} rows)", row_idx + 1, q.rows.len())));
         }
@@ -4278,9 +4278,9 @@ fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
                     if let Some(first) = chain.first() {
                         let mut extends_meta = IndexMap::new();
                         extends_meta.insert("name".to_string(), first.clone());
-                        meta.insert("extends".to_string(), CfmlValue::Struct(extends_meta));
+                        meta.insert("extends".to_string(), CfmlValue::strukt(extends_meta));
                     }
-                    meta.insert("fullExtends".to_string(), CfmlValue::Array(chain.clone()));
+                    meta.insert("fullExtends".to_string(), CfmlValue::array(chain.clone()));
                 }
 
                 // Extract __metadata (custom attributes)
@@ -4289,7 +4289,7 @@ fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
                     for (mk, mv) in md {
                         meta.insert(mk.clone(), mv.clone());
                     }
-                    meta.insert("metadata".to_string(), CfmlValue::Struct(md.clone()));
+                    meta.insert("metadata".to_string(), CfmlValue::strukt(md.clone()));
                 }
 
                 // Enumerate functions
@@ -4321,18 +4321,18 @@ fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
                             if let Some(ref d) = p.default {
                                 pm.insert("default".to_string(), d.clone());
                             }
-                            CfmlValue::Struct(pm)
+                            CfmlValue::strukt(pm)
                         }).collect();
-                        func_meta.insert("parameters".to_string(), CfmlValue::Array(params));
+                        func_meta.insert("parameters".to_string(), CfmlValue::array(params));
                         // Check for function metadata (__funcmeta_<name>)
                         let meta_key = format!("__funcmeta_{}", k);
                         if let Some(CfmlValue::Struct(fm)) = s.get(&meta_key) {
-                            func_meta.insert("metadata".to_string(), CfmlValue::Struct(fm.clone()));
+                            func_meta.insert("metadata".to_string(), CfmlValue::strukt(fm.clone()));
                         }
-                        functions.push(CfmlValue::Struct(func_meta));
+                        functions.push(CfmlValue::strukt(func_meta));
                     }
                 }
-                meta.insert("functions".to_string(), CfmlValue::Array(functions));
+                meta.insert("functions".to_string(), CfmlValue::array(functions));
 
                 // Enumerate properties (non-function, non-internal keys)
                 let mut properties = Vec::new();
@@ -4342,9 +4342,9 @@ fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
                     let mut prop_meta = IndexMap::new();
                     prop_meta.insert("name".to_string(), CfmlValue::String(k.clone()));
                     prop_meta.insert("type".to_string(), CfmlValue::String(v.type_name().to_string()));
-                    properties.push(CfmlValue::Struct(prop_meta));
+                    properties.push(CfmlValue::strukt(prop_meta));
                 }
-                meta.insert("properties".to_string(), CfmlValue::Array(properties));
+                meta.insert("properties".to_string(), CfmlValue::array(properties));
             }
             CfmlValue::Function(f) => {
                 meta.insert("name".to_string(), CfmlValue::String(f.name.clone()));
@@ -4369,16 +4369,16 @@ fn fn_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
                     if let Some(ref d) = p.default {
                         pm.insert("default".to_string(), d.clone());
                     }
-                    CfmlValue::Struct(pm)
+                    CfmlValue::strukt(pm)
                 }).collect();
-                meta.insert("parameters".to_string(), CfmlValue::Array(params));
+                meta.insert("parameters".to_string(), CfmlValue::array(params));
             }
             _ => {
                 meta.insert("type".to_string(), CfmlValue::String(val.type_name().to_string()));
             }
         }
     }
-    Ok(CfmlValue::Struct(meta))
+    Ok(CfmlValue::strukt(meta))
 }
 
 fn fn_is_instance_of(args: Vec<CfmlValue>) -> CfmlResult {
@@ -4473,7 +4473,7 @@ fn fn_create_object(args: Vec<CfmlValue>) -> CfmlResult {
         if obj_type == "component" {
             let mut s = IndexMap::new();
             s.insert("__createObject".to_string(), CfmlValue::String(args[1].as_string()));
-            return Ok(CfmlValue::Struct(s));
+            return Ok(CfmlValue::strukt(s));
         }
     }
     Ok(CfmlValue::Null)
@@ -4712,7 +4712,7 @@ fn fn_get_profile_sections(args: Vec<CfmlValue>) -> CfmlResult {
         }
     }
 
-    Ok(CfmlValue::Struct(result))
+    Ok(CfmlValue::strukt(result))
 }
 
 // FILE I/O FUNCTIONS
@@ -4867,7 +4867,7 @@ fn fn_directory_list(args: Vec<CfmlValue>) -> CfmlResult {
     }
 
     match list_dir(&path, recurse, &filter, &list_info) {
-        Ok(files) => Ok(CfmlValue::Array(files)),
+        Ok(files) => Ok(CfmlValue::array(files)),
         Err(e) => Err(CfmlError::runtime(format!("directoryList: {}", e))),
     }
 }
@@ -4909,7 +4909,7 @@ fn fn_get_file_info(args: Vec<CfmlValue>) -> CfmlResult {
         let secs = modified.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
         info.insert("lastModified".to_string(), CfmlValue::Int(secs as i64));
     }
-    Ok(CfmlValue::Struct(info))
+    Ok(CfmlValue::strukt(info))
 }
 
 fn fn_expand_path(args: Vec<CfmlValue>) -> CfmlResult {
@@ -4948,7 +4948,7 @@ fn fn_get_current_template_path(_args: Vec<CfmlValue>) -> CfmlResult {
 
 fn fn_get_component_metadata(_args: Vec<CfmlValue>) -> CfmlResult {
     // Stub — VM intercepts this call to resolve component metadata
-    Ok(CfmlValue::Struct(IndexMap::new()))
+    Ok(CfmlValue::strukt(IndexMap::new()))
 }
 
 // ===============================================
@@ -5566,7 +5566,7 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
             result_struct.insert("fileContent".to_string(), CfmlValue::String(body_text));
             result_struct.insert("mimeType".to_string(), CfmlValue::String(mime));
             result_struct.insert("charset".to_string(), CfmlValue::String(charset));
-            result_struct.insert("responseHeader".to_string(), CfmlValue::Struct(resp_headers));
+            result_struct.insert("responseHeader".to_string(), CfmlValue::strukt(resp_headers));
             result_struct.insert("errorDetail".to_string(), CfmlValue::String(String::new()));
             result_struct.insert("HTTP_Version".to_string(), CfmlValue::String(http_version));
         }
@@ -5597,7 +5597,7 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
             result_struct.insert("fileContent".to_string(), CfmlValue::String(body_text));
             result_struct.insert("mimeType".to_string(), CfmlValue::String(mime));
             result_struct.insert("charset".to_string(), CfmlValue::String(charset));
-            result_struct.insert("responseHeader".to_string(), CfmlValue::Struct(resp_headers));
+            result_struct.insert("responseHeader".to_string(), CfmlValue::strukt(resp_headers));
             result_struct.insert("errorDetail".to_string(), CfmlValue::String(String::new()));
             result_struct.insert("HTTP_Version".to_string(), CfmlValue::String(http_version));
         }
@@ -5609,7 +5609,7 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
             result_struct.insert("fileContent".to_string(), CfmlValue::String(String::new()));
             result_struct.insert("mimeType".to_string(), CfmlValue::String(String::new()));
             result_struct.insert("charset".to_string(), CfmlValue::String("UTF-8".to_string()));
-            result_struct.insert("responseHeader".to_string(), CfmlValue::Struct(IndexMap::new()));
+            result_struct.insert("responseHeader".to_string(), CfmlValue::strukt(IndexMap::new()));
             result_struct.insert("errorDetail".to_string(), CfmlValue::String(e.to_string()));
             result_struct.insert("HTTP_Version".to_string(), CfmlValue::String(String::new()));
 
@@ -5619,7 +5619,7 @@ fn fn_cfhttp(args: Vec<CfmlValue>) -> CfmlResult {
         }
     }
 
-    Ok(CfmlValue::Struct(result_struct))
+    Ok(CfmlValue::strukt(result_struct))
 }
 
 #[cfg(feature = "http")]
@@ -6023,7 +6023,7 @@ pub fn fn_query_execute(args: Vec<CfmlValue>) -> CfmlResult {
                     } else {
                         sql
                     };
-                    (expanded_sql, CfmlValue::Array(values))
+                    (expanded_sql, CfmlValue::array(values))
                 } else {
                     (sql, raw_params)
                 }
@@ -6938,9 +6938,9 @@ fn execute_postgres_with_conn(client: &mut postgres::Client, sql: &str, params_a
 fn build_query_result(columns: Vec<String>, rows: Vec<IndexMap<String, CfmlValue>>, sql: &str, return_type: &str) -> CfmlResult {
     if return_type == "array" {
         let arr: Vec<CfmlValue> = rows.into_iter()
-            .map(|r| CfmlValue::Struct(r))
+            .map(|r| CfmlValue::strukt(r))
             .collect();
-        Ok(CfmlValue::Array(arr))
+        Ok(CfmlValue::array(arr))
     } else {
         let query = CfmlQuery {
             columns,
@@ -6956,7 +6956,7 @@ fn build_mutation_result(affected: i64, last_id: i64) -> CfmlResult {
     let mut result = IndexMap::new();
     result.insert("recordCount".to_string(), CfmlValue::Int(affected));
     result.insert("generatedKey".to_string(), CfmlValue::Int(last_id));
-    Ok(CfmlValue::Struct(result))
+    Ok(CfmlValue::strukt(result))
 }
 
 // -----------------------------------------------
@@ -7755,7 +7755,7 @@ fn fn_xml_parse(args: Vec<CfmlValue>) -> CfmlResult {
                 element.insert("xmlName".to_string(), CfmlValue::String(tag_name));
                 element.insert("xmlType".to_string(), CfmlValue::String("ELEMENT".to_string()));
                 element.insert("xmlText".to_string(), CfmlValue::String(String::new()));
-                element.insert("xmlChildren".to_string(), CfmlValue::Array(Vec::new()));
+                element.insert("xmlChildren".to_string(), CfmlValue::array(Vec::new()));
 
                 let mut attrs = IndexMap::new();
                 for attr in e.attributes().flatten() {
@@ -7763,7 +7763,7 @@ fn fn_xml_parse(args: Vec<CfmlValue>) -> CfmlResult {
                     let val = String::from_utf8_lossy(&attr.value).to_string();
                     attrs.insert(key, CfmlValue::String(val));
                 }
-                element.insert("xmlAttributes".to_string(), CfmlValue::Struct(attrs));
+                element.insert("xmlAttributes".to_string(), CfmlValue::strukt(attrs));
 
                 stack.push(element);
             }
@@ -7771,7 +7771,7 @@ fn fn_xml_parse(args: Vec<CfmlValue>) -> CfmlResult {
                 if let Some(completed) = stack.pop() {
                     if let Some(parent) = stack.last_mut() {
                         if let Some(children) = parent.get_mut("xmlChildren").and_then(|v| v.as_array_mut()) {
-                            children.push(CfmlValue::Struct(completed));
+                            children.push(CfmlValue::strukt(completed));
                         }
                     } else {
                         root = Some(completed);
@@ -7784,7 +7784,7 @@ fn fn_xml_parse(args: Vec<CfmlValue>) -> CfmlResult {
                 element.insert("xmlName".to_string(), CfmlValue::String(tag_name));
                 element.insert("xmlType".to_string(), CfmlValue::String("ELEMENT".to_string()));
                 element.insert("xmlText".to_string(), CfmlValue::String(String::new()));
-                element.insert("xmlChildren".to_string(), CfmlValue::Array(Vec::new()));
+                element.insert("xmlChildren".to_string(), CfmlValue::array(Vec::new()));
 
                 let mut attrs = IndexMap::new();
                 for attr in e.attributes().flatten() {
@@ -7792,11 +7792,11 @@ fn fn_xml_parse(args: Vec<CfmlValue>) -> CfmlResult {
                     let val = String::from_utf8_lossy(&attr.value).to_string();
                     attrs.insert(key, CfmlValue::String(val));
                 }
-                element.insert("xmlAttributes".to_string(), CfmlValue::Struct(attrs));
+                element.insert("xmlAttributes".to_string(), CfmlValue::strukt(attrs));
 
                 if let Some(parent) = stack.last_mut() {
                     if let Some(children) = parent.get_mut("xmlChildren").and_then(|v| v.as_array_mut()) {
-                        children.push(CfmlValue::Struct(element));
+                        children.push(CfmlValue::strukt(element));
                     }
                 } else {
                     root = Some(element);
@@ -7823,9 +7823,9 @@ fn fn_xml_parse(args: Vec<CfmlValue>) -> CfmlResult {
     match root {
         Some(root_element) => {
             let mut doc = IndexMap::new();
-            doc.insert("xmlRoot".to_string(), CfmlValue::Struct(root_element));
+            doc.insert("xmlRoot".to_string(), CfmlValue::strukt(root_element));
             doc.insert("xmlType".to_string(), CfmlValue::String("DOCUMENT".to_string()));
-            Ok(CfmlValue::Struct(doc))
+            Ok(CfmlValue::strukt(doc))
         }
         None => Err(CfmlError::runtime("Empty or invalid XML document".to_string()))
     }
@@ -7856,7 +7856,7 @@ fn fn_xml_search(args: Vec<CfmlValue>) -> CfmlResult {
         xml_search_path(&search_root, &parts, 0, &mut results);
     }
 
-    Ok(CfmlValue::Array(results))
+    Ok(CfmlValue::array(results))
 }
 
 #[cfg(feature = "xml")]
@@ -7941,9 +7941,9 @@ fn fn_xml_new(args: Vec<CfmlValue>) -> CfmlResult {
     let mut doc_type = IndexMap::new();
     doc_type.insert("type".to_string(), CfmlValue::String(String::new()));
     doc_type.insert("name".to_string(), CfmlValue::String(String::new()));
-    doc.insert("xmlDocType".to_string(), CfmlValue::Struct(doc_type));
-    doc.insert("xmlChildren".to_string(), CfmlValue::Array(Vec::new()));
-    Ok(CfmlValue::Struct(doc))
+    doc.insert("xmlDocType".to_string(), CfmlValue::strukt(doc_type));
+    doc.insert("xmlChildren".to_string(), CfmlValue::array(Vec::new()));
+    Ok(CfmlValue::strukt(doc))
 }
 
 #[cfg(feature = "xml")]
@@ -7961,9 +7961,9 @@ fn fn_xml_elem_new(args: Vec<CfmlValue>) -> CfmlResult {
     elem.insert("xmlText".to_string(), CfmlValue::String(String::new()));
     elem.insert("xmlComment".to_string(), CfmlValue::String(String::new()));
     elem.insert("xmlCData".to_string(), CfmlValue::String(String::new()));
-    elem.insert("xmlAttributes".to_string(), CfmlValue::Struct(IndexMap::new()));
-    elem.insert("xmlChildren".to_string(), CfmlValue::Array(Vec::new()));
-    Ok(CfmlValue::Struct(elem))
+    elem.insert("xmlAttributes".to_string(), CfmlValue::strukt(IndexMap::new()));
+    elem.insert("xmlChildren".to_string(), CfmlValue::array(Vec::new()));
+    Ok(CfmlValue::strukt(elem))
 }
 
 #[cfg(feature = "xml")]
@@ -8099,7 +8099,7 @@ fn fn_html_parse(args: Vec<CfmlValue>) -> CfmlResult {
                 for (name, val) in el.attrs() {
                     attrs.insert(name.to_string(), CfmlValue::String(val.to_string()));
                 }
-                element.insert("xmlAttributes".to_string(), CfmlValue::Struct(attrs));
+                element.insert("xmlAttributes".to_string(), CfmlValue::strukt(attrs));
 
                 let mut children = Vec::new();
                 let mut text_parts = Vec::new();
@@ -8118,8 +8118,8 @@ fn fn_html_parse(args: Vec<CfmlValue>) -> CfmlResult {
                     }
                 }
                 element.insert("xmlText".to_string(), CfmlValue::String(text_parts.join("")));
-                element.insert("xmlChildren".to_string(), CfmlValue::Array(children));
-                Some(CfmlValue::Struct(element))
+                element.insert("xmlChildren".to_string(), CfmlValue::array(children));
+                Some(CfmlValue::strukt(element))
             }
             Node::Text(t) => {
                 let text = t.to_string();
@@ -8128,9 +8128,9 @@ fn fn_html_parse(args: Vec<CfmlValue>) -> CfmlResult {
                 element.insert("xmlName".to_string(), CfmlValue::String("#text".to_string()));
                 element.insert("xmlType".to_string(), CfmlValue::String("TEXT".to_string()));
                 element.insert("xmlText".to_string(), CfmlValue::String(text));
-                element.insert("xmlChildren".to_string(), CfmlValue::Array(Vec::new()));
-                element.insert("xmlAttributes".to_string(), CfmlValue::Struct(IndexMap::new()));
-                Some(CfmlValue::Struct(element))
+                element.insert("xmlChildren".to_string(), CfmlValue::array(Vec::new()));
+                element.insert("xmlAttributes".to_string(), CfmlValue::strukt(IndexMap::new()));
+                Some(CfmlValue::strukt(element))
             }
             _ => None,
         }
@@ -8150,12 +8150,12 @@ fn fn_html_parse(args: Vec<CfmlValue>) -> CfmlResult {
         root.insert("xmlName".to_string(), CfmlValue::String("html".to_string()));
         root.insert("xmlType".to_string(), CfmlValue::String("ELEMENT".to_string()));
         root.insert("xmlText".to_string(), CfmlValue::String(String::new()));
-        root.insert("xmlChildren".to_string(), CfmlValue::Array(Vec::new()));
-        root.insert("xmlAttributes".to_string(), CfmlValue::Struct(IndexMap::new()));
-        doc.insert("xmlRoot".to_string(), CfmlValue::Struct(root));
+        root.insert("xmlChildren".to_string(), CfmlValue::array(Vec::new()));
+        root.insert("xmlAttributes".to_string(), CfmlValue::strukt(IndexMap::new()));
+        doc.insert("xmlRoot".to_string(), CfmlValue::strukt(root));
     }
 
-    Ok(CfmlValue::Struct(doc))
+    Ok(CfmlValue::strukt(doc))
 }
 
 // ---- Soundex ----
@@ -8491,7 +8491,7 @@ fn fn_array_resize(args: Vec<CfmlValue>) -> CfmlResult {
             while new_arr.len() < size {
                 new_arr.push(CfmlValue::String(String::new()));
             }
-            Ok(CfmlValue::Array(new_arr))
+            Ok(CfmlValue::array(new_arr))
         }
         _ => Err(CfmlError::runtime("arrayResize() requires an array".to_string())),
     }
@@ -8529,9 +8529,9 @@ fn fn_array_mid(args: Vec<CfmlValue>) -> CfmlResult {
             let count = get_int(&args, 2) as usize;
             let end = std::cmp::min(start + count, arr.len());
             if start >= arr.len() {
-                return Ok(CfmlValue::Array(Vec::new()));
+                return Ok(CfmlValue::array(Vec::new()));
             }
-            Ok(CfmlValue::Array(arr[start..end].to_vec()))
+            Ok(CfmlValue::array(arr[start..end].to_vec()))
         }
         _ => Err(CfmlError::runtime("arrayMid() requires an array".to_string())),
     }
@@ -8557,7 +8557,7 @@ fn fn_array_splice(args: Vec<CfmlValue>) -> CfmlResult {
                 }
             }
             // Return removed elements (mutating the original would require VM support)
-            Ok(CfmlValue::Array(removed))
+            Ok(CfmlValue::array(removed))
         }
         _ => Err(CfmlError::runtime("arraySplice() requires an array".to_string())),
     }
@@ -8576,7 +8576,7 @@ fn fn_array_range(args: Vec<CfmlValue>) -> CfmlResult {
             result.push(CfmlValue::Int(i));
         }
     }
-    Ok(CfmlValue::Array(result))
+    Ok(CfmlValue::array(result))
 }
 
 fn fn_array_to_struct(args: Vec<CfmlValue>) -> CfmlResult {
@@ -8586,7 +8586,7 @@ fn fn_array_to_struct(args: Vec<CfmlValue>) -> CfmlResult {
             for (i, val) in arr.iter().enumerate() {
                 map.insert((i + 1).to_string(), val.clone());
             }
-            Ok(CfmlValue::Struct(map))
+            Ok(CfmlValue::strukt(map))
         }
         _ => Err(CfmlError::runtime("arrayToStruct() requires an array".to_string())),
     }
@@ -8625,7 +8625,7 @@ fn fn_struct_to_sorted(args: Vec<CfmlValue>) -> CfmlResult {
                     result.insert(key, val.clone());
                 }
             }
-            Ok(CfmlValue::Struct(result))
+            Ok(CfmlValue::strukt(result))
         }
         _ => Err(CfmlError::runtime("structToSorted() requires a struct".to_string())),
     }
@@ -8824,7 +8824,7 @@ fn fn_query_get_result(_args: Vec<CfmlValue>) -> CfmlResult {
     result.insert("cached".to_string(), CfmlValue::Bool(false));
     result.insert("executionTime".to_string(), CfmlValue::Int(0));
     result.insert("recordCount".to_string(), CfmlValue::Int(0));
-    Ok(CfmlValue::Struct(result))
+    Ok(CfmlValue::strukt(result))
 }
 
 fn fn_query_column_data(args: Vec<CfmlValue>) -> CfmlResult {
@@ -8844,7 +8844,7 @@ fn fn_query_column_data(args: Vec<CfmlValue>) -> CfmlResult {
                         .unwrap_or(CfmlValue::String(String::new()))
                 })
                 .collect();
-            Ok(CfmlValue::Array(values))
+            Ok(CfmlValue::array(values))
         }
         _ => Err(CfmlError::runtime("queryColumnData() requires a query".to_string())),
     }
@@ -9050,7 +9050,7 @@ fn fn_application_stop(_args: Vec<CfmlValue>) -> CfmlResult {
 fn fn_get_application_metadata(_args: Vec<CfmlValue>) -> CfmlResult {
     let mut meta = IndexMap::new();
     meta.insert("name".to_string(), CfmlValue::String(String::new()));
-    Ok(CfmlValue::Struct(meta))
+    Ok(CfmlValue::strukt(meta))
 }
 
 fn fn_trace(args: Vec<CfmlValue>) -> CfmlResult {
@@ -9142,7 +9142,7 @@ fn fn_file_open(args: Vec<CfmlValue>) -> CfmlResult {
     handle.insert("path".to_string(), CfmlValue::String(path));
     handle.insert("isOpen".to_string(), CfmlValue::Bool(true));
     handle.insert("line".to_string(), CfmlValue::Int(0));
-    Ok(CfmlValue::Struct(handle))
+    Ok(CfmlValue::strukt(handle))
 }
 
 fn fn_file_close(_args: Vec<CfmlValue>) -> CfmlResult {
@@ -9250,7 +9250,7 @@ fn fn_file_upload(args: Vec<CfmlValue>) -> CfmlResult {
     result.insert("serverDirectory".to_string(), CfmlValue::String(destination));
     result.insert("nameConflict".to_string(), CfmlValue::String(name_conflict));
     result.insert("fileWasSaved".to_string(), CfmlValue::Bool(false));
-    Ok(CfmlValue::Struct(result))
+    Ok(CfmlValue::strukt(result))
 }
 
 /// fileUploadAll(destination, accept, nameConflict)
@@ -9262,7 +9262,7 @@ fn fn_file_upload_all(args: Vec<CfmlValue>) -> CfmlResult {
     let mut result = IndexMap::new();
     result.insert("serverDirectory".to_string(), CfmlValue::String(destination));
     result.insert("fileWasSaved".to_string(), CfmlValue::Bool(false));
-    Ok(CfmlValue::Struct(result))
+    Ok(CfmlValue::strukt(result))
 }
 
 /// __cffile_upload(destination, formField, accept, nameConflict) - generated by <cffile action="upload">
@@ -9498,7 +9498,7 @@ fn fn_struct_get_metadata(args: Vec<CfmlValue>) -> CfmlResult {
     let mut meta = IndexMap::new();
     meta.insert("ordered".to_string(), CfmlValue::Bool(false));
     meta.insert("casesensitive".to_string(), CfmlValue::Bool(false));
-    Ok(CfmlValue::Struct(meta))
+    Ok(CfmlValue::strukt(meta))
 }
 
 fn fn_struct_set_metadata(_args: Vec<CfmlValue>) -> CfmlResult {
