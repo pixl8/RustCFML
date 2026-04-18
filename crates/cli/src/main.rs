@@ -331,9 +331,9 @@ fn compile_and_run(
     vm.query_execute_fn = Some(cfml_stdlib::builtins::fn_query_execute);
 
     // Ensure web scopes always exist (CFML guarantees url/cgi/form are always defined)
-    vm.globals.entry("url".to_string()).or_insert_with(|| CfmlValue::Struct(IndexMap::new()));
-    vm.globals.entry("cgi".to_string()).or_insert_with(|| CfmlValue::Struct(IndexMap::new()));
-    vm.globals.entry("form".to_string()).or_insert_with(|| CfmlValue::Struct(IndexMap::new()));
+    vm.globals.entry("url".to_string()).or_insert_with(|| CfmlValue::strukt(IndexMap::new()));
+    vm.globals.entry("cgi".to_string()).or_insert_with(|| CfmlValue::strukt(IndexMap::new()));
+    vm.globals.entry("form".to_string()).or_insert_with(|| CfmlValue::strukt(IndexMap::new()));
 
     // Inject extra globals (web scopes, etc.) — overrides defaults above in serve mode
     for (name, value) in extra_globals {
@@ -830,11 +830,11 @@ fn build_web_scopes(
     }
     cgi.insert("server_name".to_string(), CfmlValue::String(server_name));
 
-    globals.insert("cgi".to_string(), CfmlValue::Struct(cgi));
+    globals.insert("cgi".to_string(), CfmlValue::strukt(cgi));
 
     // URL scope — parsed query string
     let url_scope = parse_query_string(query_string);
-    globals.insert("url".to_string(), CfmlValue::Struct(url_scope));
+    globals.insert("url".to_string(), CfmlValue::strukt(url_scope));
 
     // Raw body as string
     let raw_body = String::from_utf8_lossy(body).to_string();
@@ -850,7 +850,7 @@ fn build_web_scopes(
     } else {
         IndexMap::new()
     };
-    globals.insert("form".to_string(), CfmlValue::Struct(form_scope));
+    globals.insert("form".to_string(), CfmlValue::strukt(form_scope));
 
     // Cookie scope — parsed from Cookie header
     let cookie_scope = {
@@ -869,7 +869,7 @@ fn build_web_scopes(
         }
         cookies
     };
-    globals.insert("cookie".to_string(), CfmlValue::Struct(cookie_scope));
+    globals.insert("cookie".to_string(), CfmlValue::strukt(cookie_scope));
 
     // Build full HTTP request data
     let mut headers_struct = IndexMap::new();
@@ -878,12 +878,12 @@ fn build_web_scopes(
     }
 
     let mut http_request_data = IndexMap::new();
-    http_request_data.insert("headers".to_string(), CfmlValue::Struct(headers_struct));
+    http_request_data.insert("headers".to_string(), CfmlValue::strukt(headers_struct));
     http_request_data.insert("content".to_string(), CfmlValue::String(raw_body));
     http_request_data.insert("method".to_string(), CfmlValue::String(method.to_string()));
     http_request_data.insert("protocol".to_string(), CfmlValue::String("HTTP/1.1".to_string()));
 
-    (globals, CfmlValue::Struct(http_request_data))
+    (globals, CfmlValue::strukt(http_request_data))
 }
 
 /// Parse a query string like "name=World&id=1" into a HashMap.
@@ -1035,7 +1035,7 @@ fn parse_multipart_sync(content_type: &str, body: &[u8]) -> IndexMap<String, Cfm
             file_info.insert("fileSize".to_string(), CfmlValue::Int(part_body.len() as i64));
             file_info.insert("fileWasSaved".to_string(), CfmlValue::Bool(true));
 
-            form.insert(field_name.to_lowercase(), CfmlValue::Struct(file_info));
+            form.insert(field_name.to_lowercase(), CfmlValue::strukt(file_info));
         } else {
             // Regular form field
             form.insert(field_name.to_lowercase(), CfmlValue::String(part_body.to_string()));
@@ -1418,7 +1418,7 @@ fn run_embedded_cli(vfs: Arc<dyn Vfs>, base_dir: &str, entry: &str, file_count: 
     }
 
     let mut extra_globals = IndexMap::new();
-    extra_globals.insert("cli".to_string(), CfmlValue::Struct(cli_scope));
+    extra_globals.insert("cli".to_string(), CfmlValue::strukt(cli_scope));
 
     // Execute
     match compile_and_run(&source, false, Some(entry_path), extra_globals, None, None, None, vfs, sandbox) {
