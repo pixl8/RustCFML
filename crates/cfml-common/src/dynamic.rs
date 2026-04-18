@@ -124,6 +124,9 @@ impl CfmlValue {
     /// Construct a `CfmlValue::Array` from an owned `Vec`. Single abstraction
     /// point for construction so that a future refactor (Phase G C3c) to wrap
     /// the inner storage in `Arc` only needs to update this body.
+    /// `#[inline]` because this is called from every Array-producing builtin
+    /// across crate boundaries and must not add a function-call on the hot path.
+    #[inline]
     pub fn array(v: Vec<CfmlValue>) -> Self {
         CfmlValue::Array(v)
     }
@@ -131,6 +134,7 @@ impl CfmlValue {
     /// Construct a `CfmlValue::Struct` from an owned `IndexMap`. Named
     /// `strukt` because `struct` is a Rust keyword. See `array()` for the
     /// reason this helper exists.
+    #[inline]
     pub fn strukt(m: IndexMap<String, CfmlValue>) -> Self {
         CfmlValue::Struct(m)
     }
