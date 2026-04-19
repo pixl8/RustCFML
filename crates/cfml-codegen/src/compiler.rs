@@ -111,6 +111,11 @@ pub enum BytecodeOp {
     /// Fuses LoadLocal + Integer + Cmp + JumpIfFalse into one dispatch.
     /// Emitted by compile_for for conditions of the shape `<identifier> <cmp> <int-const>`.
     JumpIfLocalCmpConstFalse(String, i64, CmpOp, usize),
+    /// For-loop step super-instruction: `locals[name] += step; if (locals[name] CMP const) jump target`.
+    /// Fuses Increment + LoadLocal + Integer + Cmp + JumpIfFalse-style test into one
+    /// dispatch. `step` is +1 (for `i++`) or -1 (for `i--`). The jump fires on the
+    /// TRUE arm (back to body); falling through means the loop has finished.
+    ForLoopStep(String, i64, CmpOp, i64, usize),
     Call(usize),
     Return,
 
@@ -801,6 +806,36 @@ impl CfmlCompiler {
         }
     }
 
+    /// If `increment` is a postfix/prefix `++`/`--` on a plain identifier,
+    /// returns `(name, step)` where step is +1 or -1. Used by compile_for
+    /// to detect the counted-loop shape for ForLoopStep fusion.
+    fn match_inc_dec_identifier(expr: &Expression) -> Option<(String, i64)> {
+        match expr {
+            Expression::PostfixOp(postfix) => {
+                if let Expression::Identifier(ident) = &*postfix.operand {
+                    let step = match postfix.operator {
+                        PostfixOpType::Increment => 1,
+                        PostfixOpType::Decrement => -1,
+                    };
+                    return Some((ident.name.clone(), step));
+                }
+                None
+            }
+            Expression::UnaryOp(unary) => {
+                if let Expression::Identifier(ident) = &*unary.operand {
+                    let step = match unary.operator {
+                        UnaryOpType::PrefixIncrement => 1,
+                        UnaryOpType::PrefixDecrement => -1,
+                        _ => return None,
+                    };
+                    return Some((ident.name.clone(), step));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// its result is about to be discarded, emit a single `Increment` /
     /// `Decrement` op (pure side-effect, no stack push) and return true.
     /// Saves 5 ops → 1 op per iteration on tight `i++`-style loops, which is
@@ -852,15 +887,31 @@ impl CfmlCompiler {
             self.compile_statement(init, instructions);
         }
 
-        // Loop start
+        // Counted-loop fusion: if both
+        //   - condition is  <ident> <cmp> <int-const>
+        //   - increment is  i++ / i-- / ++i / --i on the same identifier
+        // then emit the specialized do-while-ish shape with ForLoopStep at
+        // the bottom, dropping per-iter overhead from 3 ops (Increment,
+        // JumpIfLocalCmpConstFalse, Jump) to 1 op (ForLoopStep).
+        if let Some(condition) = &for_stmt.condition {
+            if let (Some((cond_name, c, cmp)), Some(increment)) =
+                (Self::match_local_cmp_const(condition), for_stmt.increment.as_deref())
+            {
+                if let Some((inc_name, step)) = Self::match_inc_dec_identifier(increment) {
+                    if cond_name == inc_name {
+                        self.compile_for_counted(
+                            &cond_name, c, cmp, step, &for_stmt.body, instructions,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Fallback: the generic peephole'd shape.
         let loop_start = instructions.len();
 
-        // Condition
         if let Some(condition) = &for_stmt.condition {
-            // Peephole: condition of shape `<ident> <cmp> <int-const>` compiles
-            // to LoadLocal + Integer + Cmp + JumpIfFalse (4 ops per iter).
-            // Fuse into one JumpIfLocalCmpConstFalse. For any other shape,
-            // fall back to the normal compile_expression path.
             let jump_false_idx = if let Some((name, c, cmp)) =
                 Self::match_local_cmp_const(condition)
             {
@@ -870,22 +921,18 @@ impl CfmlCompiler {
             } else {
                 self.compile_expression(condition, instructions);
                 let idx = instructions.len();
-                instructions.push(BytecodeOp::JumpIfFalse(0)); // placeholder
+                instructions.push(BytecodeOp::JumpIfFalse(0));
                 idx
             };
 
-            // Push loop context for break/continue
             self.loop_stack.push((Vec::new(), Vec::new()));
 
-            // Body
             for s in &for_stmt.body {
                 self.compile_statement(s, instructions);
             }
 
-            // Continue target
             let continue_target = instructions.len();
 
-            // Increment
             if let Some(increment) = &for_stmt.increment {
                 if !self.try_emit_inc_dec_statement(increment, instructions) {
                     self.compile_expression(increment, instructions);
@@ -893,11 +940,8 @@ impl CfmlCompiler {
                 }
             }
 
-            // Jump back to condition
             instructions.push(BytecodeOp::Jump(loop_start));
 
-            // End of loop — patch the exit jump. Preserve whichever op was
-            // emitted above (JumpIfFalse or the fused JumpIfLocalCmpConstFalse).
             let loop_end = instructions.len();
             match &mut instructions[jump_false_idx] {
                 BytecodeOp::JumpIfFalse(off) => *off = loop_end,
@@ -905,7 +949,6 @@ impl CfmlCompiler {
                 _ => unreachable!("compile_for exit jump slot has unexpected op"),
             }
 
-            // Patch break/continue
             let (break_indices, continue_indices) = self.loop_stack.pop().unwrap();
             for idx in break_indices {
                 instructions[idx] = BytecodeOp::Jump(loop_end);
@@ -913,6 +956,56 @@ impl CfmlCompiler {
             for idx in continue_indices {
                 instructions[idx] = BytecodeOp::Jump(continue_target);
             }
+        }
+    }
+
+    /// Emit the counted-for-loop shape using ForLoopStep.
+    /// The variable `name` must match between condition and increment.
+    fn compile_for_counted(
+        &mut self,
+        name: &str,
+        limit: i64,
+        cmp: CmpOp,
+        step: i64,
+        body: &[Statement],
+        instructions: &mut Vec<BytecodeOp>,
+    ) {
+        // Initial check: if the condition is already false at entry, skip
+        // the loop entirely. Emits one op; the target is patched to loop_end.
+        let entry_check_idx = instructions.len();
+        instructions.push(BytecodeOp::JumpIfLocalCmpConstFalse(
+            name.to_string(), limit, cmp, 0,
+        ));
+
+        let body_start = instructions.len();
+
+        self.loop_stack.push((Vec::new(), Vec::new()));
+
+        for s in body {
+            self.compile_statement(s, instructions);
+        }
+
+        // continue target = the step — continue runs the step, then re-tests.
+        let continue_target = instructions.len();
+        instructions.push(BytecodeOp::ForLoopStep(
+            name.to_string(), limit, cmp, step, body_start,
+        ));
+
+        let loop_end = instructions.len();
+
+        // Patch the entry-check to exit to loop_end if condition initially false.
+        if let BytecodeOp::JumpIfLocalCmpConstFalse(_, _, _, off) =
+            &mut instructions[entry_check_idx]
+        {
+            *off = loop_end;
+        }
+
+        let (break_indices, continue_indices) = self.loop_stack.pop().unwrap();
+        for idx in break_indices {
+            instructions[idx] = BytecodeOp::Jump(loop_end);
+        }
+        for idx in continue_indices {
+            instructions[idx] = BytecodeOp::Jump(continue_target);
         }
     }
 

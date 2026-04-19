@@ -1327,6 +1327,61 @@ impl CfmlVirtualMachine {
                         ip = *target;
                     }
                 }
+                BytecodeOp::ForLoopStep(name, limit, cmp, step, target) => {
+                    // Fused loop-step super-instruction emitted at the bottom
+                    // of counted for-loops. Equivalent to:
+                    //   Increment(name)   // or Decrement if step is -1
+                    //   JumpIfLocalCmpConstTrue(name, limit, cmp, target)
+                    // but one dispatch instead of two.
+                    let new_val = match locals.get(name.as_str()) {
+                        Some(CfmlValue::Int(i)) => CfmlValue::Int(*i + *step),
+                        Some(CfmlValue::Double(d)) => CfmlValue::Double(*d + (*step as f64)),
+                        _ => {
+                            // Loop var changed type mid-loop (user mutated it).
+                            // Fall back to a safe step of 0 so we don't silently
+                            // coerce; loop will likely exit on the next cmp.
+                            CfmlValue::Int(*step)
+                        }
+                    };
+                    locals.insert(name.clone(), new_val.clone());
+                    if let Some(ref env) = closure_env {
+                        let mut m = env.write().unwrap();
+                        if m.contains_key(name.as_str()) {
+                            m.insert(name.clone(), new_val.clone());
+                        }
+                    }
+                    // Test and jump-back.
+                    let matched = match &new_val {
+                        CfmlValue::Int(i) => {
+                            let c = *limit;
+                            let i = *i;
+                            match cmp {
+                                CmpOp::Lt => i < c,
+                                CmpOp::Lte => i <= c,
+                                CmpOp::Gt => i > c,
+                                CmpOp::Gte => i >= c,
+                                CmpOp::Eq => i == c,
+                                CmpOp::Neq => i != c,
+                            }
+                        }
+                        CfmlValue::Double(d) => {
+                            let c = *limit as f64;
+                            let d = *d;
+                            match cmp {
+                                CmpOp::Lt => d < c,
+                                CmpOp::Lte => d <= c,
+                                CmpOp::Gt => d > c,
+                                CmpOp::Gte => d >= c,
+                                CmpOp::Eq => d == c,
+                                CmpOp::Neq => d != c,
+                            }
+                        }
+                        _ => false,
+                    };
+                    if matched {
+                        ip = *target;
+                    }
+                }
                 BytecodeOp::JumpIfTrue(target) => {
                     if let Some(cond) = stack.pop() {
                         if cond.is_true() {
@@ -10030,6 +10085,7 @@ fn stack_effect(op: &BytecodeOp) -> (usize, usize) {
         BytecodeOp::Jump(_) => (0, 0),
         BytecodeOp::JumpIfFalse(_) | BytecodeOp::JumpIfTrue(_) => (0, 1),
         BytecodeOp::JumpIfLocalCmpConstFalse(_, _, _, _) => (0, 0),
+        BytecodeOp::ForLoopStep(_, _, _, _, _) => (0, 0),
         BytecodeOp::Return => (0, 1),
         // Call: pops func + N args, pushes 1 result
         BytecodeOp::Call(n) => (1, n + 1),
