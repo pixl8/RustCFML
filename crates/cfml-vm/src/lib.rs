@@ -1,6 +1,6 @@
 //! CFML Virtual Machine - Bytecode execution engine
 
-use cfml_codegen::{BytecodeFunction, BytecodeOp, BytecodeProgram};
+use cfml_codegen::{BytecodeFunction, BytecodeOp, BytecodeProgram, CmpOp};
 use cfml_common::dynamic::CfmlValue;
 use cfml_common::vfs::{RealFs, Vfs};
 use cfml_common::vm::{CfmlError, CfmlErrorType, CfmlResult};
@@ -1276,6 +1276,55 @@ impl CfmlVirtualMachine {
                         if !cond.is_true() {
                             ip = *target;
                         }
+                    }
+                }
+                BytecodeOp::JumpIfLocalCmpConstFalse(name, c, cmp, target) => {
+                    // Fused loop-condition super-instruction. Equivalent to
+                    // LoadLocal(name) + Integer(c) + <cmp> + JumpIfFalse(target)
+                    // but avoids 3 dispatches per iteration.
+                    let matched = match locals.get(name.as_str()) {
+                        Some(CfmlValue::Int(i)) => {
+                            let c = *c;
+                            let i = *i;
+                            match cmp {
+                                CmpOp::Lt => i < c,
+                                CmpOp::Lte => i <= c,
+                                CmpOp::Gt => i > c,
+                                CmpOp::Gte => i >= c,
+                                CmpOp::Eq => i == c,
+                                CmpOp::Neq => i != c,
+                            }
+                        }
+                        Some(CfmlValue::Double(d)) => {
+                            let c = *c as f64;
+                            let d = *d;
+                            match cmp {
+                                CmpOp::Lt => d < c,
+                                CmpOp::Lte => d <= c,
+                                CmpOp::Gt => d > c,
+                                CmpOp::Gte => d >= c,
+                                CmpOp::Eq => d == c,
+                                CmpOp::Neq => d != c,
+                            }
+                        }
+                        // Any other type (including missing): fall back to the
+                        // full CFML comparison semantics. Keeps correctness
+                        // for unusual cases (string loop var, null, etc.).
+                        other => {
+                            let left = other.cloned().unwrap_or(CfmlValue::Null);
+                            let right = CfmlValue::Int(*c);
+                            match cmp {
+                                CmpOp::Lt => cfml_compare(&left, &right) < 0,
+                                CmpOp::Lte => cfml_compare(&left, &right) <= 0,
+                                CmpOp::Gt => cfml_compare(&left, &right) > 0,
+                                CmpOp::Gte => cfml_compare(&left, &right) >= 0,
+                                CmpOp::Eq => cfml_equal(&left, &right),
+                                CmpOp::Neq => !cfml_equal(&left, &right),
+                            }
+                        }
+                    };
+                    if !matched {
+                        ip = *target;
                     }
                 }
                 BytecodeOp::JumpIfTrue(target) => {
@@ -9980,6 +10029,7 @@ fn stack_effect(op: &BytecodeOp) -> (usize, usize) {
         // Control flow
         BytecodeOp::Jump(_) => (0, 0),
         BytecodeOp::JumpIfFalse(_) | BytecodeOp::JumpIfTrue(_) => (0, 1),
+        BytecodeOp::JumpIfLocalCmpConstFalse(_, _, _, _) => (0, 0),
         BytecodeOp::Return => (0, 1),
         // Call: pops func + N args, pushes 1 result
         BytecodeOp::Call(n) => (1, n + 1),

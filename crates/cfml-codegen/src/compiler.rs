@@ -40,6 +40,17 @@ pub struct BytecodeFunction {
     pub source_file: Option<String>,
 }
 
+/// Comparison operator tag for fused-compare super-instructions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpOp {
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    Eq,
+    Neq,
+}
+
 #[derive(Debug, Clone)]
 pub enum BytecodeOp {
     // Literals
@@ -96,6 +107,10 @@ pub enum BytecodeOp {
     Jump(usize),
     JumpIfFalse(usize),
     JumpIfTrue(usize),
+    /// Loop-condition super-instruction: `if !(locals[name] CMP const) { jump offset }`.
+    /// Fuses LoadLocal + Integer + Cmp + JumpIfFalse into one dispatch.
+    /// Emitted by compile_for for conditions of the shape `<identifier> <cmp> <int-const>`.
+    JumpIfLocalCmpConstFalse(String, i64, CmpOp, usize),
     Call(usize),
     Return,
 
@@ -734,6 +749,58 @@ impl CfmlCompiler {
     }
 
     /// Peephole: if `expr` is a postfix/prefix inc/dec of a plain identifier and
+    /// If `expr` is `<identifier> <cmp> <int-literal>` (either side), returns
+    /// `(name, const, op)` with `op` oriented so that truthiness means
+    /// "identifier CMP const" — i.e. the condition is true when the
+    /// comparison evaluates that way. Used by `compile_for` to fuse the loop
+    /// condition into `JumpIfLocalCmpConstFalse`.
+    fn match_local_cmp_const(expr: &Expression) -> Option<(String, i64, CmpOp)> {
+        let bin = match expr {
+            Expression::BinaryOp(b) => b,
+            _ => return None,
+        };
+        let cmp = match bin.operator {
+            BinaryOpType::Less => CmpOp::Lt,
+            BinaryOpType::LessEqual => CmpOp::Lte,
+            BinaryOpType::Greater => CmpOp::Gt,
+            BinaryOpType::GreaterEqual => CmpOp::Gte,
+            BinaryOpType::Equal => CmpOp::Eq,
+            BinaryOpType::NotEqual => CmpOp::Neq,
+            _ => return None,
+        };
+        let int_lit = |e: &Expression| -> Option<i64> {
+            if let Expression::Literal(lit) = e {
+                if let LiteralValue::Int(n) = &lit.value {
+                    return Some(*n);
+                }
+            }
+            None
+        };
+        let ident_name = |e: &Expression| -> Option<String> {
+            if let Expression::Identifier(id) = e {
+                Some(id.name.clone())
+            } else {
+                None
+            }
+        };
+        if let (Some(name), Some(c)) = (ident_name(&bin.left), int_lit(&bin.right)) {
+            Some((name, c, cmp))
+        } else if let (Some(c), Some(name)) = (int_lit(&bin.left), ident_name(&bin.right)) {
+            // `CONST <cmp> ident` — flip the op so the semantics stay right.
+            let flipped = match cmp {
+                CmpOp::Lt => CmpOp::Gt,
+                CmpOp::Lte => CmpOp::Gte,
+                CmpOp::Gt => CmpOp::Lt,
+                CmpOp::Gte => CmpOp::Lte,
+                CmpOp::Eq => CmpOp::Eq,
+                CmpOp::Neq => CmpOp::Neq,
+            };
+            Some((name, c, flipped))
+        } else {
+            None
+        }
+    }
+
     /// its result is about to be discarded, emit a single `Increment` /
     /// `Decrement` op (pure side-effect, no stack push) and return true.
     /// Saves 5 ops → 1 op per iteration on tight `i++`-style loops, which is
@@ -790,9 +857,22 @@ impl CfmlCompiler {
 
         // Condition
         if let Some(condition) = &for_stmt.condition {
-            self.compile_expression(condition, instructions);
-            let jump_false_idx = instructions.len();
-            instructions.push(BytecodeOp::JumpIfFalse(0)); // placeholder
+            // Peephole: condition of shape `<ident> <cmp> <int-const>` compiles
+            // to LoadLocal + Integer + Cmp + JumpIfFalse (4 ops per iter).
+            // Fuse into one JumpIfLocalCmpConstFalse. For any other shape,
+            // fall back to the normal compile_expression path.
+            let jump_false_idx = if let Some((name, c, cmp)) =
+                Self::match_local_cmp_const(condition)
+            {
+                let idx = instructions.len();
+                instructions.push(BytecodeOp::JumpIfLocalCmpConstFalse(name, c, cmp, 0));
+                idx
+            } else {
+                self.compile_expression(condition, instructions);
+                let idx = instructions.len();
+                instructions.push(BytecodeOp::JumpIfFalse(0)); // placeholder
+                idx
+            };
 
             // Push loop context for break/continue
             self.loop_stack.push((Vec::new(), Vec::new()));
@@ -816,9 +896,14 @@ impl CfmlCompiler {
             // Jump back to condition
             instructions.push(BytecodeOp::Jump(loop_start));
 
-            // End of loop
+            // End of loop — patch the exit jump. Preserve whichever op was
+            // emitted above (JumpIfFalse or the fused JumpIfLocalCmpConstFalse).
             let loop_end = instructions.len();
-            instructions[jump_false_idx] = BytecodeOp::JumpIfFalse(loop_end);
+            match &mut instructions[jump_false_idx] {
+                BytecodeOp::JumpIfFalse(off) => *off = loop_end,
+                BytecodeOp::JumpIfLocalCmpConstFalse(_, _, _, off) => *off = loop_end,
+                _ => unreachable!("compile_for exit jump slot has unexpected op"),
+            }
 
             // Patch break/continue
             let (break_indices, continue_indices) = self.loop_stack.pop().unwrap();

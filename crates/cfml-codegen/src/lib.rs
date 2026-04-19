@@ -2,4 +2,4 @@
 
 pub mod compiler;
 
-pub use compiler::{BytecodeFunction, BytecodeOp, BytecodeProgram, CfmlCompiler};
+pub use compiler::{BytecodeFunction, BytecodeOp, BytecodeProgram, CfmlCompiler, CmpOp};
