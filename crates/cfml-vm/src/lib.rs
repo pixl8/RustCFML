@@ -478,27 +478,34 @@ impl CfmlVirtualMachine {
                 })
                 .cloned()
                 .unwrap_or(CfmlValue::Null),
-            CfmlValue::Array(arr) => match name.to_lowercase().as_str() {
-                "len" | "length" => CfmlValue::Int(arr.len() as i64),
-                _ => CfmlValue::Null,
-            },
-            CfmlValue::String(s) => match name.to_lowercase().as_str() {
-                "len" | "length" => CfmlValue::Int(s.len() as i64),
-                _ => CfmlValue::Null,
-            },
-            CfmlValue::Query(q) => match name.to_lowercase().as_str() {
-                "recordcount" => CfmlValue::Int(q.rows.len() as i64),
-                "columnlist" => CfmlValue::String(q.columns.join(",")),
-                _ => {
-                    let col_lower = name.to_lowercase();
-                    let is_col = q.columns.iter().any(|c| c.to_lowercase() == col_lower);
+            CfmlValue::Array(arr) => {
+                if name.eq_ignore_ascii_case("len") || name.eq_ignore_ascii_case("length") {
+                    CfmlValue::Int(arr.len() as i64)
+                } else {
+                    CfmlValue::Null
+                }
+            }
+            CfmlValue::String(s) => {
+                if name.eq_ignore_ascii_case("len") || name.eq_ignore_ascii_case("length") {
+                    CfmlValue::Int(s.len() as i64)
+                } else {
+                    CfmlValue::Null
+                }
+            }
+            CfmlValue::Query(q) => {
+                if name.eq_ignore_ascii_case("recordcount") {
+                    CfmlValue::Int(q.rows.len() as i64)
+                } else if name.eq_ignore_ascii_case("columnlist") {
+                    CfmlValue::String(q.columns.join(","))
+                } else {
+                    let is_col = q.columns.iter().any(|c| c.eq_ignore_ascii_case(name));
                     if is_col {
                         let col_data: Vec<CfmlValue> = q
                             .rows
                             .iter()
                             .map(|row| {
                                 row.iter()
-                                    .find(|(k, _)| k.to_lowercase() == col_lower)
+                                    .find(|(k, _)| k.eq_ignore_ascii_case(name))
                                     .map(|(_, v)| v.clone())
                                     .unwrap_or(CfmlValue::Null)
                             })
@@ -508,7 +515,7 @@ impl CfmlVirtualMachine {
                         CfmlValue::Null
                     }
                 }
-            },
+            }
             _ => obj.get(name).unwrap_or(CfmlValue::Null),
         }
     }
@@ -639,6 +646,10 @@ impl CfmlVirtualMachine {
             });
         }
 
+        // Invariant for the duration of this function's execution —
+        // hoisted out of the per-op dispatch loop.
+        let is_inside_function = func.name != "__main__";
+
         loop {
             if ip >= func.instructions.len() {
                 break;
@@ -646,7 +657,6 @@ impl CfmlVirtualMachine {
 
             let op = &func.instructions[ip];
             ip += 1;
-            let is_inside_function = func.name != "__main__";
 
             match op {
                 BytecodeOp::Null => stack.push(CfmlValue::Null),
@@ -658,7 +668,16 @@ impl CfmlVirtualMachine {
 
                 BytecodeOp::LoadLocal(name) => {
                     // Handle CFML scope references
-                    let name_lower = name.to_lowercase();
+                    // Avoid allocating a lowercase String when the identifier is
+                    // already all-lowercase ASCII (the common case). Unicode
+                    // identifiers still get full case-folding.
+                    let name_lower_owned: String;
+                    let name_lower: &str = if name.bytes().any(|b| b.is_ascii_uppercase()) {
+                        name_lower_owned = name.to_lowercase();
+                        &name_lower_owned
+                    } else {
+                        name.as_str()
+                    };
                     let val = if name_lower == "variables"
                         || (name_lower == "local" && is_inside_function)
                     {
@@ -731,7 +750,7 @@ impl CfmlVirtualMachine {
                         );
                         CfmlValue::strukt(info)
                     } else if let Some(val) =
-                        self.lookup_name_in_scopes(name.as_str(), &name_lower, &locals)
+                        self.lookup_name_in_scopes(name.as_str(), name_lower, &locals)
                     {
                         val
                     } else if let Some(bc_func) = self
@@ -740,7 +759,7 @@ impl CfmlVirtualMachine {
                         .or_else(|| {
                             self.user_functions
                                 .iter()
-                                .find(|(k, _)| k.eq_ignore_ascii_case(&name_lower))
+                                .find(|(k, _)| k.eq_ignore_ascii_case(name_lower))
                                 .map(|(_, v)| v)
                         })
                         .cloned()
