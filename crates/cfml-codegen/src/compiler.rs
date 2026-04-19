@@ -836,10 +836,30 @@ impl CfmlCompiler {
         }
     }
 
-    /// If `increment` is a postfix/prefix `++`/`--` on a plain identifier,
-    /// returns `(name, step)` where step is +1 or -1. Used by compile_for
-    /// to detect the counted-loop shape for ForLoopStep fusion.
+    /// If `expr` advances a plain identifier by a constant integer step,
+    /// returns `(name, step)`. Recognises all of:
+    ///   - `i++` / `i--` / `++i` / `--i`       → step = ±1
+    ///   - `i += K` / `i -= K` (int literal K)   → step = ±K
+    ///   - `i = i + K` / `i = K + i` / `i = i - K` (int literal K)
+    /// Used by compile_for to detect counted-loop shapes for ForLoopStep
+    /// fusion; ForLoopStep encodes the step as an i64 so non-±1 strides
+    /// like `i += 7` fuse too.
     fn match_inc_dec_identifier(expr: &Expression) -> Option<(String, i64)> {
+        let int_lit = |e: &Expression| -> Option<i64> {
+            if let Expression::Literal(lit) = e {
+                if let LiteralValue::Int(n) = &lit.value {
+                    return Some(*n);
+                }
+            }
+            None
+        };
+        let ident_name = |e: &Expression| -> Option<String> {
+            if let Expression::Identifier(id) = e {
+                Some(id.name.clone())
+            } else {
+                None
+            }
+        };
         match expr {
             Expression::PostfixOp(postfix) => {
                 if let Expression::Identifier(ident) = &*postfix.operand {
@@ -861,6 +881,46 @@ impl CfmlCompiler {
                     return Some((ident.name.clone(), step));
                 }
                 None
+            }
+            // `i = i + K`, `i = K + i`, `i = i - K` — parser represents this
+            // as a top-level BinaryOp with operator Assign, LHS the target
+            // identifier and RHS the value expression.
+            Expression::BinaryOp(outer) if matches!(outer.operator, BinaryOpType::Assign) => {
+                let name = ident_name(&outer.left)?;
+                let inner = match &*outer.right {
+                    Expression::BinaryOp(b) => b,
+                    _ => return None,
+                };
+                match inner.operator {
+                    BinaryOpType::Add => {
+                        if let (Some(l), Some(k)) =
+                            (ident_name(&inner.left), int_lit(&inner.right))
+                        {
+                            if l == name {
+                                return Some((name, k));
+                            }
+                        }
+                        if let (Some(k), Some(r)) =
+                            (int_lit(&inner.left), ident_name(&inner.right))
+                        {
+                            if r == name {
+                                return Some((name, k));
+                            }
+                        }
+                        None
+                    }
+                    BinaryOpType::Sub => {
+                        if let (Some(l), Some(k)) =
+                            (ident_name(&inner.left), int_lit(&inner.right))
+                        {
+                            if l == name {
+                                return Some((name, -k));
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                }
             }
             _ => None,
         }
