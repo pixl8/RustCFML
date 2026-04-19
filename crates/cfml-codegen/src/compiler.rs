@@ -3,6 +3,36 @@
 use cfml_compiler::ast::*;
 use std::sync::Arc;
 
+/// CFML built-in scope names that resolve through the VM's scope chain
+/// rather than the locals map. `<name>.foo` for any of these should NOT
+/// route through the LoadLocalProperty peephole, because the VM would
+/// miss the fallback lookups (globals, __variables, etc.).
+fn is_reserved_scope_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "variables"
+            | "local"
+            | "arguments"
+            | "this"
+            | "super"
+            | "request"
+            | "application"
+            | "server"
+            | "session"
+            | "cgi"
+            | "url"
+            | "form"
+            | "cookie"
+            | "client"
+            | "thread"
+            | "cfthread"
+            | "attributes"
+            | "caller"
+            | "flash"
+            | "thistag"
+    )
+}
+
 /// Helper function to capitalize the first letter of a string
 fn capitalize_first(s: &str) -> String {
     let mut chars = s.chars();
@@ -125,6 +155,10 @@ pub enum BytecodeOp {
     GetIndex,            // Get array[index] or struct[key]
     SetIndex,            // Set array[index] = value or struct[key] = value
     GetProperty(String), // Get object.property
+    /// Fused LoadLocal(name) + GetProperty(member) — reads a struct field from a
+    /// named local in one dispatch. Only emitted for non-null-safe accesses
+    /// where the receiver is a plain identifier (the common `s.foo` pattern).
+    LoadLocalProperty(String, String),
     SetProperty(String), // Set object.property = value
 
     // Object
@@ -1836,6 +1870,26 @@ impl CfmlCompiler {
                     if let Expression::Identifier(ref ident) = *access.object {
                         if ident.name.eq_ignore_ascii_case("variables") {
                             instructions.push(BytecodeOp::LoadGlobal(access.member.clone()));
+                            return;
+                        }
+                    }
+                }
+                // Peephole: `<ident>.<member>` with no null-safe → fuse into
+                // LoadLocalProperty. Skips the intermediate stack push of the
+                // receiver plus the separate GetProperty dispatch.
+                //
+                // Skip when the identifier is a CFML-reserved scope name —
+                // those resolve through the scope chain (globals, request,
+                // __variables fallback, etc.) not just the locals map, and the
+                // simple `locals.get(name)` lookup would return the wrong
+                // value (typically null).
+                if !access.null_safe {
+                    if let Expression::Identifier(ref ident) = *access.object {
+                        if !is_reserved_scope_name(&ident.name) {
+                            instructions.push(BytecodeOp::LoadLocalProperty(
+                                ident.name.clone(),
+                                access.member.clone(),
+                            ));
                             return;
                         }
                     }

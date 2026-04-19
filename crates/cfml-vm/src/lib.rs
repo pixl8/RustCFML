@@ -447,6 +447,72 @@ impl CfmlVirtualMachine {
         err
     }
 
+    /// Extract `obj.name` semantics — identical to the BytecodeOp::GetProperty
+    /// logic but operates on a borrowed CfmlValue so the caller avoids a
+    /// stack push/pop round-trip. Used by LoadLocalProperty.
+    fn lookup_property(obj: &CfmlValue, name: &str) -> CfmlValue {
+        match obj {
+            CfmlValue::Struct(s) => s
+                .get(name)
+                .or_else(|| s.get(&name.to_uppercase()))
+                .or_else(|| s.get(&name.to_lowercase()))
+                .or_else(|| {
+                    let name_lower = name.to_lowercase();
+                    s.iter()
+                        .find(|(k, _)| k.to_lowercase() == name_lower)
+                        .map(|(_, v)| v)
+                })
+                .or_else(|| {
+                    if let Some(CfmlValue::Struct(vars)) = s.get("__variables") {
+                        let name_lower = name.to_lowercase();
+                        vars.get(name)
+                            .or_else(|| vars.get(&name_lower))
+                            .or_else(|| {
+                                vars.iter()
+                                    .find(|(k, _)| k.to_lowercase() == name_lower)
+                                    .map(|(_, v)| v)
+                            })
+                    } else {
+                        None
+                    }
+                })
+                .cloned()
+                .unwrap_or(CfmlValue::Null),
+            CfmlValue::Array(arr) => match name.to_lowercase().as_str() {
+                "len" | "length" => CfmlValue::Int(arr.len() as i64),
+                _ => CfmlValue::Null,
+            },
+            CfmlValue::String(s) => match name.to_lowercase().as_str() {
+                "len" | "length" => CfmlValue::Int(s.len() as i64),
+                _ => CfmlValue::Null,
+            },
+            CfmlValue::Query(q) => match name.to_lowercase().as_str() {
+                "recordcount" => CfmlValue::Int(q.rows.len() as i64),
+                "columnlist" => CfmlValue::String(q.columns.join(",")),
+                _ => {
+                    let col_lower = name.to_lowercase();
+                    let is_col = q.columns.iter().any(|c| c.to_lowercase() == col_lower);
+                    if is_col {
+                        let col_data: Vec<CfmlValue> = q
+                            .rows
+                            .iter()
+                            .map(|row| {
+                                row.iter()
+                                    .find(|(k, _)| k.to_lowercase() == col_lower)
+                                    .map(|(_, v)| v.clone())
+                                    .unwrap_or(CfmlValue::Null)
+                            })
+                            .collect();
+                        CfmlValue::array(col_data)
+                    } else {
+                        CfmlValue::Null
+                    }
+                }
+            },
+            _ => obj.get(name).unwrap_or(CfmlValue::Null),
+        }
+    }
+
     pub fn execute(&mut self) -> CfmlResult {
         let main_idx = self
             .program
@@ -1841,6 +1907,17 @@ impl CfmlVirtualMachine {
                     stack.push(collection);
                 }
 
+                BytecodeOp::LoadLocalProperty(local_name, prop_name) => {
+                    // Fused LoadLocal + GetProperty. Avoids the intermediate
+                    // dispatch and the stack push/pop of the struct itself.
+                    // Only emitted when the receiver is a plain identifier
+                    // and access is non-null-safe (hot-path struct read).
+                    let val = locals
+                        .get(local_name.as_str())
+                        .map(|obj| Self::lookup_property(obj, prop_name))
+                        .unwrap_or(CfmlValue::Null);
+                    stack.push(val);
+                }
                 BytecodeOp::GetProperty(name) => {
                     if let Some(obj) = stack.pop() {
                         match &obj {
@@ -10097,6 +10174,7 @@ fn stack_effect(op: &BytecodeOp) -> (usize, usize) {
         BytecodeOp::GetIndex => (1, 2),       // obj + key → value
         BytecodeOp::SetIndex => (0, 3),       // obj + key + value → (modifies in place)
         BytecodeOp::GetProperty(_) => (1, 1), // obj → value
+        BytecodeOp::LoadLocalProperty(_, _) => (1, 0), // pushes value, reads nothing
         BytecodeOp::SetProperty(_) => (0, 2), // obj + value → (modifies)
         BytecodeOp::GetKeys => (1, 1),
         BytecodeOp::ConcatArrays | BytecodeOp::MergeStructs => (1, 2),
