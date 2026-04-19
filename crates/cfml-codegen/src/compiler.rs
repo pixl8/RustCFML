@@ -701,9 +701,7 @@ impl CfmlCompiler {
     }
 
     fn compile_if(&mut self, if_stmt: &If, instructions: &mut Vec<BytecodeOp>) {
-        self.compile_expression(&if_stmt.condition, instructions);
-        let jump_false_idx = instructions.len();
-        instructions.push(BytecodeOp::JumpIfFalse(0)); // placeholder
+        let jump_false_idx = self.emit_cond_jump_false(&if_stmt.condition, instructions);
 
         // Then branch
         for s in &if_stmt.then_branch {
@@ -715,15 +713,14 @@ impl CfmlCompiler {
             instructions.push(BytecodeOp::Jump(0)); // placeholder
 
             // Patch the jump-to-else
-            instructions[jump_false_idx] = BytecodeOp::JumpIfFalse(instructions.len());
+            let end_of_then = instructions.len();
+            Self::patch_cond_jump_target(instructions, jump_false_idx, end_of_then);
 
             // Else-if chains
             let mut end_jumps = vec![jump_end_idx];
 
             for (_i, else_if) in if_stmt.else_if.iter().enumerate() {
-                self.compile_expression(&else_if.condition, instructions);
-                let jf_idx = instructions.len();
-                instructions.push(BytecodeOp::JumpIfFalse(0));
+                let jf_idx = self.emit_cond_jump_false(&else_if.condition, instructions);
 
                 for s in &else_if.body {
                     self.compile_statement(s, instructions);
@@ -733,7 +730,8 @@ impl CfmlCompiler {
                 instructions.push(BytecodeOp::Jump(0));
                 end_jumps.push(je_idx);
 
-                instructions[jf_idx] = BytecodeOp::JumpIfFalse(instructions.len());
+                let after_arm = instructions.len();
+                Self::patch_cond_jump_target(instructions, jf_idx, after_arm);
             }
 
             // Else branch
@@ -749,7 +747,8 @@ impl CfmlCompiler {
                 instructions[idx] = BytecodeOp::Jump(end_pos);
             }
         } else {
-            instructions[jump_false_idx] = BytecodeOp::JumpIfFalse(instructions.len());
+            let end_of_then = instructions.len();
+            Self::patch_cond_jump_target(instructions, jump_false_idx, end_of_then);
         }
     }
 
@@ -803,6 +802,37 @@ impl CfmlCompiler {
             Some((name, c, flipped))
         } else {
             None
+        }
+    }
+
+    /// Emit a condition followed by a "jump-if-false" exit. If the condition
+    /// matches `<ident> <cmp> <int-const>`, emits a single fused
+    /// JumpIfLocalCmpConstFalse. Otherwise compile_expression + JumpIfFalse.
+    /// Returns the index of the jump op (so the caller can patch the target).
+    fn emit_cond_jump_false(
+        &mut self,
+        condition: &Expression,
+        instructions: &mut Vec<BytecodeOp>,
+    ) -> usize {
+        if let Some((name, c, cmp)) = Self::match_local_cmp_const(condition) {
+            let idx = instructions.len();
+            instructions.push(BytecodeOp::JumpIfLocalCmpConstFalse(name, c, cmp, 0));
+            idx
+        } else {
+            self.compile_expression(condition, instructions);
+            let idx = instructions.len();
+            instructions.push(BytecodeOp::JumpIfFalse(0));
+            idx
+        }
+    }
+
+    /// Patch the jump target of either BytecodeOp::JumpIfFalse or the fused
+    /// BytecodeOp::JumpIfLocalCmpConstFalse at `idx`.
+    fn patch_cond_jump_target(instructions: &mut [BytecodeOp], idx: usize, target: usize) {
+        match &mut instructions[idx] {
+            BytecodeOp::JumpIfFalse(off) => *off = target,
+            BytecodeOp::JumpIfLocalCmpConstFalse(_, _, _, off) => *off = target,
+            _ => unreachable!("patch_cond_jump_target on unexpected op"),
         }
     }
 
@@ -1073,9 +1103,7 @@ impl CfmlCompiler {
     fn compile_while(&mut self, while_stmt: &While, instructions: &mut Vec<BytecodeOp>) {
         let loop_start = instructions.len();
 
-        self.compile_expression(&while_stmt.condition, instructions);
-        let jump_false_idx = instructions.len();
-        instructions.push(BytecodeOp::JumpIfFalse(0));
+        let jump_false_idx = self.emit_cond_jump_false(&while_stmt.condition, instructions);
 
         self.loop_stack.push((Vec::new(), Vec::new()));
 
@@ -1086,7 +1114,7 @@ impl CfmlCompiler {
         instructions.push(BytecodeOp::Jump(loop_start));
 
         let loop_end = instructions.len();
-        instructions[jump_false_idx] = BytecodeOp::JumpIfFalse(loop_end);
+        Self::patch_cond_jump_target(instructions, jump_false_idx, loop_end);
 
         let (break_indices, continue_indices) = self.loop_stack.pop().unwrap();
         for idx in break_indices {
