@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.8.1"
 authors = ["RustCFML Team"]
 edition = "2021"
 rust-version = "1.75.0"
@@ -19,11 +19,11 @@ repository = "https://github.com/pixl8/RustCFML"
 license = "MIT"
 
 [workspace.dependencies]
-cfml-common = { path = "crates/cfml-common", version = "0.8.0" }
-cfml-compiler = { path = "crates/cfml-compiler", version = "0.8.0" }
-cfml-codegen = { path = "crates/cfml-codegen", version = "0.8.0" }
-cfml-vm = { path = "crates/cfml-vm", version = "0.8.0" }
-cfml-stdlib = { path = "crates/cfml-stdlib", version = "0.8.0" }
+cfml-common = { path = "crates/cfml-common", version = "0.8.1" }
+cfml-compiler = { path = "crates/cfml-compiler", version = "0.8.1" }
+cfml-codegen = { path = "crates/cfml-codegen", version = "0.8.1" }
+cfml-vm = { path = "crates/cfml-vm", version = "0.8.1" }
+cfml-stdlib = { path = "crates/cfml-stdlib", version = "0.8.1" }
 
 log = "0.4"
 thiserror = "1.0"
