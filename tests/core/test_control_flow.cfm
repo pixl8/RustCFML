@@ -154,6 +154,95 @@ while (whileCont < 5) {
 }
 assert("while with continue", whileContSum, 12);
 
+// --- counted-while fusion: stride at end, various shapes ---
+// Exercises the ForLoopStep-based fusion path in compile_while.
+cwa = 1; cwaSum = 0;
+while (cwa <= 10) {
+    cwaSum += cwa;
+    cwa++;
+}
+assert("while counted (i++)", cwaSum, 55);
+
+cwb = 1; cwbSum = 0;
+while (cwb <= 10) {
+    cwbSum += cwb;
+    cwb = cwb + 1;
+}
+assert("while counted (i = i + 1)", cwbSum, 55);
+
+cwc = 0; cwcSum = 0;
+while (cwc < 20) {
+    cwcSum += cwc;
+    cwc += 3;
+}
+assert("while counted (i += 3, non-unit step)", cwcSum, 63);
+
+// Down-counting
+cwd = 5; cwdSum = 0;
+while (cwd > 0) {
+    cwdSum += cwd;
+    cwd--;
+}
+assert("while counted (i--)", cwdSum, 15);
+
+// Empty body (stride only) — fusion should still apply
+cwe = 0;
+while (cwe < 100) { cwe++; }
+assert("while counted empty body", cwe, 100);
+
+// Entry-check: condition false on entry → zero iterations
+cwf = 10; cwfCount = 0;
+while (cwf < 5) {
+    cwfCount++;
+    cwf++;
+}
+assert("while counted zero iters", cwfCount, 0);
+
+// Break inside body: hoisted stride must not change break behavior
+cwg = 0; cwgSum = 0;
+while (cwg < 100) {
+    if (cwg >= 5) break;
+    cwgSum += cwg;
+    cwg++;
+}
+assert("while counted + break", cwgSum, 10);  // 0+1+2+3+4
+
+// Continue BEFORE stride: fusion must bail out (otherwise continue would
+// skip stride → infinite loop / wrong sum). We just check it terminates
+// with the right sum — any regression here would hang or fail.
+cwh = 0; cwhSum = 0;
+while (cwh < 6) {
+    cwh++;
+    if (cwh == 3) continue;
+    cwhSum += cwh;
+}
+assert("while + continue (no fusion)", cwhSum, 18);  // 1+2+4+5+6
+
+// --- counted-do-while fusion ---
+dwa = 1; dwaSum = 0;
+do {
+    dwaSum += dwa;
+    dwa++;
+} while (dwa <= 10);
+assert("do-while counted", dwaSum, 55);
+
+// do-while runs body at least once even if condition false
+dwb = 100; dwbCount = 0;
+do {
+    dwbCount++;
+    dwb++;
+} while (dwb < 50);
+assert("do-while counted body runs once", dwbCount, 1);
+
+// do-while + continue: fusion must bail out
+dwc = 0; dwcSum = 0;
+do {
+    dwc++;
+    if (dwc == 3) continue;
+    dwcSum += dwc;
+} while (dwc < 6);
+assert("do-while + continue (no fusion)", dwcSum, 18);  // 1+2+4+5+6
+
 // --- for loop empty body (edge case) ---
 emptyLoopCounter = 0;
 for (e = 0; e < 0; e++) {

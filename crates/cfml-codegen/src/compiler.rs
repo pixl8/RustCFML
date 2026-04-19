@@ -960,6 +960,141 @@ impl CfmlCompiler {
         }
     }
 
+    /// Statement-level counterpart to `match_inc_dec_identifier`. In a for
+    /// loop the stride lives in the `increment` slot as an Expression, but
+    /// in a while/do-while body it's a Statement — either an expression
+    /// statement (`i++;`) or an Assignment (`i = i + 1;`, `i += K;`).
+    /// Returns (name, step) on a match.
+    fn match_stride_statement(stmt: &Statement) -> Option<(String, i64)> {
+        let int_lit = |e: &Expression| -> Option<i64> {
+            if let Expression::Literal(lit) = e {
+                if let LiteralValue::Int(n) = &lit.value {
+                    return Some(*n);
+                }
+            }
+            None
+        };
+        let ident_name = |e: &Expression| -> Option<String> {
+            if let Expression::Identifier(id) = e {
+                Some(id.name.clone())
+            } else {
+                None
+            }
+        };
+        match stmt {
+            Statement::Expression(es) => Self::match_inc_dec_identifier(&es.expr),
+            Statement::Assignment(a) => {
+                let name = match &a.target {
+                    AssignTarget::Variable(n) => n.clone(),
+                    _ => return None,
+                };
+                match a.operator {
+                    AssignOp::PlusEqual => int_lit(&a.value).map(|k| (name, k)),
+                    AssignOp::MinusEqual => int_lit(&a.value).map(|k| (name, -k)),
+                    AssignOp::Equal => {
+                        // `i = i + K` / `i = K + i` / `i = i - K`
+                        let inner = match &a.value {
+                            Expression::BinaryOp(b) => b,
+                            _ => return None,
+                        };
+                        match inner.operator {
+                            BinaryOpType::Add => {
+                                if let (Some(l), Some(k)) =
+                                    (ident_name(&inner.left), int_lit(&inner.right))
+                                {
+                                    if l.eq_ignore_ascii_case(&name) {
+                                        return Some((name, k));
+                                    }
+                                }
+                                if let (Some(k), Some(r)) =
+                                    (int_lit(&inner.left), ident_name(&inner.right))
+                                {
+                                    if r.eq_ignore_ascii_case(&name) {
+                                        return Some((name, k));
+                                    }
+                                }
+                                None
+                            }
+                            BinaryOpType::Sub => {
+                                if let (Some(l), Some(k)) =
+                                    (ident_name(&inner.left), int_lit(&inner.right))
+                                {
+                                    if l.eq_ignore_ascii_case(&name) {
+                                        return Some((name, -k));
+                                    }
+                                }
+                                None
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns true if the body contains a `continue` statement that would
+    /// target THIS loop (i.e. not inside a nested loop or function body).
+    /// Used to decide whether stride-hoisting is safe: hoisting the stride
+    /// out changes what `continue` skips vs. runs, so we bail when a
+    /// top-level continue is present.
+    fn body_has_top_level_continue(body: &[Statement]) -> bool {
+        for stmt in body {
+            if Self::stmt_has_top_level_continue(stmt) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn stmt_has_top_level_continue(stmt: &Statement) -> bool {
+        match stmt {
+            Statement::Continue(_) => true,
+            Statement::If(i) => {
+                Self::body_has_top_level_continue(&i.then_branch)
+                    || i.else_if
+                        .iter()
+                        .any(|ei| Self::body_has_top_level_continue(&ei.body))
+                    || i.else_branch
+                        .as_ref()
+                        .map(|b| Self::body_has_top_level_continue(b))
+                        .unwrap_or(false)
+            }
+            Statement::Switch(s) => {
+                s.cases
+                    .iter()
+                    .any(|c| Self::body_has_top_level_continue(&c.body))
+                    || s.default_case
+                        .as_ref()
+                        .map(|b| Self::body_has_top_level_continue(b))
+                        .unwrap_or(false)
+            }
+            Statement::Try(t) => {
+                Self::body_has_top_level_continue(&t.body)
+                    || t.catches
+                        .iter()
+                        .any(|c| Self::body_has_top_level_continue(&c.body))
+                    || t.finally_body
+                        .as_ref()
+                        .map(|b| Self::body_has_top_level_continue(b))
+                        .unwrap_or(false)
+            }
+            Statement::Output(o) => Self::body_has_top_level_continue(&o.body),
+            // Nested loops and function decls define their own continue target —
+            // continues inside them don't target the outer loop.
+            Statement::For(_)
+            | Statement::ForIn(_)
+            | Statement::While(_)
+            | Statement::Do(_)
+            | Statement::FunctionDecl(_)
+            | Statement::ComponentDecl(_)
+            | Statement::InterfaceDecl(_) => false,
+            _ => false,
+        }
+    }
+
     /// its result is about to be discarded, emit a single `Increment` /
     /// `Decrement` op (pure side-effect, no stack push) and return true.
     /// Saves 5 ops → 1 op per iteration on tight `i++`-style loops, which is
@@ -1200,6 +1335,29 @@ impl CfmlCompiler {
     }
 
     fn compile_while(&mut self, while_stmt: &While, instructions: &mut Vec<BytecodeOp>) {
+        // Counted-loop fusion: if the condition is `<ident> <cmp> <int-const>`
+        // and the last body statement advances the same identifier by a
+        // constant step (i++, i+=K, i = i+K, etc.), hoist the stride out and
+        // emit the same ForLoopStep-based shape used by compile_for_counted.
+        // Skip when a top-level `continue` is present — the hoist would
+        // change whether `continue` runs the stride.
+        if let Some((cond_name, c, cmp)) = Self::match_local_cmp_const(&while_stmt.condition) {
+            if let Some(last) = while_stmt.body.last() {
+                if let Some((stride_name, step)) = Self::match_stride_statement(last) {
+                    if cond_name.eq_ignore_ascii_case(&stride_name)
+                        && !Self::body_has_top_level_continue(&while_stmt.body)
+                    {
+                        let body_without_stride =
+                            &while_stmt.body[..while_stmt.body.len() - 1];
+                        self.compile_for_counted(
+                            &cond_name, c, cmp, step, body_without_stride, instructions,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+
         let loop_start = instructions.len();
 
         let jump_false_idx = self.emit_cond_jump_false(&while_stmt.condition, instructions);
@@ -1225,6 +1383,24 @@ impl CfmlCompiler {
     }
 
     fn compile_do(&mut self, do_stmt: &Do, instructions: &mut Vec<BytecodeOp>) {
+        // Counted-do-while fusion: same shape as compile_while but no entry
+        // check — do-while always runs the body at least once.
+        if let Some((cond_name, c, cmp)) = Self::match_local_cmp_const(&do_stmt.condition) {
+            if let Some(last) = do_stmt.body.last() {
+                if let Some((stride_name, step)) = Self::match_stride_statement(last) {
+                    if cond_name.eq_ignore_ascii_case(&stride_name)
+                        && !Self::body_has_top_level_continue(&do_stmt.body)
+                    {
+                        let body_without_stride = &do_stmt.body[..do_stmt.body.len() - 1];
+                        self.compile_do_counted(
+                            &cond_name, c, cmp, step, body_without_stride, instructions,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+
         let loop_start = instructions.len();
 
         self.loop_stack.push((Vec::new(), Vec::new()));
@@ -1237,6 +1413,41 @@ impl CfmlCompiler {
 
         self.compile_expression(&do_stmt.condition, instructions);
         instructions.push(BytecodeOp::JumpIfTrue(loop_start));
+
+        let loop_end = instructions.len();
+
+        let (break_indices, continue_indices) = self.loop_stack.pop().unwrap();
+        for idx in break_indices {
+            instructions[idx] = BytecodeOp::Jump(loop_end);
+        }
+        for idx in continue_indices {
+            instructions[idx] = BytecodeOp::Jump(continue_target);
+        }
+    }
+
+    /// Counted-do-while fused shape: no entry check (body always runs once),
+    /// stride folded into the bottom ForLoopStep.
+    fn compile_do_counted(
+        &mut self,
+        name: &str,
+        limit: i64,
+        cmp: CmpOp,
+        step: i64,
+        body: &[Statement],
+        instructions: &mut Vec<BytecodeOp>,
+    ) {
+        let body_start = instructions.len();
+
+        self.loop_stack.push((Vec::new(), Vec::new()));
+
+        for s in body {
+            self.compile_statement(s, instructions);
+        }
+
+        let continue_target = instructions.len();
+        instructions.push(BytecodeOp::ForLoopStep(
+            name.to_string(), limit, cmp, step, body_start,
+        ));
 
         let loop_end = instructions.len();
 
