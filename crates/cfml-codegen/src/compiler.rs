@@ -435,9 +435,15 @@ impl CfmlCompiler {
 
         match stmt {
             Statement::Expression(expr_stmt) => {
+                // Peephole: `i++;` / `i--;` / `++i;` / `--i;` as a bare statement.
+                // The normal 5-op expand (Load/Dup/Int1/Add/Store) plus a trailing
+                // Pop collapses to a single Increment/Decrement.
+                if self.try_emit_inc_dec_statement(&expr_stmt.expr, instructions) {
+                    // emitted; no Pop needed — the op has no stack effect
+                }
                 // Check for mutating function calls: structAppend(a, b), structInsert(a, k, v), etc.
                 // These return the modified struct; store it back to the first arg's location.
-                if Self::is_mutating_standalone_call(&expr_stmt.expr) {
+                else if Self::is_mutating_standalone_call(&expr_stmt.expr) {
                     if let Some(first_arg) = Self::mutating_call_first_arg(&expr_stmt.expr) {
                         match first_arg {
                             Expression::Identifier(ident) => {
@@ -727,6 +733,52 @@ impl CfmlCompiler {
         }
     }
 
+    /// Peephole: if `expr` is a postfix/prefix inc/dec of a plain identifier and
+    /// its result is about to be discarded, emit a single `Increment` /
+    /// `Decrement` op (pure side-effect, no stack push) and return true.
+    /// Saves 5 ops → 1 op per iteration on tight `i++`-style loops, which is
+    /// the dominant bytecode in `for (i=...;...;i++)` — the hottest loop shape
+    /// in CFML.
+    fn try_emit_inc_dec_statement(
+        &mut self,
+        expr: &Expression,
+        instructions: &mut Vec<BytecodeOp>,
+    ) -> bool {
+        match expr {
+            Expression::PostfixOp(postfix) => {
+                if let Expression::Identifier(ident) = &*postfix.operand {
+                    match postfix.operator {
+                        PostfixOpType::Increment => {
+                            instructions.push(BytecodeOp::Increment(ident.name.clone()));
+                            return true;
+                        }
+                        PostfixOpType::Decrement => {
+                            instructions.push(BytecodeOp::Decrement(ident.name.clone()));
+                            return true;
+                        }
+                    }
+                }
+            }
+            Expression::UnaryOp(unary) => {
+                if let Expression::Identifier(ident) = &*unary.operand {
+                    match unary.operator {
+                        UnaryOpType::PrefixIncrement => {
+                            instructions.push(BytecodeOp::Increment(ident.name.clone()));
+                            return true;
+                        }
+                        UnaryOpType::PrefixDecrement => {
+                            instructions.push(BytecodeOp::Decrement(ident.name.clone()));
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
     fn compile_for(&mut self, for_stmt: &For, instructions: &mut Vec<BytecodeOp>) {
         // Init
         if let Some(init) = &for_stmt.init {
@@ -755,8 +807,10 @@ impl CfmlCompiler {
 
             // Increment
             if let Some(increment) = &for_stmt.increment {
-                self.compile_expression(increment, instructions);
-                instructions.push(BytecodeOp::Pop);
+                if !self.try_emit_inc_dec_statement(increment, instructions) {
+                    self.compile_expression(increment, instructions);
+                    instructions.push(BytecodeOp::Pop);
+                }
             }
 
             // Jump back to condition
