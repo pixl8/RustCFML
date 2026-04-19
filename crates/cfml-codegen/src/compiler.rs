@@ -1106,21 +1106,29 @@ impl CfmlCompiler {
         // GetKeys: if struct, convert to array of keys; arrays pass through unchanged
         instructions.push(BytecodeOp::GetKeys);
 
-        // Store iterable in a temp variable
+        // Unique per-loop temp names (so nested for-in don't collide).
         let iter_var = format!("__iter_{}", instructions.len());
         let idx_var = format!("__idx_{}", instructions.len());
+        let limit_var = format!("__limit_{}", instructions.len());
         instructions.push(BytecodeOp::StoreLocal(iter_var.clone()));
-        // CFML arrays are 1-based, so start index at 1
+
+        // Hoist len(iterable) out of the loop. The old codegen looked up the
+        // `len` builtin and invoked it every iteration — a HashMap probe plus
+        // full function-call trampoline per element. Compute once, reuse.
+        instructions.push(BytecodeOp::LoadGlobal("len".to_string()));
+        instructions.push(BytecodeOp::LoadLocal(iter_var.clone()));
+        instructions.push(BytecodeOp::Call(1));
+        instructions.push(BytecodeOp::StoreLocal(limit_var.clone()));
+
+        // CFML arrays are 1-based, so start index at 1.
         instructions.push(BytecodeOp::Integer(1));
         instructions.push(BytecodeOp::StoreLocal(idx_var.clone()));
 
         let loop_start = instructions.len();
 
-        // Check: idx <= len(iterable)
+        // Condition: idx <= limit  (both locals; no builtin call per iter).
         instructions.push(BytecodeOp::LoadLocal(idx_var.clone()));
-        instructions.push(BytecodeOp::LoadGlobal("len".to_string()));
-        instructions.push(BytecodeOp::LoadLocal(iter_var.clone()));
-        instructions.push(BytecodeOp::Call(1));
+        instructions.push(BytecodeOp::LoadLocal(limit_var.clone()));
         instructions.push(BytecodeOp::Lte);
 
         let jump_false_idx = instructions.len();
@@ -1140,11 +1148,8 @@ impl CfmlCompiler {
 
         let continue_target = instructions.len();
 
-        // idx++
-        instructions.push(BytecodeOp::LoadLocal(idx_var.clone()));
-        instructions.push(BytecodeOp::Integer(1));
-        instructions.push(BytecodeOp::Add);
-        instructions.push(BytecodeOp::StoreLocal(idx_var.clone()));
+        // idx++  (single Increment op, not Load+Int+Add+Store).
+        instructions.push(BytecodeOp::Increment(idx_var.clone()));
 
         instructions.push(BytecodeOp::Jump(loop_start));
 
