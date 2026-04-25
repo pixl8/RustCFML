@@ -27,6 +27,7 @@ try { include "types/test_numeric.cfm"; } catch (any e) { writeOutput("ERROR | t
 try { include "types/test_string.cfm"; } catch (any e) { writeOutput("ERROR | types/test_string.cfm | " & e.message & chr(10)); }
 try { include "types/test_array.cfm"; } catch (any e) { writeOutput("ERROR | types/test_array.cfm | " & e.message & chr(10)); }
 try { include "types/test_struct.cfm"; } catch (any e) { writeOutput("ERROR | types/test_struct.cfm | " & e.message & chr(10)); }
+try { include "types/test_nested_writeback.cfm"; } catch (any e) { writeOutput("ERROR | types/test_nested_writeback.cfm | " & e.message & chr(10)); }
 try { include "types/test_query.cfm"; } catch (any e) { writeOutput("ERROR | types/test_query.cfm | " & e.message & chr(10)); }
 try { include "types/test_binary.cfm"; } catch (any e) { writeOutput("ERROR | types/test_binary.cfm | " & e.message & chr(10)); }
 try { include "types/test_hash_in_strings.cfm"; } catch (any e) { writeOutput("ERROR | types/test_hash_in_strings.cfm | " & e.message & chr(10)); }
@@ -71,6 +72,9 @@ try { include "stdlib/test_ini_functions.cfm"; } catch (any e) { writeOutput("ER
 try { include "stdlib/test_directorylist.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_directorylist.cfm | " & e.message & chr(10)); }
 try { include "stdlib/test_cfhttp.cfm"; } catch (any e) { writeOutput("ERROR | stdlib/test_cfhttp.cfm | " & e.message & chr(10)); }
 
+// --- Performance Tests ---
+try { include "perf/test_struct_write.cfm"; } catch (any e) { writeOutput("ERROR | perf/test_struct_write.cfm | " & e.message & chr(10)); }
+
 // --- Function References ---
 try { include "functions/test_function_references.cfm"; } catch (any e) { writeOutput("ERROR | functions/test_function_references.cfm | " & e.message & chr(10)); }
 
@@ -95,6 +99,7 @@ try { include "tags/test_tags_control.cfm"; } catch (any e) { writeOutput("ERROR
 try { include "tags/test_tags_include.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_include.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_savecontent.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_savecontent.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_param.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_param.cfm | " & e.message & chr(10)); }
+try { include "tags/test_tags_param_dynamic.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_param_dynamic.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_misc.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_misc.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_customtag.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_customtag.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_cfexecute.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_cfexecute.cfm | " & e.message & chr(10)); }

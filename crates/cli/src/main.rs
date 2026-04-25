@@ -420,7 +420,10 @@ fn run_server(doc_root: &Path, port: u16, debug: bool, single_threaded: bool, vf
 }
 
 async fn async_run_server(doc_root: &Path, port: u16, debug: bool, single_threaded: bool, vfs: Arc<dyn Vfs>, sandbox: bool) {
-    let server_state = ServerState::new();
+    let mut server_state = ServerState::new();
+    server_state.webroot = Some(
+        fs::canonicalize(doc_root).unwrap_or_else(|_| doc_root.to_path_buf()),
+    );
 
     // Load URL rewrite rules if urlrewrite.xml exists
     let rewrite_xml = doc_root.join("urlrewrite.xml");
