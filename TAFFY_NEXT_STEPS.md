@@ -1,81 +1,203 @@
 # Taffy compat — next-session plan
 
-## Status (2026-04-25, evening — sweep against shipped Taffy examples)
+## Quick status (2026-04-25, end of session)
 
-After fixing E + F, swept the actual Taffy 4.0.0 example apps from
-`/Users/alexskinner/Repos/opensource/Taffy/`. Results:
+**Committed and pushed (commit `bcef7f7`):**
 
-- `/sctest/alex` (synthetic script-syntax resource): ✅ returns
-  `{"hello":"alex"}` end-to-end through stock Taffy.
-- `/artist/123/art/456` (artMember.cfc — tag-syntax with multiple
-  methods + page-level `<cfset>` referencing inherited `encode`):
-  ❌ first call returns `null`; subsequent calls 500 with
-  `getBean is not defined`.
-- Dashboard (`/dashboard/dashboard.cfm`): 🟡 HTML shell renders, but
-  hits a 500 mid-page.
+| Bug | Subject | Where |
+|---|---|---|
+| A | Webroot fallback for inheritance lookups under `--serve` | lib.rs `resolve_component_template`, cli/main.rs |
+| B | `parse_component` accepts `taffy:uri` (namespaced metadata) | parser.rs |
+| C | `__cfabort` / `__cflocation_redirect` bypass user `try/catch` | lib.rs `is_control_flow_error` |
+| D | Chained `return this;` setters preserve mutations | lib.rs `BytecodeOp::Return` + `CallMethod` writeback |
+| E | Codegen lost mutations through `a[expr1].b[expr2]=v` | compiler.rs `compile_expression_static` |
+| F | `param name="x['#dyn#'].metadata"` shape not lowered | parser.rs `try_lower_dynamic_param` |
+| param dynamic | Earlier shapes A & B + VM intercept fallback | parser.rs + lib.rs + builtins.rs |
 
-### Bug G — child CFC body cannot see parent's `__variables` (open)
+**Suite:** 2581/2581 passing across 313 suites.
 
-**Root cause identified, not fixed.** When a CFC body executes during
-component construction (`resolve_component_template`, lib.rs:8682+),
-the child's body runs with `let clean_scope = IndexMap::new()` — i.e.
-**parent's variables are not yet visible**. Inheritance only happens
-*after* the child body returns, in `resolve_inheritance`.
+**Stock Taffy 4.0.0 results from `/Users/alexskinner/Repos/opensource/Taffy/examples/`:**
 
-This breaks any child whose page-level statements reference an
-inherited helper. Concretely: Taffy's `taffy.core.resource` parent sets
-`variables.encode = {}; variables.encode.string = forceString;`.
-Child resources like artMember.cfc do this at page level:
+| Endpoint | Status | Notes |
+|---|---|---|
+| `examples/api/index.cfm/sctest/alex` (synthetic script-syntax resource) | ✅ 200 + JSON | `{"hello":"alex"}` |
+| `examples/api/index.cfm/artist/123/art/456` (artMember.cfc — tag-syntax, page-level `<cfset>` referencing inherited `encode`) | ❌ 500 | Bug G: first call returns `null`, subsequent calls `getBean is not defined` |
+| `examples/api/index.cfm/artists` | ❌ 500 | Same as above (tag-syntax artistCollection.cfc) |
+| `examples/api_empty/` | ❌ 500 | Path resolution: `Cannot read './examples/api_empty/../dashboard/dashboard.cfm'` |
+| `dashboard/dashboard.cfm` | 🟡 partial | HTML shell renders but hits 500 mid-page |
 
-```cfml
-<cfset variables.dummyData.phone = encode.string(5558675309) />
-```
+The dashboard is blocked on Bug G (it consumes tag-syntax helpers).
 
-`encode` is undefined during child body execution → throws → body aborts
-*before* `<cfset>` lines that follow → `captured_locals` is never set
-(throw skips the capture at lib.rs:3181) → `unwrap_or_default()` at
-8688 yields an empty IndexMap → bean's `__variables` is empty → method
-calls reading `variables.dummyData` see nothing → `representationOf(null)`
-→ chain returns `null` → eventually corrupts `application._taffy.factory`
-state for subsequent requests.
+---
 
-Reproducer (no Taffy needed):
+## Bug G — child CFC body can't see parent's `__variables` (OPEN, next blocker)
+
+### Root cause
+
+When a CFC body executes during component construction (lib.rs
+`resolve_component_template`, ~line 8682), the child's body runs with
+`let clean_scope = IndexMap::new()`. **Parent's variables are not yet
+visible** — inheritance only happens *after* the child body returns, in
+`resolve_inheritance` (lib.rs:9047+).
+
+Cascade for stock Taffy artMember.cfc:
+
+1. `taffy.core.resource` parent sets `variables.encode = {}; variables.encode.string = forceString;`
+2. Child artMember.cfc has page-level: `<cfset variables.dummyData.phone = encode.string(5558675309) />`
+3. `encode` is **undefined** during child body execution → throws
+4. Body aborts before subsequent `<cfset>` lines
+5. `captured_locals` is **never set** because the success path at lib.rs:3181 only fires after a clean return
+6. `unwrap_or_default()` at lib.rs:8688 yields an empty IndexMap
+7. Bean's `__variables` is empty after merge with parent
+8. At request time: method reads `variables.dummyData` → `null`
+9. `representationOf(null).withStatus(200)` returns `null` (first call body)
+10. Subsequent state mutations during the failed path corrupt `application._taffy.factory.getBean` lookup → all later requests 500 with `getBean is not defined`
+
+### Reproducer (no Taffy needed)
+
+Save to `/tmp/bugG/`:
+
 ```cfml
 // parent.cfc
 component {
-  variables.encode = { string: function(d) { return chr(2) & d; } };
+    variables.encode = { string: function(d) { return chr(2) & d; } };
 }
 
 // child.cfc
 component extends="parent" {
-  variables.dummyData = { phone = encode.string("5558675309") };
-  function get() { return variables.dummyData; }
+    variables.dummyData = structNew();
+    variables.dummyData.whatever = true;
+    variables.dummyData.phone = encode.string("5558675309");
+
+    function get() { return variables.dummyData; }
 }
 
-// caller
+// probe.cfm
 b = new child();
-writeOutput(structKeyExists(b.__variables, "dummyData")); // false on RustCFML
+writeOutput("hasD: " & structKeyExists(b.__variables, "dummyData") & chr(10));
+// RustCFML: false. Lucee: true.
 ```
 
-Fix sketch (non-trivial):
-1. After compiling the cfc file (lib.rs ~8662), peek the child's
-   `__extends` from the `__main__` bytecode/AST (or the program-level
-   metadata) *without* running the body.
-2. Pre-resolve the parent (recursive) and capture its `__variables`.
-3. Pass parent's `__variables` as the initial scope when invoking
-   `__cfc_body__` so child page-level code sees inherited helpers.
-4. After child body runs, merge as today (child overrides parent).
-5. Also: capture locals even when the body throws, so partial state
-   isn't fully discarded on error.
+A second triangulation pinned the precise trigger: the bug only
+manifests when the page-level statement *calls* an inherited helper.
+Removing the `encode.string(...)` call (or replacing it with a literal)
+restores correct behavior — `dummyData` survives.
 
-The signal that this is the right fix: minimal repro showed
-`hasD=true` until adding a single `encode.string(...)` call to
-page level — at which point `dummyData` itself disappears from
-`__variables`, because the throw aborts the capture.
+### Failed fix attempt (do not retry the same way)
 
-Once Bug G is fixed, `/artist/123/art/456` should work, and the
-dashboard (which uses tag-syntax extensively) is the next thing to
-verify.
+Tried injecting parent's `__variables` AND parent's methods into the
+child cfc body's initial scope before running it (lib.rs ~8682, scan
+the bytecode for `String("__extends"); String(<parent>)` pairs and
+pre-resolve the parent). **Result: infinite recursion in
+`getRepInstance` (depth 256).**
+
+Why it recursed: the child body now had access to parent's methods
+including `representationOf`/`getRepInstance`. During boot,
+`application._taffy.settings.serializer` is empty, and `getRepInstance`
+recurses with that empty value as `repClass`. Something about how the
+injected methods bound their `this`/`__variables` made the recursion
+fail to terminate. Reverted the change.
+
+### Fix plan (next session)
+
+Don't inject parent methods — only `__variables`. Methods on the
+component are dispatched through inheritance at call time anyway; the
+child body shouldn't see parent's methods directly in its top-level
+locals.
+
+Concrete approach:
+
+1. In lib.rs `resolve_component_template` (~line 8682), before running
+   the cfc body, scan `cfc_body.instructions` for the `String("__extends")
+   ; String(<parent>)` window pattern and extract `parent_name`.
+2. If `parent_name` is `Some`, swap `self.program` back to `old_program`
+   so resolution finds the parent file, set `source_file` to the
+   child's path, then call
+   `self.resolve_component_template(&parent_name, locals)` and
+   `self.resolve_inheritance(parent_template, locals)`.
+3. From the resolved parent, copy ONLY `parent.__variables` into a
+   fresh `initial_scope`. **Do not copy parent's methods.** Restore
+   `self.program` to the child sub-program.
+4. Pass `initial_scope` (instead of `clean_scope`) to
+   `execute_function_with_args`.
+5. Also: change lib.rs:3181 (`if func.name == "__main__" || func.name ==
+   "__cfc_body__" { self.captured_locals = Some(locals); }`) to also fire
+   in the *error* path of `execute_function_with_args` — capture the
+   partial locals before propagating the error. That way even if the
+   child body throws halfway through, what *did* run survives into
+   `__variables`.
+
+The 2nd fix (capture-on-throw) is the more conservative win even
+without the inheritance pre-resolve: at minimum, `dummyData` survives
+the throw.
+
+### Verification checklist
+
+After the fix, all of these must pass:
+
+- Reproducer above: `hasD: true`.
+- `curl /examples/api/index.cfm/artist/123/art/456` from
+  `/Users/alexskinner/Repos/opensource/Taffy/examples/api/` (served at
+  the Taffy repo root) returns a JSON body and HTTP 200.
+- A second request to `/artist/123/art/456` also succeeds (state isn't
+  corrupted).
+- `curl /dashboard/dashboard.cfm` renders without an embedded 500.
+- Test suite: 2581/2581+ still green (the existing
+  `test_nested_writeback.cfm` should keep passing).
+
+---
+
+## Bug H — `examples/api_empty/` redirect path
+
+`/examples/api_empty/index.cfm` returns a 500: `Cannot read
+'./examples/api_empty/../dashboard/dashboard.cfm'`. The relative
+`../dashboard/...` traversal from a sub-directory needs path
+canonicalization in our include/redirect resolution. Likely cheap to
+fix once Bug G is unblocking real testing — postpone until then.
+
+---
+
+## Test environment for next session
+
+```bash
+# Stock Taffy 4.0.0 (do not modify):
+ls /Users/alexskinner/Repos/opensource/Taffy/
+# core/, dashboard/, examples/
+
+# Throwaway test app set up for these sessions:
+ls /tmp/taffy_full/
+# taffy/ (copy of core/), dashboard/, examples/
+# May still contain trace `fileAppend` instrumentation in
+# /tmp/taffy_full/taffy/core/api.cfc and factory.cfc — re-copy from
+# /Users/alexskinner/Repos/opensource/Taffy/core/{api,factory}.cfc to
+# get a clean tree.
+
+# Start server:
+pkill -9 -f rustcfml 2>/dev/null
+cd /tmp/taffy_full && \
+  /Users/alexskinner/Repos/opensource/CFMLs/RustCFML/target/release/rustcfml \
+  --serve . --port 8650 &
+
+# Smoke tests:
+curl -s "http://127.0.0.1:8650/examples/api/index.cfm/sctest/alex?reload=true&reloadPassword=true"
+# expect: ...{"hello":"alex"}
+
+curl -s "http://127.0.0.1:8650/examples/api/index.cfm/artist/123/art/456"
+# currently: 500 getBean undefined / null body.  After Bug G fix: JSON.
+```
+
+Note: the `sctest` resource is added per session — if you don't see it
+in `/tmp/taffy_full/examples/api/resources/foo/`, recreate as:
+
+```cfml
+component extends="taffy.core.resource" taffy_uri="/sctest/{name}" {
+    function get(string name="world") {
+        return representationOf({hello: arguments.name}).withStatus(200);
+    }
+}
+```
+
+---
 
 ### Bug F — `param name="x['#dyn#'].metadata"` not lowered (FIXED)
 
