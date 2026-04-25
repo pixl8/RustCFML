@@ -33,6 +33,15 @@ fn is_reserved_scope_name(name: &str) -> bool {
     )
 }
 
+fn int_lit(e: &Expression) -> Option<i64> {
+    if let Expression::Literal(lit) = e {
+        if let LiteralValue::Int(n) = lit.value {
+            return Some(n);
+        }
+    }
+    None
+}
+
 /// Helper function to capitalize the first letter of a string
 fn capitalize_first(s: &str) -> String {
     let mut chars = s.chars();
@@ -159,6 +168,10 @@ pub enum BytecodeOp {
     /// named local in one dispatch. Only emitted for non-null-safe accesses
     /// where the receiver is a plain identifier (the common `s.foo` pattern).
     LoadLocalProperty(String, String),
+    /// Fused LoadLocal(name) + SetProperty(member) — stores a value into a struct
+    /// field of a named local in one dispatch. Only emitted for non-null-safe
+    /// accesses where the receiver is a plain identifier (the common `s.foo = x` pattern).
+    StoreLocalProperty(String, String),
     SetProperty(String), // Set object.property = value
 
     // Object
@@ -168,8 +181,10 @@ pub enum BytecodeOp {
     DefineFunction(usize), // Index into program.functions
 
     // Postfix ops
-    Increment(String),  // Increment variable
-    Decrement(String),  // Decrement variable
+    Increment(String),  // Increment variable (+1)
+    Decrement(String),  // Decrement variable (-1)
+    AddLocalConst(String, i64),  // Add constant to local: i += K or i = i + K
+    MulLocalConst(String, i64),  // Multiply local by constant: i *= K
 
     // Exception handling
     TryStart(usize),    // Jump target for catch
@@ -447,6 +462,15 @@ impl CfmlCompiler {
             Expression::This(_) => {
                 instructions.push(BytecodeOp::LoadLocal("this".to_string()));
             }
+            Expression::MemberAccess(access) => {
+                Self::compile_expression_static(&access.object, instructions);
+                instructions.push(BytecodeOp::GetProperty(access.member.clone()));
+            }
+            Expression::ArrayAccess(access) => {
+                Self::compile_expression_static(&access.array, instructions);
+                Self::compile_expression_static(&access.index, instructions);
+                instructions.push(BytecodeOp::GetIndex);
+            }
             _ => {
                 // For complex expressions, emit Null as fallback
                 instructions.push(BytecodeOp::Null);
@@ -540,38 +564,64 @@ impl CfmlCompiler {
 
                 match &assign.operator {
                     AssignOp::PlusEqual => {
-                        match &assign.target {
-                            AssignTarget::Variable(name) => {
+                        if let AssignTarget::Variable(name) = &assign.target {
+                            if let Some(k) = int_lit(&assign.value) {
+                                instructions.push(BytecodeOp::AddLocalConst(name.clone(), k));
+                                instructions.push(BytecodeOp::Dup); // for StoreLocal below
+                            } else {
+                                instructions.push(BytecodeOp::LoadLocal(name.clone()));
+                                let len = instructions.len();
+                                instructions.swap(len - 2, len - 1);
+                                instructions.push(BytecodeOp::Add);
+                            }
+                        } else {
+                            if let AssignTarget::Variable(name) = &assign.target {
                                 instructions.push(BytecodeOp::LoadLocal(name.clone()));
                             }
-                            _ => {}
+                            let len = instructions.len();
+                            instructions.swap(len - 2, len - 1);
+                            instructions.push(BytecodeOp::Add);
                         }
-                        // Swap so we have: old_value, new_value -> old + new
-                        let len = instructions.len();
-                        instructions.swap(len - 2, len - 1);
-                        instructions.push(BytecodeOp::Add);
                     }
                     AssignOp::MinusEqual => {
-                        match &assign.target {
-                            AssignTarget::Variable(name) => {
+                        if let AssignTarget::Variable(name) = &assign.target {
+                            if let Some(k) = int_lit(&assign.value) {
+                                instructions.push(BytecodeOp::AddLocalConst(name.clone(), -k));
+                                instructions.push(BytecodeOp::Dup); // for StoreLocal below
+                            } else {
+                                instructions.push(BytecodeOp::LoadLocal(name.clone()));
+                                let len = instructions.len();
+                                instructions.swap(len - 2, len - 1);
+                                instructions.push(BytecodeOp::Sub);
+                            }
+                        } else {
+                            if let AssignTarget::Variable(name) = &assign.target {
                                 instructions.push(BytecodeOp::LoadLocal(name.clone()));
                             }
-                            _ => {}
+                            let len = instructions.len();
+                            instructions.swap(len - 2, len - 1);
+                            instructions.push(BytecodeOp::Sub);
                         }
-                        let len = instructions.len();
-                        instructions.swap(len - 2, len - 1);
-                        instructions.push(BytecodeOp::Sub);
                     }
                     AssignOp::StarEqual => {
-                        match &assign.target {
-                            AssignTarget::Variable(name) => {
+                        if let AssignTarget::Variable(name) = &assign.target {
+                            if let Some(k) = int_lit(&assign.value) {
+                                instructions.push(BytecodeOp::MulLocalConst(name.clone(), k));
+                                instructions.push(BytecodeOp::Dup); // for StoreLocal below
+                            } else {
+                                instructions.push(BytecodeOp::LoadLocal(name.clone()));
+                                let len = instructions.len();
+                                instructions.swap(len - 2, len - 1);
+                                instructions.push(BytecodeOp::Mul);
+                            }
+                        } else {
+                            if let AssignTarget::Variable(name) = &assign.target {
                                 instructions.push(BytecodeOp::LoadLocal(name.clone()));
                             }
-                            _ => {}
+                            let len = instructions.len();
+                            instructions.swap(len - 2, len - 1);
+                            instructions.push(BytecodeOp::Mul);
                         }
-                        let len = instructions.len();
-                        instructions.swap(len - 2, len - 1);
-                        instructions.push(BytecodeOp::Mul);
                     }
                     AssignOp::SlashEqual => {
                         match &assign.target {
@@ -599,12 +649,26 @@ impl CfmlCompiler {
                         match &assign.target {
                             AssignTarget::Variable(name) => {
                                 instructions.push(BytecodeOp::LoadLocal(name.clone()));
+                                let len = instructions.len();
+                                instructions.swap(len - 2, len - 1);
+                                instructions.push(BytecodeOp::Concat);
                             }
-                            _ => {}
+                            AssignTarget::StructAccess(obj, member) => {
+                                // Stack: [rhs]. Load current, then Swap + Concat so
+                                // the final stack order is [current, rhs] → [result].
+                                self.compile_expression(obj, instructions);
+                                instructions.push(BytecodeOp::GetProperty(member.clone()));
+                                instructions.push(BytecodeOp::Swap);
+                                instructions.push(BytecodeOp::Concat);
+                            }
+                            AssignTarget::ArrayAccess(arr, idx) => {
+                                self.compile_expression(arr, instructions);
+                                self.compile_expression(idx, instructions);
+                                instructions.push(BytecodeOp::GetIndex);
+                                instructions.push(BytecodeOp::Swap);
+                                instructions.push(BytecodeOp::Concat);
+                            }
                         }
-                        let len = instructions.len();
-                        instructions.swap(len - 2, len - 1);
-                        instructions.push(BytecodeOp::Concat);
                     }
                     AssignOp::Equal => {} // Value already on stack
                 }
@@ -621,17 +685,24 @@ impl CfmlCompiler {
                         Self::emit_nested_writeback(arr, instructions);
                     }
                     AssignTarget::StructAccess(obj, member) => {
-                        // Stack has [value]. SetProperty needs [obj, value].
-                        // Compile obj, then swap so value is on top.
-                        self.compile_expression(obj, instructions);
-                        instructions.push(BytecodeOp::Swap);
-                        instructions.push(BytecodeOp::SetProperty(member.clone()));
-                        // SetProperty leaves modified obj on stack; store it back
-                        // For nested access (e.g. s.a.b = val), walk up the chain:
-                        //   After SetProperty("b"), stack has modified s.a
-                        //   Load s, swap, SetProperty("a") → modified s on stack
-                        //   StoreLocal("s")
-                        Self::emit_nested_writeback(obj, instructions);
+                        if let Expression::Identifier(ref ident) = **obj {
+                            if !is_reserved_scope_name(&ident.name) {
+                                instructions.push(BytecodeOp::StoreLocalProperty(
+                                    ident.name.clone(),
+                                    member.clone(),
+                                ));
+                            } else {
+                                self.compile_expression(obj, instructions);
+                                instructions.push(BytecodeOp::Swap);
+                                instructions.push(BytecodeOp::SetProperty(member.clone()));
+                                Self::emit_nested_writeback(obj, instructions);
+                            }
+                        } else {
+                            self.compile_expression(obj, instructions);
+                            instructions.push(BytecodeOp::Swap);
+                            instructions.push(BytecodeOp::SetProperty(member.clone()));
+                            Self::emit_nested_writeback(obj, instructions);
+                        }
                     }
                 }
             }
@@ -1105,6 +1176,25 @@ impl CfmlCompiler {
         expr: &Expression,
         instructions: &mut Vec<BytecodeOp>,
     ) -> bool {
+        // Helper: emit `target op= 1` as a statement for any assignable expression.
+        fn emit_memberaccess_step(
+            this: &mut CfmlCompiler,
+            access: &MemberAccess,
+            delta: i64,
+            instructions: &mut Vec<BytecodeOp>,
+        ) {
+            // obj.member = obj.member + delta  (statement form: no stack leftover)
+            this.compile_expression(&access.object, instructions);
+            instructions.push(BytecodeOp::GetProperty(access.member.clone()));
+            instructions.push(BytecodeOp::Integer(delta));
+            instructions.push(BytecodeOp::Add);
+            // Store back via SetProperty + nested writeback
+            this.compile_expression(&access.object, instructions);
+            instructions.push(BytecodeOp::Swap);
+            instructions.push(BytecodeOp::SetProperty(access.member.clone()));
+            CfmlCompiler::emit_nested_writeback(&access.object, instructions);
+        }
+
         match expr {
             Expression::PostfixOp(postfix) => {
                 if let Expression::Identifier(ident) = &*postfix.operand {
@@ -1118,6 +1208,14 @@ impl CfmlCompiler {
                             return true;
                         }
                     }
+                }
+                if let Expression::MemberAccess(access) = &*postfix.operand {
+                    let delta = match postfix.operator {
+                        PostfixOpType::Increment => 1,
+                        PostfixOpType::Decrement => -1,
+                    };
+                    emit_memberaccess_step(self, access, delta, instructions);
+                    return true;
                 }
             }
             Expression::UnaryOp(unary) => {
@@ -1133,6 +1231,15 @@ impl CfmlCompiler {
                         }
                         _ => {}
                     }
+                }
+                if let Expression::MemberAccess(access) = &*unary.operand {
+                    let delta = match unary.operator {
+                        UnaryOpType::PrefixIncrement => 1,
+                        UnaryOpType::PrefixDecrement => -1,
+                        _ => return false,
+                    };
+                    emit_memberaccess_step(self, access, delta, instructions);
+                    return true;
                 }
             }
             _ => {}
@@ -1279,6 +1386,11 @@ impl CfmlCompiler {
         let iter_var = format!("__iter_{}", instructions.len());
         let idx_var = format!("__idx_{}", instructions.len());
         let limit_var = format!("__limit_{}", instructions.len());
+        // Declare as function-locals so StoreLocal writes to locals (not __variables
+        // in a CFC method context) — otherwise the loop counter never increments.
+        instructions.push(BytecodeOp::DeclareLocal(iter_var.clone()));
+        instructions.push(BytecodeOp::DeclareLocal(idx_var.clone()));
+        instructions.push(BytecodeOp::DeclareLocal(limit_var.clone()));
         instructions.push(BytecodeOp::StoreLocal(iter_var.clone()));
 
         // Hoist len(iterable) out of the loop. The old codegen looked up the
@@ -1307,7 +1419,17 @@ impl CfmlCompiler {
         instructions.push(BytecodeOp::LoadLocal(iter_var.clone()));
         instructions.push(BytecodeOp::LoadLocal(idx_var.clone()));
         instructions.push(BytecodeOp::GetIndex);
-        instructions.push(BytecodeOp::StoreLocal(for_in.variable.clone()));
+        // Strip a leading `local.` prefix from the loop variable so it stores
+        // as a simple local rather than a literal key containing a dot. A
+        // subsequent `local.X` read resolves to that local via the normal
+        // locals lookup.
+        let loop_var_name = if let Some(rest) = for_in.variable.strip_prefix("local.") {
+            rest.to_string()
+        } else {
+            for_in.variable.clone()
+        };
+        instructions.push(BytecodeOp::DeclareLocal(loop_var_name.clone()));
+        instructions.push(BytecodeOp::StoreLocal(loop_var_name));
 
         self.loop_stack.push((Vec::new(), Vec::new()));
 

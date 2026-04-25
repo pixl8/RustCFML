@@ -1320,11 +1320,27 @@ impl Parser {
                 }
             }
 
-            // Dynamic name (e.g., string interpolation) — emit __cfparam(nameExpr, defaultExpr)
             let default_val = default_expr.unwrap_or(Expression::Literal(Literal {
                 value: LiteralValue::String(String::new()),
                 location: loc,
             }));
+
+            // Narrow lowering: recognise the common pattern
+            //   param name="a.b.c['#expr#']" default=...;
+            // and emit a structKeyExists guard + bracket assignment so the
+            // mutation flows through normal codegen (which propagates Arc
+            // mutations back to the caller's locals — same path as
+            // `arguments.obj.foo = bar`). Falls through to the generic
+            // __cfparam dispatch for anything more exotic.
+            if let Expression::StringInterpolation(ref interp) = name_val {
+                if let Some(stmt) =
+                    try_lower_dynamic_param(interp, &default_val, loc)
+                {
+                    return Ok(CfmlNode::Statement(stmt));
+                }
+            }
+
+            // Dynamic name (e.g., string interpolation) — emit __cfparam(nameExpr, defaultExpr)
             let call = Expression::FunctionCall(Box::new(FunctionCall {
                 name: Box::new(Expression::Identifier(Identifier {
                     name: "__cfparam".to_string(),
@@ -1525,18 +1541,30 @@ impl Parser {
         let params = self.parse_param_list()?;
         self.consume(&Token::RParen)?;
 
-        // Parse function metadata attributes (e.g., httpmethod="GET" restpath="/users")
+        // Parse function metadata attributes (e.g., httpmethod="GET" restpath="/users",
+        // output="false", hint="..."). Accepts both identifiers and keyword tokens as keys.
         let mut metadata = Vec::new();
-        while let Token::Identifier(_) = self.peek(0) {
-            if matches!(self.peek(1), Token::Equal) {
-                let key = self.extract_identifier()?;
-                self.consume(&Token::Equal)?;
-                if let Token::String(val) = self.peek(0).clone() {
-                    self.advance();
-                    metadata.push((key, val));
-                } else {
-                    break;
-                }
+        loop {
+            let is_attr_key = matches!(self.peek(1), Token::Equal)
+                && (matches!(self.peek(0), Token::Identifier(_))
+                    || self.token_as_string(&self.peek(0).clone()).is_some());
+            if !is_attr_key {
+                break;
+            }
+            let key = if let Token::Identifier(ref s) = self.peek(0) {
+                let s = s.clone();
+                self.advance();
+                s
+            } else if let Some(s) = self.token_as_string(&self.peek(0).clone()) {
+                self.advance();
+                s
+            } else {
+                break;
+            };
+            self.consume(&Token::Equal)?;
+            if let Token::String(val) = self.peek(0).clone() {
+                self.advance();
+                metadata.push((key, val));
             } else {
                 break;
             }
@@ -1629,16 +1657,29 @@ impl Parser {
         }
 
         // Parse component metadata attributes (e.g., taffy_uri="/users/{id}", output="false", hint="...", accessors="true")
-        // Accepts both identifiers and keyword tokens as attribute keys.
+        // Accepts both identifiers and keyword tokens as attribute keys, plus
+        // namespaced colon-separated keys like `taffy:uri` (lex'd as three
+        // tokens: ident, `:`, ident).
         let mut metadata = Vec::new();
         loop {
-            let is_attr_key = matches!(self.peek(1), Token::Equal)
-                && (matches!(self.peek(0), Token::Identifier(_))
-                    || self.token_as_string(&self.peek(0).clone()).is_some());
-            if !is_attr_key {
+            // Determine whether the upcoming tokens form a metadata attribute.
+            // Patterns we recognise as a key:
+            //   <ident>            =
+            //   <ident> : <ident>  =       (namespaced, e.g. taffy:uri)
+            let head_is_keyish = matches!(self.peek(0), Token::Identifier(_))
+                || self.token_as_string(&self.peek(0).clone()).is_some();
+            if !head_is_keyish {
                 break;
             }
-            let key = if let Token::Identifier(ref s) = self.peek(0) {
+            let is_simple = matches!(self.peek(1), Token::Equal);
+            let is_namespaced = matches!(self.peek(1), Token::Colon)
+                && (matches!(self.peek(2), Token::Identifier(_))
+                    || self.token_as_string(&self.peek(2).clone()).is_some())
+                && matches!(self.peek(3), Token::Equal);
+            if !is_simple && !is_namespaced {
+                break;
+            }
+            let mut key = if let Token::Identifier(ref s) = self.peek(0) {
                 let s = s.clone();
                 self.advance();
                 s
@@ -1648,6 +1689,21 @@ impl Parser {
             } else {
                 break;
             };
+            if is_namespaced {
+                self.advance(); // consume ':'
+                let suffix = if let Token::Identifier(ref s) = self.peek(0) {
+                    let s = s.clone();
+                    self.advance();
+                    s
+                } else if let Some(s) = self.token_as_string(&self.peek(0).clone()) {
+                    self.advance();
+                    s
+                } else {
+                    break;
+                };
+                key.push('_');
+                key.push_str(&suffix);
+            }
             self.consume(&Token::Equal)?;
             if let Token::String(val) = self.peek(0).clone() {
                 self.advance();
@@ -1976,6 +2032,25 @@ impl Parser {
             } else {
                 None
             };
+
+            // Consume and discard optional per-parameter attributes (e.g. `hint="..."`).
+            // These are accepted for source compatibility but not stored on Param.
+            loop {
+                let is_attr_key = matches!(self.peek(1), Token::Equal)
+                    && (matches!(self.peek(0), Token::Identifier(_))
+                        || self.token_as_string(&self.peek(0).clone()).is_some());
+                if !is_attr_key {
+                    break;
+                }
+                self.advance(); // key
+                self.consume(&Token::Equal)?;
+                if matches!(self.peek(0), Token::String(_)) {
+                    self.advance();
+                } else {
+                    // Tolerate bare identifier / number / etc. as attribute value
+                    let _ = self.parse_expression();
+                }
+            }
 
             params.push(Param {
                 name,
@@ -3088,6 +3163,195 @@ impl Parser {
             location: self.current_location(),
         }))
     }
+}
+
+/// Try to lower `param name="<dotted.path>['#expr#']" default=<d>;` into:
+///
+///   if (!structKeyExists(<dotted.path>, <expr>)) {
+///       <dotted.path>[<expr>] = <d>;
+///   }
+///
+/// Returns None if the interpolation does not match this exact shape.
+/// This is a deliberately narrow optimisation aimed at the Taffy/FW1
+/// `mimeExtensions['#ext#']` idiom — anything more general falls through
+/// to the runtime `__cfparam` dispatch.
+fn try_lower_dynamic_param(
+    interp: &StringInterpolation,
+    default_val: &Expression,
+    loc: SourceLocation,
+) -> Option<Statement> {
+    // Three accepted shapes:
+    //   1. parts.len() == 3 — `<path>['#expr#']` (or "...")
+    //   2. parts.len() == 2 — `<path>.#expr#` (interpolated trailing key)
+    //   3. parts.len() == 3 — `<path>['#expr#'].<lit>(.<lit>...)` — bracket then dotted literal tail
+    let prefix_path: &str;
+    let key_part_index: usize;
+    let mut trailing_literals: Vec<String> = Vec::new();
+    match interp.parts.len() {
+        3 => {
+            let prefix = match &interp.parts[0] {
+                Expression::Literal(Literal { value: LiteralValue::String(s), .. }) => s,
+                _ => return None,
+            };
+            let suffix = match &interp.parts[2] {
+                Expression::Literal(Literal { value: LiteralValue::String(s), .. }) => s,
+                _ => return None,
+            };
+            let p = if let Some(p) = prefix.strip_suffix("['") {
+                p
+            } else if let Some(p) = prefix.strip_suffix("[\"") {
+                p
+            } else {
+                return None;
+            };
+            // Suffix must start with the matching closing quote+bracket; anything after
+            // is a dotted literal tail (shape 3).
+            let after_close = if let Some(rest) = suffix.strip_prefix("']") {
+                rest
+            } else if let Some(rest) = suffix.strip_prefix("\"]") {
+                rest
+            } else {
+                return None;
+            };
+            if !after_close.is_empty() {
+                // Expect `.<ident>(.<ident>)*`
+                if !after_close.starts_with('.') {
+                    return None;
+                }
+                for seg in after_close[1..].split('.') {
+                    if !is_simple_ident(seg) {
+                        return None;
+                    }
+                    trailing_literals.push(seg.to_string());
+                }
+            }
+            prefix_path = p;
+            key_part_index = 1;
+        }
+        2 => {
+            let prefix = match &interp.parts[0] {
+                Expression::Literal(Literal { value: LiteralValue::String(s), .. }) => s,
+                _ => return None,
+            };
+            let p = match prefix.strip_suffix('.') {
+                Some(p) => p,
+                None => return None,
+            };
+            prefix_path = p;
+            key_part_index = 1;
+        }
+        _ => return None,
+    }
+    if prefix_path.is_empty() {
+        return None;
+    }
+    // Build a MemberAccess chain from the dotted prefix.
+    let segments: Vec<&str> = prefix_path.split('.').collect();
+    if segments.iter().any(|s| s.is_empty() || !is_simple_ident(s)) {
+        return None;
+    }
+    let mut base = Expression::Identifier(Identifier {
+        name: segments[0].to_string(),
+        location: loc,
+    });
+    for seg in &segments[1..] {
+        base = Expression::MemberAccess(Box::new(MemberAccess {
+            object: Box::new(base),
+            member: (*seg).to_string(),
+            null_safe: false,
+            location: loc,
+        }));
+    }
+    let key_expr = interp.parts[key_part_index].clone();
+
+    if trailing_literals.is_empty() {
+        // Shape 1 & 2: `base[key]` is the leaf.
+        // Condition: !structKeyExists(base, key)
+        let cond = Expression::UnaryOp(Box::new(UnaryOp {
+            operator: UnaryOpType::Not,
+            operand: Box::new(Expression::FunctionCall(Box::new(FunctionCall {
+                name: Box::new(Expression::Identifier(Identifier {
+                    name: "structKeyExists".to_string(),
+                    location: loc,
+                })),
+                arguments: vec![base.clone(), key_expr.clone()],
+                location: loc,
+            }))),
+            location: loc,
+        }));
+        let assign = Statement::Assignment(Assignment {
+            target: AssignTarget::ArrayAccess(Box::new(base), Box::new(key_expr)),
+            value: default_val.clone(),
+            operator: AssignOp::Equal,
+            location: loc,
+        });
+        Some(Statement::If(If {
+            condition: cond,
+            then_branch: vec![assign],
+            else_if: vec![],
+            else_branch: None,
+            location: loc,
+        }))
+    } else {
+        // Shape 3: `base[key].lit1.lit2...litN` is the leaf.
+        // Build expr `base[key].lit1...litN-1` (parent of leaf) and the leaf member name.
+        let mut parent = Expression::ArrayAccess(Box::new(ArrayAccess {
+            array: Box::new(base),
+            index: Box::new(key_expr),
+            location: loc,
+        }));
+        let leaf = trailing_literals.last().unwrap().clone();
+        for seg in &trailing_literals[..trailing_literals.len() - 1] {
+            parent = Expression::MemberAccess(Box::new(MemberAccess {
+                object: Box::new(parent),
+                member: seg.clone(),
+                null_safe: false,
+                location: loc,
+            }));
+        }
+        // Condition: !structKeyExists(parent, "leaf")
+        let cond = Expression::UnaryOp(Box::new(UnaryOp {
+            operator: UnaryOpType::Not,
+            operand: Box::new(Expression::FunctionCall(Box::new(FunctionCall {
+                name: Box::new(Expression::Identifier(Identifier {
+                    name: "structKeyExists".to_string(),
+                    location: loc,
+                })),
+                arguments: vec![
+                    parent.clone(),
+                    Expression::Literal(Literal {
+                        value: LiteralValue::String(leaf.clone()),
+                        location: loc,
+                    }),
+                ],
+                location: loc,
+            }))),
+            location: loc,
+        }));
+        // Body: parent.leaf = default
+        let assign = Statement::Assignment(Assignment {
+            target: AssignTarget::StructAccess(Box::new(parent), leaf),
+            value: default_val.clone(),
+            operator: AssignOp::Equal,
+            location: loc,
+        });
+        Some(Statement::If(If {
+            condition: cond,
+            then_branch: vec![assign],
+            else_if: vec![],
+            else_branch: None,
+            location: loc,
+        }))
+    }
+}
+
+fn is_simple_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 impl TryFrom<CfmlNode> for Statement {

@@ -537,6 +537,7 @@ pub fn get_builtin_functions() -> HashMap<String, BuiltinFunction> {
     f.insert("__cftransaction_rollback".into(), fn_cftransaction_rollback_stub);
     f.insert("cfdirectory".into(), fn_cfdirectory);
     f.insert("__cflog".into(), fn_cflog_stub);
+    f.insert("__cfparam".into(), fn_cfparam_stub);
     f.insert("__cfsetting".into(), fn_cfsetting_stub);
     f.insert("__cflock_start".into(), fn_cflock_start_stub);
     f.insert("__cflock_end".into(), fn_cflock_end_stub);
@@ -4841,7 +4842,12 @@ fn fn_directory_list(args: Vec<CfmlValue>) -> CfmlResult {
         }
     }
 
-    fn list_dir(path: &str, recurse: bool, filter: &str, list_info: &str) -> Result<Vec<CfmlValue>, std::io::Error> {
+    enum Entry {
+        Scalar(CfmlValue),
+        Row { name: String, directory: String, size: u64, is_dir: bool },
+    }
+
+    fn list_dir(path: &str, recurse: bool, filter: &str, list_info: &str) -> Result<Vec<Entry>, std::io::Error> {
         let mut results = Vec::new();
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;
@@ -4854,11 +4860,17 @@ fn fn_directory_list(args: Vec<CfmlValue>) -> CfmlResult {
 
             // Include both files and directories (matching CFML behavior)
             if (is_file && matches_filter(&file_name, filter)) || (is_dir && (filter.is_empty() || !filter.starts_with("*."))) {
-                let value = match list_info {
-                    "name" => file_name.clone(),
-                    _ => full_path.clone(), // "path" is default
+                match list_info {
+                    "query" => {
+                        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                        let directory = entry_path.parent()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        results.push(Entry::Row { name: file_name.clone(), directory, size, is_dir });
+                    }
+                    "name" => results.push(Entry::Scalar(CfmlValue::String(file_name.clone()))),
+                    _ => results.push(Entry::Scalar(CfmlValue::String(full_path.clone()))),
                 };
-                results.push(CfmlValue::String(value));
             }
             if recurse && is_dir {
                 results.extend(list_dir(&full_path, true, filter, list_info)?);
@@ -4868,7 +4880,39 @@ fn fn_directory_list(args: Vec<CfmlValue>) -> CfmlResult {
     }
 
     match list_dir(&path, recurse, &filter, &list_info) {
-        Ok(files) => Ok(CfmlValue::array(files)),
+        Ok(entries) => {
+            if list_info == "query" {
+                let columns = vec![
+                    "name".to_string(),
+                    "directory".to_string(),
+                    "size".to_string(),
+                    "type".to_string(),
+                    "dateLastModified".to_string(),
+                    "attributes".to_string(),
+                    "mode".to_string(),
+                ];
+                let mut q = cfml_common::dynamic::CfmlQuery::new(columns);
+                for e in entries {
+                    if let Entry::Row { name, directory, size, is_dir } = e {
+                        let mut row = indexmap::IndexMap::new();
+                        row.insert("name".to_string(), CfmlValue::String(name));
+                        row.insert("directory".to_string(), CfmlValue::String(directory));
+                        row.insert("size".to_string(), CfmlValue::Int(size as i64));
+                        row.insert("type".to_string(), CfmlValue::String(if is_dir { "Dir".into() } else { "File".into() }));
+                        row.insert("dateLastModified".to_string(), CfmlValue::String(String::new()));
+                        row.insert("attributes".to_string(), CfmlValue::String(String::new()));
+                        row.insert("mode".to_string(), CfmlValue::String(String::new()));
+                        q.rows.push(row);
+                    }
+                }
+                Ok(CfmlValue::Query(q))
+            } else {
+                let files: Vec<CfmlValue> = entries.into_iter().filter_map(|e| {
+                    if let Entry::Scalar(v) = e { Some(v) } else { None }
+                }).collect();
+                Ok(CfmlValue::array(files))
+            }
+        }
         Err(e) => Err(CfmlError::runtime(format!("directoryList: {}", e))),
     }
 }
@@ -9218,6 +9262,10 @@ fn fn_file_is_eof(args: Vec<CfmlValue>) -> CfmlResult {
 
 fn fn_cflog_stub(_args: Vec<CfmlValue>) -> CfmlResult {
     Err(CfmlError::runtime("cflog requires VM-level support and was not intercepted.".to_string()))
+}
+
+fn fn_cfparam_stub(_args: Vec<CfmlValue>) -> CfmlResult {
+    Err(CfmlError::runtime("__cfparam requires VM-level support and was not intercepted.".to_string()))
 }
 
 fn fn_cfsetting_stub(_args: Vec<CfmlValue>) -> CfmlResult {
