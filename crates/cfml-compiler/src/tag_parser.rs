@@ -141,31 +141,31 @@ fn tags_to_script_inner(source: &str, imports: &mut std::collections::HashMap<St
             let (script, consumed) = parse_import_tag(&chars, i, len, imports);
             result.push_str(&script);
             i += consumed;
-        } else if chars[i] == '#' && i + 1 < len && chars[i + 1] != '#' {
-            // Hash expression inside text: #expr# -> writeOutput(expr);
-            // But only if we're in a text context (not inside a tag attribute)
-            // Check if there's a matching closing #
+        } else if in_cfoutput && chars[i] == '#' && i + 1 < len && chars[i + 1] != '#' {
+            // Hash expression inside <cfoutput> text: #expr# -> writeOutput(expr).
+            // OUTSIDE <cfoutput>, `#` is literal text in CFML — falls through to
+            // the plain-text branch below (e.g. `<cfinclude template="x.css">`
+            // outputs CSS verbatim, including hex colors like `#f3f4f6;`).
             if let Some(end) = find_closing_hash(&chars, i + 1, len) {
                 let expr: String = chars[i + 1..end].iter().collect();
-                // Inside <cfoutput>: always output. Outside: use __writeText (suppressible).
-                let fn_name = if in_cfoutput { "writeOutput" } else { "__writeText" };
-                result.push_str(&format!("{}({});", fn_name, expr));
+                result.push_str(&format!("writeOutput({});", expr));
                 i = end + 1;
             } else {
                 result.push(chars[i]);
                 i += 1;
             }
-        } else if chars[i] == '#' && i + 1 < len && chars[i + 1] == '#' {
-            // Escaped hash ## -> literal #
-            let fn_name = if in_cfoutput { "writeOutput" } else { "__writeText" };
-            result.push_str(&format!("{}(\"##\");", fn_name));
+        } else if in_cfoutput && chars[i] == '#' && i + 1 < len && chars[i + 1] == '#' {
+            // Escaped hash ## inside cfoutput -> literal #
+            result.push_str("writeOutput(\"##\");");
             i += 2;
         } else {
-            // Plain text - collect until we hit a tag, hash expression, or CFML comment
+            // Plain text - collect until we hit a tag, (cfoutput-scoped) hash
+            // expression, or CFML comment. Hash characters are part of plain text
+            // outside <cfoutput>.
             let start = i;
             while i < len && !(chars[i] == '<' && is_cf_tag_start(&chars, i, len))
                 && !(chars[i] == '<' && !imports.is_empty() && is_import_tag_start(&chars, i, len, imports))
-                && !(chars[i] == '#' && i + 1 < len)
+                && !(in_cfoutput && chars[i] == '#' && i + 1 < len)
                 && !(i + 4 < len && chars[i] == '<' && chars[i + 1] == '!' && chars[i + 2] == '-' && chars[i + 3] == '-' && chars[i + 4] == '-')
             {
                 i += 1;
@@ -177,7 +177,14 @@ fn tags_to_script_inner(source: &str, imports: &mut std::collections::HashMap<St
                 // via cfprocessingdirective or cfsetting enableCFOutputOnly.
                 // Outside <cfoutput>: use __writeText (suppressible by enableCFOutputOnly).
                 let fn_name = if in_cfoutput { "writeOutput" } else { "__writeText" };
-                let escaped = text.replace('\\', "\\\\").replace('"', "\"\"").replace('\n', "\\n").replace('\r', "\\r");
+                let mut escaped = text.replace('\\', "\\\\").replace('"', "\"\"").replace('\n', "\\n").replace('\r', "\\r");
+                // Outside <cfoutput>, `#` is literal in template text — but the
+                // lexer interpolates `#expr#` inside string literals. Double the
+                // hashes to CFML's literal-hash escape so e.g. `#f3f4f6;` from a
+                // CSS-via-cfinclude survives untouched.
+                if !in_cfoutput {
+                    escaped = escaped.replace('#', "##");
+                }
                 result.push_str(&format!("{}(\"{}\");", fn_name, escaped));
             }
         }

@@ -112,8 +112,22 @@ pub fn compile_file_cached(
         .read_to_string(path)
         .map_err(|e| CfmlError::runtime(format!("Cannot read '{}': {}", path, e)))?;
 
-    // Tag preprocessing
-    let source_code = if cfml_compiler::tag_parser::has_cfml_tags(&source_code) {
+    // Tag preprocessing. Run when the file looks like a template — either it
+    // contains CFML tags, or its extension marks it as static markup that
+    // cfinclude is expected to splice in verbatim (.css, .html, .htm, .txt).
+    // Without this, e.g. `<cfinclude template="dashboard.css">` parses raw CSS
+    // (`body { background-color: #f3f4f6; }`) as CFML script and explodes on
+    // the first hex color. Skip preprocessing for .cfc files that don't have
+    // CFML tags — those are script-only components (`component { ... }`).
+    let lower_path = path.to_lowercase();
+    let is_template_ext = lower_path.ends_with(".cfm")
+        || lower_path.ends_with(".css")
+        || lower_path.ends_with(".html")
+        || lower_path.ends_with(".htm")
+        || lower_path.ends_with(".txt");
+    let needs_tag_parse =
+        cfml_compiler::tag_parser::has_cfml_tags(&source_code) || is_template_ext;
+    let source_code = if needs_tag_parse {
         let converted = cfml_compiler::tag_parser::tags_to_script(&source_code);
         if std::env::var("RUSTCFML_DUMP_TAGS").is_ok() {
             eprintln!(

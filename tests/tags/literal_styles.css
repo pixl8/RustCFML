@@ -1,0 +1,9 @@
+body {
+	background-color: #f3f4f6;
+	color: #111827;
+	margin: 0;
+}
+.alert {
+	background-color: #fef2f2;
+	border: 1px solid #fecaca;
+}

@@ -99,6 +99,7 @@ try { include "oop/test_external_prop.cfm"; } catch (any e) { writeOutput("ERROR
 try { include "tags/test_tags_basic.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_basic.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_control.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_control.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_include.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_include.cfm | " & e.message & chr(10)); }
+try { include "tags/test_cfinclude_css.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_cfinclude_css.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_savecontent.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_savecontent.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_param.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_param.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_param_dynamic.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_param_dynamic.cfm | " & e.message & chr(10)); }
