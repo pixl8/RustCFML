@@ -8678,18 +8678,57 @@ impl CfmlVirtualMachine {
                 .position(|f| f.name == "__main__")
                 .unwrap_or(0);
             let cfc_func = self.program.functions[main_idx].clone();
-            // Snapshot user_functions before CFC body execution so we can detect
-            // functions added by cfinclude inside the component body
+
+            // Bug G fix: detect `extends="<parent>"` in the cfc body bytecode
+            // (codegen emits `String("__extends"); String(<parent>)` consecutively
+            // when building the component struct) and pre-resolve the parent so
+            // its `variables` scope is visible during child body execution. Without
+            // this, page-level statements that reference inherited helpers
+            // (e.g. `variables.encode.string(...)` from `taffy.core.resource`) throw
+            // because inheritance only merges AFTER the child body has run.
+            //
+            // We deliberately copy parent's __variables and let the existing filter
+            // in execute_function_with_args (line ~621) strip Function values —
+            // injecting parent methods into the child body's initial scope causes
+            // recursion through bound this/__variables (see TAFFY_NEXT_STEPS.md).
+            let parent_name: Option<String> =
+                cfc_func.instructions.windows(2).find_map(|w| match w {
+                    [BytecodeOp::String(s1), BytecodeOp::String(s2)] if s1 == "__extends" => {
+                        Some(s2.clone())
+                    }
+                    _ => None,
+                });
+            let injected_scope: IndexMap<String, CfmlValue> = if let Some(pname) = parent_name {
+                if let Some(parent_template) = self.resolve_component_template(&pname, locals) {
+                    let resolved_parent = self.resolve_inheritance(parent_template, locals);
+                    if let CfmlValue::Struct(ref ps) = resolved_parent {
+                        if let Some(CfmlValue::Struct(parent_vars)) = ps.get("__variables") {
+                            (**parent_vars).clone()
+                        } else {
+                            IndexMap::new()
+                        }
+                    } else {
+                        IndexMap::new()
+                    }
+                } else {
+                    IndexMap::new()
+                }
+            } else {
+                IndexMap::new()
+            };
+
+            // Snapshot user_functions AFTER parent resolution (parent body may have
+            // registered helper functions which should not be flagged as
+            // "added by cfinclude" inside this child body).
             let pre_exec_func_names: std::collections::HashSet<String> =
                 self.user_functions.keys().cloned().collect();
-            // CFC body executes with a clean scope — the caller's locals
-            // should NOT leak into the component being constructed.
+            // CFC body executes with a scope containing parent's variables (so
+            // unscoped lookups inside the child body resolve inherited values).
             // Mark as "__cfc_body__" so the VM treats it as function scope
-            // (prevents globals leaking into `variables` via LoadLocal)
+            // (prevents globals leaking into `variables` via LoadLocal).
             let mut cfc_body = (*cfc_func).clone();
             cfc_body.name = "__cfc_body__".to_string();
-            let clean_scope = IndexMap::new();
-            let _ = self.execute_function_with_args(&cfc_body, Vec::new(), Some(&clean_scope));
+            let _ = self.execute_function_with_args(&cfc_body, Vec::new(), Some(&injected_scope));
             self.source_file = old_source_file;
             // Capture component body variables
             let component_variables = self.captured_locals.take().unwrap_or_default();
@@ -8823,7 +8862,15 @@ impl CfmlVirtualMachine {
                         }
                         vars_scope.insert(k.clone(), CfmlValue::Function(clean));
                     } else {
-                        vars_scope.insert(k.clone(), v.clone());
+                        // Recursively fix Function indices inside nested Struct values
+                        // (e.g. `variables.encode = { string: function(d) {...} }` —
+                        // encode is a Struct whose `string` Function carries a sub-program
+                        // index that must be offset by cv_offset).
+                        let mut cloned = v.clone();
+                        if cv_offset > 0 {
+                            Self::fixup_func_indices(&mut cloned, cv_offset);
+                        }
+                        vars_scope.insert(k.clone(), cloned);
                     }
                 }
                 // Add all component methods (public + private) to variables scope
