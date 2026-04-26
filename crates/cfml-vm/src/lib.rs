@@ -2459,8 +2459,15 @@ impl CfmlVirtualMachine {
                     // Pop the object (receiver)
                     let object = stack.pop().unwrap_or(CfmlValue::Null);
 
-                    // Clear method_this_writeback before the call
+                    // Clear method-writeback state before the call. Both fields must
+                    // be cleared — leaving `method_variables_writeback` set from an
+                    // earlier method call leaks the previous receiver's variables
+                    // scope onto the current receiver in the post-call writeback,
+                    // corrupting plain-struct receivers (e.g. `enc = { string: fn }`)
+                    // by giving them a spurious `__variables` field that masquerades
+                    // them as CFCs on subsequent calls.
                     self.method_this_writeback = None;
+                    self.method_variables_writeback = None;
 
                     // Detect super calls: object is a __super struct (no __name key,
                     // but contains Function values). For super.method(), bind `this`
@@ -7810,24 +7817,45 @@ impl CfmlVirtualMachine {
         } else {
             object.get(method).unwrap_or(CfmlValue::Null)
         };
-        if let CfmlValue::Function(ref fdata) = &prop {
+        if let CfmlValue::Function(ref _fdata) = &prop {
             let func_ref = prop.clone();
             let args: Vec<CfmlValue> = extra_args.drain(..).collect();
-            // Bind 'this' to the object + inject component variables scope
+            // Bind 'this' / __variables ONLY when the receiver is an actual CFC.
+            // For plain struct-stored closures (e.g. `enc = { string: fn }`), the
+            // closure should keep whatever `this` it captured at definition (or
+            // none) — setting `this = receiver` triggers method-writeback that
+            // replaces `enc` in the caller's locals with the closure's captured
+            // `this` on each subsequent call.
+            let receiver_is_cfc = matches!(
+                object,
+                CfmlValue::Struct(ref s) if s.contains_key("__variables") || s.contains_key("__name")
+            );
             let mut method_locals = IndexMap::new();
-            if let CfmlValue::Struct(ref s) = object {
-                if let Some(vars) = s.get("__variables") {
-                    method_locals.insert("__variables".to_string(), vars.clone());
+            if receiver_is_cfc {
+                if let CfmlValue::Struct(ref s) = object {
+                    if let Some(vars) = s.get("__variables") {
+                        method_locals.insert("__variables".to_string(), vars.clone());
+                    }
                 }
+                method_locals.insert("this".to_string(), object.clone());
             }
-            method_locals.insert("this".to_string(), object.clone());
             self.closure_parent_writeback = None;
+            // Save & clear method-writeback state so a stale `this` from the
+            // captured scope can't leak to the caller's CallMethod handler.
+            let saved_this_wb = self.method_this_writeback.take();
+            let saved_vars_wb = self.method_variables_writeback.take();
             let result = self.call_function(&func_ref, args, &method_locals)?;
             if let Some(ref wb) = self.closure_parent_writeback {
                 Self::write_back_to_captured_scope(&func_ref, wb);
             }
             // Clear writeback — component method calls don't leak to calling scope
             self.closure_parent_writeback = None;
+            if !receiver_is_cfc {
+                // Discard any method-writeback that the inner call set up; for
+                // plain struct receivers, there is no `this` to write back to.
+                self.method_this_writeback = saved_this_wb;
+                self.method_variables_writeback = saved_vars_wb;
+            }
             return Ok(result);
         }
 
