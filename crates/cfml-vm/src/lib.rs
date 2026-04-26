@@ -3212,6 +3212,7 @@ impl CfmlVirtualMachine {
                 if let CfmlValue::Int(idx) = body.as_ref() {
                     let idx = *idx as usize;
                     if idx < self.program.functions.len() {
+                        let user_func = Arc::clone(&self.program.functions[idx]);
                         // Handle closure scope merging
                         let effective_locals;
                         let effective_parent = if let Some(ref shared_env) = func.captured_scope {
@@ -3239,7 +3240,6 @@ impl CfmlVirtualMachine {
                         } else {
                             parent_locals
                         };
-                        let user_func = self.program.functions[idx].clone();
                         return self.execute_function_with_args(
                             &user_func,
                             args,
@@ -10185,9 +10185,11 @@ impl CfmlVirtualMachine {
                     }
                 }
             } else {
-                // Restore cached functions from onApplicationStart.
-                // Append them to the current program (which already has the page's
-                // functions + Application.cfc functions from load_application_cfc).
+                // Restore cached functions from onApplicationStart (and any
+                // subsequent requests that grew the program — see the request-end
+                // refresh below). Append them to the current program (which
+                // already has the page's functions + Application.cfc functions
+                // from load_application_cfc).
                 let cached = app.cached_functions.clone();
                 let original_offset = app.cached_functions_original_offset;
                 drop(apps);
@@ -10346,13 +10348,30 @@ impl CfmlVirtualMachine {
             }
         }
 
-        // 9. Write application scope back to ServerState
+        // 9. Write application scope back to ServerState. Also refresh
+        // cached_functions to include any functions registered DURING the request
+        // (e.g. Taffy's `?reload=true` triggers `setupFramework` in
+        // `onRequestStart`, which instantiates resource CFCs and appends factory
+        // beans to `self.program` AFTER `onApplicationStart` already returned).
+        // Without this refresh, later requests restore a stale cached_functions
+        // and any function values that the application scope captured during the
+        // request (e.g. `application._taffy.factory.getBean`) end up with body
+        // indices beyond the restored program length.
         if let Some(ref server_state) = self.server_state.clone() {
             if let Some(ref app_scope) = self.application_scope {
                 if let Ok(scope) = app_scope.lock() {
                     if let Ok(mut apps) = server_state.applications.lock() {
                         if let Some(app) = apps.get_mut(&app_name) {
                             app.variables = scope.clone();
+                            // Refresh cache from current program. Use the
+                            // original offset captured the first time
+                            // onApplicationStart ran; that anchor stays
+                            // constant for the lifetime of the application.
+                            let offset = app.cached_functions_original_offset;
+                            if offset > 0 && self.program.functions.len() > offset {
+                                app.cached_functions =
+                                    self.program.functions[offset..].to_vec();
+                            }
                         }
                     }
                 }
