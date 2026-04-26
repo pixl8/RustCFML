@@ -1900,6 +1900,13 @@ impl CfmlVirtualMachine {
                     self.collect_arg_ref_writeback(func, &locals);
                     // Pop call frame before early return (matches push at function entry)
                     self.call_stack.pop();
+                    debug_assert_eq!(
+                        stack.len(),
+                        1,
+                        "operand-stack discipline broken at Return in {} ({} values, expected 1)",
+                        func.name,
+                        stack.len()
+                    );
                     return Ok(stack.pop().unwrap_or(CfmlValue::Null));
                 }
 
@@ -2361,15 +2368,12 @@ impl CfmlVirtualMachine {
                             _ => CfmlValue::Int(*k),
                         };
                         locals.insert(name.clone(), new_val.clone());
-                        stack.push(new_val.clone());
                         if let Some(ref env) = closure_env {
                             let mut m = env.write().unwrap();
                             if m.contains_key(name.as_str()) {
                                 m.insert(name.clone(), new_val);
                             }
                         }
-                    } else {
-                        stack.push(CfmlValue::Null);
                     }
                 }
                 BytecodeOp::MulLocalConst(name, k) => {
@@ -2380,15 +2384,12 @@ impl CfmlVirtualMachine {
                             _ => CfmlValue::Int(*k),
                         };
                         locals.insert(name.clone(), new_val.clone());
-                        stack.push(new_val.clone());
                         if let Some(ref env) = closure_env {
                             let mut m = env.write().unwrap();
                             if m.contains_key(name.as_str()) {
                                 m.insert(name.clone(), new_val);
                             }
                         }
-                    } else {
-                        stack.push(CfmlValue::Null);
                     }
                 }
                 BytecodeOp::Decrement(name) => {
@@ -3182,6 +3183,12 @@ impl CfmlVirtualMachine {
             self.captured_locals = Some(locals);
         }
 
+        debug_assert!(
+            stack.len() <= 1,
+            "operand-stack discipline broken at end of {} ({} values, expected 0 or 1)",
+            func.name,
+            stack.len()
+        );
         Ok(stack.pop().unwrap_or(CfmlValue::Null))
     }
 
@@ -10507,7 +10514,7 @@ fn stack_effect(op: &BytecodeOp) -> (usize, usize) {
         BytecodeOp::SetIndex => (0, 3),       // obj + key + value → (modifies in place)
         BytecodeOp::GetProperty(_) => (1, 1), // obj → value
         BytecodeOp::LoadLocalProperty(_, _) => (1, 0), // pushes value, reads nothing
-        BytecodeOp::StoreLocalProperty(_, _) => (1, 0), // pops 1 (value), pushes 0
+        BytecodeOp::StoreLocalProperty(_, _) => (0, 1), // pops 1 (value), pushes 0
         BytecodeOp::SetProperty(_) => (0, 2), // obj + value → (modifies)
         BytecodeOp::GetKeys => (1, 1),
         BytecodeOp::ConcatArrays | BytecodeOp::MergeStructs => (1, 2),
@@ -10517,7 +10524,7 @@ fn stack_effect(op: &BytecodeOp) -> (usize, usize) {
         BytecodeOp::DefineFunction(_) => (1, 0),
         // Postfix: push 1 (new value)
         BytecodeOp::Increment(_) | BytecodeOp::Decrement(_) => (1, 0),
-        BytecodeOp::AddLocalConst(_, _) | BytecodeOp::MulLocalConst(_, _) => (1, 0), // reads + writes local, pops 0
+        BytecodeOp::AddLocalConst(_, _) | BytecodeOp::MulLocalConst(_, _) => (0, 0), // pure local mutation, no stack traffic
         // Exception handling
         BytecodeOp::TryStart(_) | BytecodeOp::TryEnd => (0, 0),
         BytecodeOp::Throw | BytecodeOp::Rethrow => (0, 1),

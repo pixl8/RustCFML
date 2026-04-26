@@ -560,68 +560,50 @@ impl CfmlCompiler {
                 instructions.push(BytecodeOp::StoreLocal(var.name.clone()));
             }
             Statement::Assignment(assign) => {
+                // Hot-path: x += <int>, x -= <int>, x *= <int> compile to a single
+                // load-compute-store op inside locals. No stack traffic, no trailing
+                // StoreLocal.
+                if let AssignTarget::Variable(name) = &assign.target {
+                    if let Some(k) = int_lit(&assign.value) {
+                        let op = match &assign.operator {
+                            AssignOp::PlusEqual  => Some(BytecodeOp::AddLocalConst(name.clone(),  k)),
+                            AssignOp::MinusEqual => Some(BytecodeOp::AddLocalConst(name.clone(), -k)),
+                            AssignOp::StarEqual  => Some(BytecodeOp::MulLocalConst(name.clone(),  k)),
+                            _ => None,
+                        };
+                        if let Some(op) = op {
+                            instructions.push(op);
+                            return;
+                        }
+                    }
+                }
+
                 self.compile_expression(&assign.value, instructions);
 
                 match &assign.operator {
                     AssignOp::PlusEqual => {
                         if let AssignTarget::Variable(name) = &assign.target {
-                            if let Some(k) = int_lit(&assign.value) {
-                                instructions.push(BytecodeOp::AddLocalConst(name.clone(), k));
-                                instructions.push(BytecodeOp::Dup); // for StoreLocal below
-                            } else {
-                                instructions.push(BytecodeOp::LoadLocal(name.clone()));
-                                let len = instructions.len();
-                                instructions.swap(len - 2, len - 1);
-                                instructions.push(BytecodeOp::Add);
-                            }
-                        } else {
-                            if let AssignTarget::Variable(name) = &assign.target {
-                                instructions.push(BytecodeOp::LoadLocal(name.clone()));
-                            }
-                            let len = instructions.len();
-                            instructions.swap(len - 2, len - 1);
-                            instructions.push(BytecodeOp::Add);
+                            instructions.push(BytecodeOp::LoadLocal(name.clone()));
                         }
+                        let len = instructions.len();
+                        instructions.swap(len - 2, len - 1);
+                        instructions.push(BytecodeOp::Add);
                     }
                     AssignOp::MinusEqual => {
                         if let AssignTarget::Variable(name) = &assign.target {
-                            if let Some(k) = int_lit(&assign.value) {
-                                instructions.push(BytecodeOp::AddLocalConst(name.clone(), -k));
-                                instructions.push(BytecodeOp::Dup); // for StoreLocal below
-                            } else {
-                                instructions.push(BytecodeOp::LoadLocal(name.clone()));
-                                let len = instructions.len();
-                                instructions.swap(len - 2, len - 1);
-                                instructions.push(BytecodeOp::Sub);
-                            }
-                        } else {
-                            if let AssignTarget::Variable(name) = &assign.target {
-                                instructions.push(BytecodeOp::LoadLocal(name.clone()));
-                            }
-                            let len = instructions.len();
-                            instructions.swap(len - 2, len - 1);
-                            instructions.push(BytecodeOp::Sub);
+                            instructions.push(BytecodeOp::LoadLocal(name.clone()));
                         }
+                        let len = instructions.len();
+                        instructions.swap(len - 2, len - 1);
+                        instructions.push(BytecodeOp::Sub);
                     }
                     AssignOp::StarEqual => {
                         if let AssignTarget::Variable(name) = &assign.target {
-                            if let Some(k) = int_lit(&assign.value) {
-                                instructions.push(BytecodeOp::MulLocalConst(name.clone(), k));
-                                instructions.push(BytecodeOp::Dup); // for StoreLocal below
-                            } else {
-                                instructions.push(BytecodeOp::LoadLocal(name.clone()));
-                                let len = instructions.len();
-                                instructions.swap(len - 2, len - 1);
-                                instructions.push(BytecodeOp::Mul);
-                            }
-                        } else {
-                            if let AssignTarget::Variable(name) = &assign.target {
-                                instructions.push(BytecodeOp::LoadLocal(name.clone()));
-                            }
-                            let len = instructions.len();
-                            instructions.swap(len - 2, len - 1);
-                            instructions.push(BytecodeOp::Mul);
+                            instructions.push(BytecodeOp::LoadLocal(name.clone()));
                         }
+                        let len = instructions.len();
+                        instructions.swap(len - 2, len - 1);
+                        instructions.push(BytecodeOp::Mul);
                     }
                     AssignOp::SlashEqual => {
                         match &assign.target {
