@@ -485,7 +485,7 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "cfml-codegen"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "cfml-common",
  "cfml-compiler",
@@ -495,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "cfml-common"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "indexmap",
  "log",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "cfml-compiler"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "cfml-common",
  "log",
@@ -516,7 +516,7 @@ dependencies = [
 
 [[package]]
 name = "cfml-stdlib"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "aes",
  "argon2",
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "cfml-vm"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "cfml-codegen",
@@ -2748,7 +2748,7 @@ checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
 
 [[package]]
 name = "rustcfml-cli"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -2772,6 +2772,7 @@ name = "rustcfml-wasm"
 version = "0.1.0"
 dependencies = [
  "cfml-codegen",
+ "cfml-common",
  "cfml-compiler",
  "cfml-stdlib",
  "cfml-vm",

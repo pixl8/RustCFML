@@ -53,6 +53,15 @@
             color: var(--accent);
         }
 
+        .header h1 .version {
+            color: var(--text-dim);
+            font-size: 0.75rem;
+            font-weight: 400;
+            font-family: var(--font-mono);
+            margin-left: 6px;
+            vertical-align: middle;
+        }
+
         .header .subtitle {
             color: var(--text-dim);
             font-size: 0.85rem;
@@ -306,7 +315,7 @@
     <div class="header">
         <img src="crab.svg" alt="RustCFML" onerror="this.src='../../crab.svg'; this.onerror=function(){this.style.display='none'}">
         <div>
-            <h1>Rust<span>CFML</span></h1>
+            <h1>Rust<span>CFML</span> <span class="version" id="version"></span></h1>
             <div class="subtitle">A CFML interpreter written in Rust, compiled to WebAssembly</div>
         </div>
         <div class="links">
@@ -694,6 +703,12 @@ writeOutput("  Numbers: " & numberCount);`
                 }
                 await module.default();
                 engine = new module.CfmlEngine();
+
+                // Display version (if exposed by the wasm module)
+                if (typeof module.version === 'function') {
+                    const v = document.getElementById('version');
+                    if (v) v.textContent = 'v' + module.version();
+                }
 
                 // Ready
                 loading.style.display = 'none';

@@ -1,11 +1,17 @@
 //! RustCFML WebAssembly bindings
 
 use cfml_codegen::compiler::CfmlCompiler;
+use cfml_common::VERSION;
 use cfml_compiler::parser::Parser;
 use cfml_compiler::tag_parser;
 use cfml_stdlib::builtins::{get_builtin_functions, get_builtins};
 use cfml_vm::CfmlVirtualMachine;
 use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+pub fn version() -> String {
+    VERSION.to_string()
+}
 
 #[wasm_bindgen]
 pub struct CfmlEngine {
