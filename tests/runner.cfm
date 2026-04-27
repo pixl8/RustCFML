@@ -9,6 +9,7 @@ include "harness.cfm";
 try { include "core/test_variables.cfm"; } catch (any e) { writeOutput("ERROR | core/test_variables.cfm | " & e.message & chr(10)); }
 try { include "core/test_access_identifiers.cfm"; } catch (any e) { writeOutput("ERROR | core/test_access_identifiers.cfm | " & e.message & chr(10)); }
 try { include "core/test_function_scope_capture.cfm"; } catch (any e) { writeOutput("ERROR | core/test_function_scope_capture.cfm | " & e.message & chr(10)); }
+try { include "core/test_struct_method_sequential.cfm"; } catch (any e) { writeOutput("ERROR | core/test_struct_method_sequential.cfm | " & e.message & chr(10)); }
 try { include "core/test_include_scope_capture.cfm"; } catch (any e) { writeOutput("ERROR | core/test_include_scope_capture.cfm | " & e.message & chr(10)); }
 try { include "core/test_operators.cfm"; } catch (any e) { writeOutput("ERROR | core/test_operators.cfm | " & e.message & chr(10)); }
 try { include "core/test_control_flow.cfm"; } catch (any e) { writeOutput("ERROR | core/test_control_flow.cfm | " & e.message & chr(10)); }
@@ -87,6 +88,7 @@ try { include "members/test_number_members.cfm"; } catch (any e) { writeOutput("
 // --- OOP ---
 try { include "oop/test_components.cfm"; } catch (any e) { writeOutput("ERROR | oop/test_components.cfm | " & e.message & chr(10)); }
 try { include "oop/test_inheritance.cfm"; } catch (any e) { writeOutput("ERROR | oop/test_inheritance.cfm | " & e.message & chr(10)); }
+try { include "oop/test_inherited_helpers.cfm"; } catch (any e) { writeOutput("ERROR | oop/test_inherited_helpers.cfm | " & e.message & chr(10)); }
 try { include "oop/test_interfaces.cfm"; } catch (any e) { writeOutput("ERROR | oop/test_interfaces.cfm | " & e.message & chr(10)); }
 try { include "oop/test_metadata.cfm"; } catch (any e) { writeOutput("ERROR | oop/test_metadata.cfm | " & e.message & chr(10)); }
 try { include "oop/test_property_attributes.cfm"; } catch (any e) { writeOutput("ERROR | oop/test_property_attributes.cfm | " & e.message & chr(10)); }
@@ -97,6 +99,7 @@ try { include "oop/test_external_prop.cfm"; } catch (any e) { writeOutput("ERROR
 try { include "tags/test_tags_basic.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_basic.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_control.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_control.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_include.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_include.cfm | " & e.message & chr(10)); }
+try { include "tags/test_cfinclude_css.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_cfinclude_css.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_savecontent.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_savecontent.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_param.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_param.cfm | " & e.message & chr(10)); }
 try { include "tags/test_tags_param_dynamic.cfm"; } catch (any e) { writeOutput("ERROR | tags/test_tags_param_dynamic.cfm | " & e.message & chr(10)); }

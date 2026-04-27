@@ -112,8 +112,22 @@ pub fn compile_file_cached(
         .read_to_string(path)
         .map_err(|e| CfmlError::runtime(format!("Cannot read '{}': {}", path, e)))?;
 
-    // Tag preprocessing
-    let source_code = if cfml_compiler::tag_parser::has_cfml_tags(&source_code) {
+    // Tag preprocessing. Run when the file looks like a template — either it
+    // contains CFML tags, or its extension marks it as static markup that
+    // cfinclude is expected to splice in verbatim (.css, .html, .htm, .txt).
+    // Without this, e.g. `<cfinclude template="dashboard.css">` parses raw CSS
+    // (`body { background-color: #f3f4f6; }`) as CFML script and explodes on
+    // the first hex color. Skip preprocessing for .cfc files that don't have
+    // CFML tags — those are script-only components (`component { ... }`).
+    let lower_path = path.to_lowercase();
+    let is_template_ext = lower_path.ends_with(".cfm")
+        || lower_path.ends_with(".css")
+        || lower_path.ends_with(".html")
+        || lower_path.ends_with(".htm")
+        || lower_path.ends_with(".txt");
+    let needs_tag_parse =
+        cfml_compiler::tag_parser::has_cfml_tags(&source_code) || is_template_ext;
+    let source_code = if needs_tag_parse {
         let converted = cfml_compiler::tag_parser::tags_to_script(&source_code);
         if std::env::var("RUSTCFML_DUMP_TAGS").is_ok() {
             eprintln!(
@@ -1900,6 +1914,13 @@ impl CfmlVirtualMachine {
                     self.collect_arg_ref_writeback(func, &locals);
                     // Pop call frame before early return (matches push at function entry)
                     self.call_stack.pop();
+                    debug_assert_eq!(
+                        stack.len(),
+                        1,
+                        "operand-stack discipline broken at Return in {} ({} values, expected 1)",
+                        func.name,
+                        stack.len()
+                    );
                     return Ok(stack.pop().unwrap_or(CfmlValue::Null));
                 }
 
@@ -2361,15 +2382,12 @@ impl CfmlVirtualMachine {
                             _ => CfmlValue::Int(*k),
                         };
                         locals.insert(name.clone(), new_val.clone());
-                        stack.push(new_val.clone());
                         if let Some(ref env) = closure_env {
                             let mut m = env.write().unwrap();
                             if m.contains_key(name.as_str()) {
                                 m.insert(name.clone(), new_val);
                             }
                         }
-                    } else {
-                        stack.push(CfmlValue::Null);
                     }
                 }
                 BytecodeOp::MulLocalConst(name, k) => {
@@ -2380,15 +2398,12 @@ impl CfmlVirtualMachine {
                             _ => CfmlValue::Int(*k),
                         };
                         locals.insert(name.clone(), new_val.clone());
-                        stack.push(new_val.clone());
                         if let Some(ref env) = closure_env {
                             let mut m = env.write().unwrap();
                             if m.contains_key(name.as_str()) {
                                 m.insert(name.clone(), new_val);
                             }
                         }
-                    } else {
-                        stack.push(CfmlValue::Null);
                     }
                 }
                 BytecodeOp::Decrement(name) => {
@@ -2458,8 +2473,15 @@ impl CfmlVirtualMachine {
                     // Pop the object (receiver)
                     let object = stack.pop().unwrap_or(CfmlValue::Null);
 
-                    // Clear method_this_writeback before the call
+                    // Clear method-writeback state before the call. Both fields must
+                    // be cleared — leaving `method_variables_writeback` set from an
+                    // earlier method call leaks the previous receiver's variables
+                    // scope onto the current receiver in the post-call writeback,
+                    // corrupting plain-struct receivers (e.g. `enc = { string: fn }`)
+                    // by giving them a spurious `__variables` field that masquerades
+                    // them as CFCs on subsequent calls.
                     self.method_this_writeback = None;
+                    self.method_variables_writeback = None;
 
                     // Detect super calls: object is a __super struct (no __name key,
                     // but contains Function values). For super.method(), bind `this`
@@ -3182,6 +3204,12 @@ impl CfmlVirtualMachine {
             self.captured_locals = Some(locals);
         }
 
+        debug_assert!(
+            stack.len() <= 1,
+            "operand-stack discipline broken at end of {} ({} values, expected 0 or 1)",
+            func.name,
+            stack.len()
+        );
         Ok(stack.pop().unwrap_or(CfmlValue::Null))
     }
 
@@ -3198,6 +3226,7 @@ impl CfmlVirtualMachine {
                 if let CfmlValue::Int(idx) = body.as_ref() {
                     let idx = *idx as usize;
                     if idx < self.program.functions.len() {
+                        let user_func = Arc::clone(&self.program.functions[idx]);
                         // Handle closure scope merging
                         let effective_locals;
                         let effective_parent = if let Some(ref shared_env) = func.captured_scope {
@@ -3225,7 +3254,6 @@ impl CfmlVirtualMachine {
                         } else {
                             parent_locals
                         };
-                        let user_func = self.program.functions[idx].clone();
                         return self.execute_function_with_args(
                             &user_func,
                             args,
@@ -7803,24 +7831,45 @@ impl CfmlVirtualMachine {
         } else {
             object.get(method).unwrap_or(CfmlValue::Null)
         };
-        if let CfmlValue::Function(ref fdata) = &prop {
+        if let CfmlValue::Function(ref _fdata) = &prop {
             let func_ref = prop.clone();
             let args: Vec<CfmlValue> = extra_args.drain(..).collect();
-            // Bind 'this' to the object + inject component variables scope
+            // Bind 'this' / __variables ONLY when the receiver is an actual CFC.
+            // For plain struct-stored closures (e.g. `enc = { string: fn }`), the
+            // closure should keep whatever `this` it captured at definition (or
+            // none) — setting `this = receiver` triggers method-writeback that
+            // replaces `enc` in the caller's locals with the closure's captured
+            // `this` on each subsequent call.
+            let receiver_is_cfc = matches!(
+                object,
+                CfmlValue::Struct(ref s) if s.contains_key("__variables") || s.contains_key("__name")
+            );
             let mut method_locals = IndexMap::new();
-            if let CfmlValue::Struct(ref s) = object {
-                if let Some(vars) = s.get("__variables") {
-                    method_locals.insert("__variables".to_string(), vars.clone());
+            if receiver_is_cfc {
+                if let CfmlValue::Struct(ref s) = object {
+                    if let Some(vars) = s.get("__variables") {
+                        method_locals.insert("__variables".to_string(), vars.clone());
+                    }
                 }
+                method_locals.insert("this".to_string(), object.clone());
             }
-            method_locals.insert("this".to_string(), object.clone());
             self.closure_parent_writeback = None;
+            // Save & clear method-writeback state so a stale `this` from the
+            // captured scope can't leak to the caller's CallMethod handler.
+            let saved_this_wb = self.method_this_writeback.take();
+            let saved_vars_wb = self.method_variables_writeback.take();
             let result = self.call_function(&func_ref, args, &method_locals)?;
             if let Some(ref wb) = self.closure_parent_writeback {
                 Self::write_back_to_captured_scope(&func_ref, wb);
             }
             // Clear writeback — component method calls don't leak to calling scope
             self.closure_parent_writeback = None;
+            if !receiver_is_cfc {
+                // Discard any method-writeback that the inner call set up; for
+                // plain struct receivers, there is no `this` to write back to.
+                self.method_this_writeback = saved_this_wb;
+                self.method_variables_writeback = saved_vars_wb;
+            }
             return Ok(result);
         }
 
@@ -8671,18 +8720,57 @@ impl CfmlVirtualMachine {
                 .position(|f| f.name == "__main__")
                 .unwrap_or(0);
             let cfc_func = self.program.functions[main_idx].clone();
-            // Snapshot user_functions before CFC body execution so we can detect
-            // functions added by cfinclude inside the component body
+
+            // Bug G fix: detect `extends="<parent>"` in the cfc body bytecode
+            // (codegen emits `String("__extends"); String(<parent>)` consecutively
+            // when building the component struct) and pre-resolve the parent so
+            // its `variables` scope is visible during child body execution. Without
+            // this, page-level statements that reference inherited helpers
+            // (e.g. `variables.encode.string(...)` from `taffy.core.resource`) throw
+            // because inheritance only merges AFTER the child body has run.
+            //
+            // We deliberately copy parent's __variables and let the existing filter
+            // in execute_function_with_args (line ~621) strip Function values —
+            // injecting parent methods into the child body's initial scope causes
+            // recursion through bound this/__variables (see TAFFY_NEXT_STEPS.md).
+            let parent_name: Option<String> =
+                cfc_func.instructions.windows(2).find_map(|w| match w {
+                    [BytecodeOp::String(s1), BytecodeOp::String(s2)] if s1 == "__extends" => {
+                        Some(s2.clone())
+                    }
+                    _ => None,
+                });
+            let injected_scope: IndexMap<String, CfmlValue> = if let Some(pname) = parent_name {
+                if let Some(parent_template) = self.resolve_component_template(&pname, locals) {
+                    let resolved_parent = self.resolve_inheritance(parent_template, locals);
+                    if let CfmlValue::Struct(ref ps) = resolved_parent {
+                        if let Some(CfmlValue::Struct(parent_vars)) = ps.get("__variables") {
+                            (**parent_vars).clone()
+                        } else {
+                            IndexMap::new()
+                        }
+                    } else {
+                        IndexMap::new()
+                    }
+                } else {
+                    IndexMap::new()
+                }
+            } else {
+                IndexMap::new()
+            };
+
+            // Snapshot user_functions AFTER parent resolution (parent body may have
+            // registered helper functions which should not be flagged as
+            // "added by cfinclude" inside this child body).
             let pre_exec_func_names: std::collections::HashSet<String> =
                 self.user_functions.keys().cloned().collect();
-            // CFC body executes with a clean scope — the caller's locals
-            // should NOT leak into the component being constructed.
+            // CFC body executes with a scope containing parent's variables (so
+            // unscoped lookups inside the child body resolve inherited values).
             // Mark as "__cfc_body__" so the VM treats it as function scope
-            // (prevents globals leaking into `variables` via LoadLocal)
+            // (prevents globals leaking into `variables` via LoadLocal).
             let mut cfc_body = (*cfc_func).clone();
             cfc_body.name = "__cfc_body__".to_string();
-            let clean_scope = IndexMap::new();
-            let _ = self.execute_function_with_args(&cfc_body, Vec::new(), Some(&clean_scope));
+            let _ = self.execute_function_with_args(&cfc_body, Vec::new(), Some(&injected_scope));
             self.source_file = old_source_file;
             // Capture component body variables
             let component_variables = self.captured_locals.take().unwrap_or_default();
@@ -8816,7 +8904,15 @@ impl CfmlVirtualMachine {
                         }
                         vars_scope.insert(k.clone(), CfmlValue::Function(clean));
                     } else {
-                        vars_scope.insert(k.clone(), v.clone());
+                        // Recursively fix Function indices inside nested Struct values
+                        // (e.g. `variables.encode = { string: function(d) {...} }` —
+                        // encode is a Struct whose `string` Function carries a sub-program
+                        // index that must be offset by cv_offset).
+                        let mut cloned = v.clone();
+                        if cv_offset > 0 {
+                            Self::fixup_func_indices(&mut cloned, cv_offset);
+                        }
+                        vars_scope.insert(k.clone(), cloned);
                     }
                 }
                 // Add all component methods (public + private) to variables scope
@@ -10103,9 +10199,11 @@ impl CfmlVirtualMachine {
                     }
                 }
             } else {
-                // Restore cached functions from onApplicationStart.
-                // Append them to the current program (which already has the page's
-                // functions + Application.cfc functions from load_application_cfc).
+                // Restore cached functions from onApplicationStart (and any
+                // subsequent requests that grew the program — see the request-end
+                // refresh below). Append them to the current program (which
+                // already has the page's functions + Application.cfc functions
+                // from load_application_cfc).
                 let cached = app.cached_functions.clone();
                 let original_offset = app.cached_functions_original_offset;
                 drop(apps);
@@ -10264,13 +10362,30 @@ impl CfmlVirtualMachine {
             }
         }
 
-        // 9. Write application scope back to ServerState
+        // 9. Write application scope back to ServerState. Also refresh
+        // cached_functions to include any functions registered DURING the request
+        // (e.g. Taffy's `?reload=true` triggers `setupFramework` in
+        // `onRequestStart`, which instantiates resource CFCs and appends factory
+        // beans to `self.program` AFTER `onApplicationStart` already returned).
+        // Without this refresh, later requests restore a stale cached_functions
+        // and any function values that the application scope captured during the
+        // request (e.g. `application._taffy.factory.getBean`) end up with body
+        // indices beyond the restored program length.
         if let Some(ref server_state) = self.server_state.clone() {
             if let Some(ref app_scope) = self.application_scope {
                 if let Ok(scope) = app_scope.lock() {
                     if let Ok(mut apps) = server_state.applications.lock() {
                         if let Some(app) = apps.get_mut(&app_name) {
                             app.variables = scope.clone();
+                            // Refresh cache from current program. Use the
+                            // original offset captured the first time
+                            // onApplicationStart ran; that anchor stays
+                            // constant for the lifetime of the application.
+                            let offset = app.cached_functions_original_offset;
+                            if offset > 0 && self.program.functions.len() > offset {
+                                app.cached_functions =
+                                    self.program.functions[offset..].to_vec();
+                            }
                         }
                     }
                 }
@@ -10507,7 +10622,7 @@ fn stack_effect(op: &BytecodeOp) -> (usize, usize) {
         BytecodeOp::SetIndex => (0, 3),       // obj + key + value → (modifies in place)
         BytecodeOp::GetProperty(_) => (1, 1), // obj → value
         BytecodeOp::LoadLocalProperty(_, _) => (1, 0), // pushes value, reads nothing
-        BytecodeOp::StoreLocalProperty(_, _) => (1, 0), // pops 1 (value), pushes 0
+        BytecodeOp::StoreLocalProperty(_, _) => (0, 1), // pops 1 (value), pushes 0
         BytecodeOp::SetProperty(_) => (0, 2), // obj + value → (modifies)
         BytecodeOp::GetKeys => (1, 1),
         BytecodeOp::ConcatArrays | BytecodeOp::MergeStructs => (1, 2),
@@ -10517,7 +10632,7 @@ fn stack_effect(op: &BytecodeOp) -> (usize, usize) {
         BytecodeOp::DefineFunction(_) => (1, 0),
         // Postfix: push 1 (new value)
         BytecodeOp::Increment(_) | BytecodeOp::Decrement(_) => (1, 0),
-        BytecodeOp::AddLocalConst(_, _) | BytecodeOp::MulLocalConst(_, _) => (1, 0), // reads + writes local, pops 0
+        BytecodeOp::AddLocalConst(_, _) | BytecodeOp::MulLocalConst(_, _) => (0, 0), // pure local mutation, no stack traffic
         // Exception handling
         BytecodeOp::TryStart(_) | BytecodeOp::TryEnd => (0, 0),
         BytecodeOp::Throw | BytecodeOp::Rethrow => (0, 1),
