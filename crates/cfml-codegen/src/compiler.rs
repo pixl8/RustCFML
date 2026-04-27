@@ -318,8 +318,40 @@ impl CfmlCompiler {
     pub fn compile(mut self, ast: Program) -> BytecodeProgram {
         let mut instructions = Vec::new();
 
-        for node in ast.statements {
-            self.compile_node(&node, &mut instructions);
+        // Hoist top-level function declarations: standard CFML behaviour is
+        // that <cffunction> / `function f(){}` declarations at template scope
+        // are callable from anywhere in the template, regardless of textual
+        // order. Compile each top-level FunctionDecl up front so its name is
+        // bound before the body runs, then re-emit DefineFunction+StoreLocal
+        // at the original textual position. The re-emit re-runs the
+        // closure-env sync (DefineFunction folds current locals into the
+        // shared closure env), preserving the snapshot semantics that
+        // existing scope-capture tests rely on.
+        let mut hoisted_indices: Vec<usize> = Vec::new();
+        for node in &ast.statements {
+            if let CfmlNode::Statement(Statement::FunctionDecl(fd)) = node {
+                self.compile_function_decl(&fd.func, &mut instructions);
+                // compile_function_decl ends with DefineFunction(idx) +
+                // StoreLocal(name); the function's idx is the one in that
+                // penultimate op (it is NOT len()-1 of program.functions
+                // because nested anon-fn decls inside the body push their
+                // own entries first).
+                let idx = match instructions.get(instructions.len().saturating_sub(2)) {
+                    Some(BytecodeOp::DefineFunction(i)) => *i,
+                    _ => panic!("compile_function_decl did not end with DefineFunction"),
+                };
+                hoisted_indices.push(idx);
+            }
+        }
+        let mut hoist_iter = hoisted_indices.into_iter();
+        for node in &ast.statements {
+            if let CfmlNode::Statement(Statement::FunctionDecl(fd)) = node {
+                let idx = hoist_iter.next().expect("hoist index");
+                instructions.push(BytecodeOp::DefineFunction(idx));
+                instructions.push(BytecodeOp::StoreLocal(fd.func.name.clone()));
+            } else {
+                self.compile_node(node, &mut instructions);
+            }
         }
 
         instructions.push(BytecodeOp::Halt);
