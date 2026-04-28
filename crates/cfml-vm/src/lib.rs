@@ -92,6 +92,53 @@ impl BytecodeCache {
     }
 }
 
+/// Lexically normalise a path: collapse `.` and `..` segments without
+/// touching the filesystem. Used by `<cfinclude>` so that
+/// `examples/api_empty/../dashboard/dashboard.cfm` resolves to
+/// `dashboard/dashboard.cfm`. Unlike `std::fs::canonicalize` this works on
+/// non-existent paths and does not resolve symlinks.
+fn normalize_path(path: &str) -> String {
+    use std::path::{Component, Path};
+    let p = Path::new(path);
+    let mut out: Vec<String> = Vec::new();
+    let mut leading_root: Option<String> = None;
+    let mut leading_prefix: Option<String> = None;
+    for comp in p.components() {
+        match comp {
+            Component::Prefix(pref) => {
+                leading_prefix = Some(pref.as_os_str().to_string_lossy().to_string());
+            }
+            Component::RootDir => {
+                leading_root = Some(std::path::MAIN_SEPARATOR.to_string());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(out.last().map(String::as_str), Some(s) if s != "..") {
+                    out.pop();
+                } else if leading_root.is_none() {
+                    out.push("..".to_string());
+                }
+            }
+            Component::Normal(seg) => {
+                out.push(seg.to_string_lossy().to_string());
+            }
+        }
+    }
+    let mut result = String::new();
+    if let Some(prefix) = leading_prefix {
+        result.push_str(&prefix);
+    }
+    if let Some(root) = leading_root {
+        result.push_str(&root);
+    }
+    result.push_str(&out.join(&std::path::MAIN_SEPARATOR.to_string()));
+    if result.is_empty() {
+        ".".to_string()
+    } else {
+        result
+    }
+}
+
 /// Compile a CFML file to bytecode, using the cache when available.
 /// When `cache` is None (CLI mode), always compiles fresh.
 /// Reads source from the provided VFS (real filesystem or embedded).
@@ -2773,7 +2820,7 @@ impl CfmlVirtualMachine {
                         let source_dir = std::path::Path::new(source)
                             .parent()
                             .unwrap_or_else(|| std::path::Path::new("."));
-                        source_dir.join(&path).to_string_lossy().to_string()
+                        normalize_path(&source_dir.join(&path).to_string_lossy())
                     } else {
                         path.clone()
                     };
@@ -2933,7 +2980,7 @@ impl CfmlVirtualMachine {
                         let source_dir = std::path::Path::new(source)
                             .parent()
                             .unwrap_or_else(|| std::path::Path::new("."));
-                        source_dir.join(&path).to_string_lossy().to_string()
+                        normalize_path(&source_dir.join(&path).to_string_lossy())
                     } else {
                         path.clone()
                     };
