@@ -3032,6 +3032,17 @@ impl Parser {
                     self.consume(&Token::RParen)?;
                     self.match_token(&Token::FatArrow); // consume =>
 
+                    // Block-bodied arrow function: `(p) => { stmt; stmt; }`
+                    // Compile as a closure so statements are supported.
+                    if self.check(&Token::LBrace) {
+                        let body = self.parse_block()?;
+                        return Ok(Expression::Closure(Box::new(Closure {
+                            params,
+                            body,
+                            location: self.current_location(),
+                        })));
+                    }
+
                     let body = self.parse_expression()?;
                     return Ok(Expression::ArrowFunction(Box::new(ArrowFunction {
                         params,

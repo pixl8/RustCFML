@@ -2762,6 +2762,18 @@ impl CfmlVirtualMachine {
                         }
                     }
 
+                    // Closure-mutation writeback: when a member-call higher-order
+                    // method (e.g. arr.each((x) => outer.append(x))) runs a closure
+                    // that mutates a captured outer-scope variable, propagate those
+                    // mutations into the caller's locals. The BIF flavour
+                    // (arrayEach/arrayMap/etc.) handles this via parent_locals
+                    // threading; the member-call path does not, so we merge here.
+                    if let Some(wb) = self.closure_parent_writeback.take() {
+                        for (k, v) in wb {
+                            self.scope_aware_store(&k, v, &mut locals);
+                        }
+                    }
+
                     stack.push(result);
                 }
 
@@ -7338,6 +7350,21 @@ impl CfmlVirtualMachine {
                 "toboolean" => Some("toBoolean"),
                 "ucfirst" => Some("ucFirst"),
                 "lcfirst" => Some("lcFirst"),
+                "timeformat" => Some("timeFormat"),
+                "dateformat" => Some("dateFormat"),
+                "datetimeformat" => Some("dateTimeFormat"),
+                "lstimeformat" => Some("lsTimeFormat"),
+                "lsdateformat" => Some("lsDateFormat"),
+                "lsdatetimeformat" => Some("lsDateTimeFormat"),
+                "parsedatetime" => Some("parseDateTime"),
+                "year" => Some("year"),
+                "month" => Some("month"),
+                "day" => Some("day"),
+                "hour" => Some("hour"),
+                "minute" => Some("minute"),
+                "second" => Some("second"),
+                "dayofweek" => Some("dayOfWeek"),
+                "dayofyear" => Some("dayOfYear"),
                 _ => None,
             },
             CfmlValue::Array(arr) => match method_lower.as_str() {

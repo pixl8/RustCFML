@@ -49,5 +49,21 @@ assert("arrayFindAll first index", ones[1], 1);
 assert("arrayFindAll second index", ones[2], 3);
 assert("arrayFindAll third index", ones[3], 5);
 
+// --- Closure mutating captured outer-scope variable via member .each() ---
+// The mutation must propagate back to the caller's scope. Both function-syntax
+// and arrow-syntax callbacks must work.
+collected = [];
+[1, 2, 3].each(function(n) { collected.append(n); });
+assert("member each propagates array append (fn)", arrayToList(collected), "1,2,3");
+
+collected2 = [];
+[1, 2, 3].each((n) => { collected2.append(n); });
+assert("member each propagates array append (arrow)", arrayToList(collected2), "1,2,3");
+
+// Query mutation via member each — the dashboard demo pattern.
+team = queryNew("name,role", "varchar,varchar");
+[{ name: "A", role: "X" }, { name: "B", role: "Y" }].each((m) => team.addRow(m));
+assert("member each propagates query addRow", team.recordcount, 2);
+
 suiteEnd();
 </cfscript>

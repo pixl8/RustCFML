@@ -1,7 +1,5 @@
 <cfscript>
 // Test arrow functions with multiple parameters
-include "../harness.cfm";
-
 suiteBegin("Arrow Functions");
 
 // Test 1: Single parameter arrow function
@@ -28,6 +26,20 @@ assertTrue("arrow reduce", total eq 15);
 // Test 6: Arrow function in array operations
 squared = arr.map((n) => n * n);
 assertTrue("arrow map square", arrayToList(squared) eq "1,4,9,16,25");
+
+// Test 7: Block-bodied arrow function
+addOne = (x) => { return x + 1; };
+assertTrue("block-body arrow single statement", addOne(4) eq 5);
+
+// Test 8: Block-bodied arrow with multiple statements
+items = [{ n: 1 }, { n: 2 }, { n: 3 }];
+mapped = items.map((it) => {
+    it.doubled = it.n * 2;
+    it.label = "n=" & it.n;
+    return it;
+});
+assertTrue("block-body arrow multi-statement doubled", mapped[2].doubled eq 4);
+assertTrue("block-body arrow multi-statement label", mapped[3].label eq "n=3");
 
 suiteEnd();
 </cfscript>
