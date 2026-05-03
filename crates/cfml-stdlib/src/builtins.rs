@@ -3053,6 +3053,32 @@ fn format_cfml_date(dt: &NaiveDateTime, mask: &str, mode: FormatMode) -> String 
     let mut result = String::new();
     let mut i = 0;
     while i < chars.len() {
+        // Single-quoted segments are emitted verbatim (Java SimpleDateFormat
+        // convention, also used by Lucee/ACF). `''` inside or outside a quoted
+        // segment yields a literal apostrophe.
+        if chars[i] == '\'' {
+            if i + 1 < chars.len() && chars[i + 1] == '\'' {
+                result.push('\'');
+                i += 2;
+                continue;
+            }
+            i += 1;
+            while i < chars.len() {
+                if chars[i] == '\'' {
+                    if i + 1 < chars.len() && chars[i + 1] == '\'' {
+                        result.push('\'');
+                        i += 2;
+                    } else {
+                        i += 1;
+                        break;
+                    }
+                } else {
+                    result.push(chars[i]);
+                    i += 1;
+                }
+            }
+            continue;
+        }
         if let Some((len, replacement)) = match_format_token(&chars, i, dt, mode) {
             result.push_str(&replacement);
             i += len;

@@ -65,5 +65,14 @@ team = queryNew("name,role", "varchar,varchar");
 [{ name: "A", role: "X" }, { name: "B", role: "Y" }].each((m) => team.addRow(m));
 assert("member each propagates query addRow", team.recordcount, 2);
 
+// Chained filter().sort() must not clobber the original array.
+// .sort() is "mutating" (writes back to receiver), but when chained after
+// .filter() the receiver is a new array, so the chain root must NOT be
+// rewritten with the sort result.
+src = [3, 1, 4, 1, 5, 9, 2, 6];
+chainSorted = src.filter((n) => n > 2).sort((a, b) => compare(a, b));
+assert("filter().sort() preserves original length", arrayLen(src), 8);
+assert("filter().sort() result", arrayToList(chainSorted), "3,4,5,6,9");
+
 suiteEnd();
 </cfscript>

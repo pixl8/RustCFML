@@ -300,7 +300,23 @@ impl CfmlCompiler {
                 }
                 Expression::MethodCall(call) => {
                     // For chained calls like a.b().c(), extract the root path
-                    // so all calls in the chain write back to the same variable
+                    // so all calls in the chain write back to the same variable.
+                    // BUT: if the inner method returns a new value distinct from
+                    // its receiver (filter/map/slice/etc.), the outer call is
+                    // operating on that new value, not on `a` — so propagating
+                    // the path would cause the outer call's result to clobber
+                    // `a`. Break the chain for known transformative methods.
+                    let inner_lower = call.method.to_lowercase();
+                    let is_transformative = matches!(
+                        inner_lower.as_str(),
+                        "filter" | "map" | "slice" | "reduce" | "tolist"
+                        | "toarray" | "tojson" | "serializejson" | "merge"
+                        | "splice" | "indexexists" | "keyarray" | "keylist"
+                        | "valuearray" | "copy"
+                    );
+                    if is_transformative {
+                        return false;
+                    }
                     collect_path(&call.object, path)
                 }
                 _ => false,

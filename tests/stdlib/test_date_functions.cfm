@@ -44,5 +44,12 @@ assertTrue("year(now()) > 2023", year(now()) > 2023);
 // --- getTickCount ---
 assertTrue("getTickCount() > 0", getTickCount() > 0);
 
+// --- Quoted literals in format masks (Java SimpleDateFormat convention) ---
+// Single-quoted segments are emitted verbatim; '' yields a literal apostrophe.
+d = createDateTime(2026, 5, 3, 12, 34, 56);
+assert("quoted literal T in mask", dateTimeFormat(d, "yyyy-MM-dd'T'HH:nn:ss'Z'"), "2026-05-03T12:34:56Z");
+assert("quoted text segment", dateFormat(d, "yyyy' year:'mmmm"), "2026 year:May");
+assert("escaped apostrophe", dateFormat(d, "yyyy''mm"), "2026'05");
+
 suiteEnd();
 </cfscript>
